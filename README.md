@@ -7,7 +7,7 @@ Go 백엔드가 날씨(국내 도시는 기상청 API, 해외 도시 및 폴백�
 ## 프로젝트 구조
 
 ```
-backend/    Go, 표준 라이브러리 위주 (net/http, sync, context) + MySQL(database/sql)
+backend/    Go, 표준 라이브러리 위주 (net/http, sync, context) + MySQL(database/sql) + Groq API
 frontend/   React + TypeScript (Vite)
 ```
 
