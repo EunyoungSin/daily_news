@@ -1,10 +1,8 @@
-# 브리핑 관제실 — 실시간 멀티소스 대시보드 + AI 브리핑 + 로또
+# 브리핑 관제실 — 실시간 멀티API 대시보드 + AI 브리핑 + 로또
 
-Go 백엔드가 날씨(국내 도시는 기상청 API, 해외 도시 및 폴백은 Open-Meteo) / 환율(Frankfurter) /
-뉴스(NewsData.io)를 병렬로 수집하고,
-그 결과를 Groq LLM에 넘겨 한국어 한 줄 브리핑을 생성합니다. 로또 섹션은 동행복권 공개 API로
-회차 데이터를 MySQL에 영구 저장하고, 그 통계를 Groq로 요약합니다. 프론트엔드는 React +
-TypeScript(Vite)로 구성되어 있습니다.
+Go 백엔드가 날씨(국내 도시는 기상청 API, 해외 도시 및 폴백은 Open-Meteo) / 환율(Frankfurter) / 뉴스(NewsData.io)를 오픈 API로 병렬로 수집하고, <br>
+그 결과를 Groq LLM에 넘겨 한국어 한 줄 브리핑을 생성합니다. 로또 섹션은 동행복권 공개 API로 회차 데이터를 MySQL에 영구 저장하고, 그 통계를 Groq로 요약합니다.<br>
+프론트엔드는 React + TypeScript(Vite)로 구성되어 있습니다.<br>
 
 ## 프로젝트 구조
 
