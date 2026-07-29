@@ -1,0 +1,1578 @@
+.app {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: var(--space-10) var(--space-6) var(--space-10);
+}
+
+/* ---------- 헤더 및 컨트롤 ---------- */
+
+.app__header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: var(--space-6);
+  padding-bottom: var(--space-5);
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.app__eyebrow {
+  margin: 0 0 var(--space-2);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-family: var(--font-data);
+}
+
+.app__title {
+  font-size: 32px;
+  font-weight: 700;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--space-4);
+}
+
+.controls__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+
+.controls__field select {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-control);
+  border: 1px solid var(--panel-border);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 13.5px;
+  transition: border-color 180ms ease-out, background 180ms ease-out;
+}
+
+.controls__field select:hover {
+  border-color: var(--panel-border-strong);
+}
+
+.controls__field select:focus-visible {
+  outline: none;
+  border-color: var(--accent-weather);
+}
+
+.controls__toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 13px;
+  color: var(--text-dim);
+  padding-bottom: var(--space-2);
+}
+
+/* 기존 네이티브 체크박스를 그대로 이용해 만든 커스텀 스위치 — 마크업 변경 없음 */
+.controls__toggle input[type='checkbox'] {
+  appearance: none;
+  width: 32px;
+  height: 19px;
+  border-radius: var(--radius-pill);
+  background: var(--panel-sunken);
+  border: 1px solid var(--panel-border);
+  position: relative;
+  cursor: pointer;
+  transition: background 200ms ease-out, border-color 200ms ease-out;
+  flex-shrink: 0;
+}
+
+.controls__toggle input[type='checkbox']::after {
+  content: '';
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  transition: transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1), background 200ms ease-out;
+}
+
+.controls__toggle input[type='checkbox']:checked {
+  background: color-mix(in srgb, var(--accent-weather) 35%, var(--panel-sunken));
+  border-color: color-mix(in srgb, var(--accent-weather) 50%, transparent);
+}
+
+.controls__toggle input[type='checkbox']:checked::after {
+  transform: translateX(13px);
+  background: var(--accent-weather);
+}
+
+/* "조회"와 "지금 새로고침" 버튼이 공유하는 스타일 — 컨트롤 행에서
+   API를 호출하는 두 버튼 모두 같은 모양을 쓴다. "조회"는 드롭다운에서
+   선택만 하고 아직 적용하지 않은 상태일 때 --pending 클래스가 추가로
+   붙지만(아래 참고), 새로고침에는 그런 상태가 없다 — 항상 현재 적용된
+   파라미터로 다시 요청할 뿐, 대기 중인 값이라는 개념 자체가 없기 때문이다. */
+.controls__action {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-control);
+  border: 1px solid var(--panel-border);
+  background: var(--panel-alt);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  transition: transform 180ms ease-out, background 180ms ease-out, box-shadow 180ms ease-out, border-color 180ms ease-out;
+}
+
+.controls__action:hover:not(:disabled) {
+  background: var(--panel-sunken);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-card);
+}
+
+.controls__action:active:not(:disabled) {
+  transform: translateY(0) scale(0.98);
+}
+
+.controls__action:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* 도시/통화 드롭다운은 조회를 눌러야 반영된다 — 대기 중인 변경사항이
+   있으면 강조색으로 눈에 띄게 해서 "눌러야 함"을 유도한다. */
+.controls__action--pending {
+  background: color-mix(in srgb, var(--accent-briefing) 22%, var(--panel-alt));
+  border-color: color-mix(in srgb, var(--accent-briefing) 55%, transparent);
+  color: var(--text);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-briefing) 16%, transparent);
+}
+
+.controls__action--pending:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-briefing) 30%, var(--panel-alt));
+}
+
+.controls__action-spinner {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--text) 30%, transparent);
+  border-top-color: var(--text);
+  animation: controls-action-spin 700ms linear infinite;
+}
+
+@keyframes controls-action-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ---------- 상태 표시줄 ---------- */
+
+.app__status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-4) 2px var(--space-1);
+  font-family: var(--font-data);
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.app__status-hint {
+  color: color-mix(in srgb, var(--accent-briefing) 80%, var(--text-dim));
+  font-weight: 600;
+}
+
+.app__status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-weather);
+  box-shadow: 0 0 0 0 rgba(73, 199, 217, 0.6);
+  animation: pulse 1.8s ease-out infinite;
+}
+
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(73, 199, 217, 0.55); }
+  70% { box-shadow: 0 0 0 7px rgba(73, 199, 217, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(73, 199, 217, 0); }
+}
+
+.app__banner {
+  margin-top: var(--space-4);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-control);
+  background: rgba(255, 122, 122, 0.1);
+  border: 1px solid rgba(255, 122, 122, 0.35);
+  color: var(--accent-danger);
+  font-size: 14px;
+}
+
+.app__banner button {
+  border: 1px solid rgba(255, 122, 122, 0.5);
+  background: transparent;
+  color: var(--accent-danger);
+  padding: var(--space-2) var(--space-3);
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  transition: background 180ms ease-out;
+}
+
+.app__banner button:hover {
+  background: rgba(255, 122, 122, 0.12);
+}
+
+/* ---------- 그리드 ---------- */
+
+.dashboard-grid {
+  margin-top: var(--space-6);
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-4);
+}
+
+.dashboard-grid > .card--briefing {
+  grid-column: 1 / -1;
+}
+
+/* weather/exchange/news를 감싸는 래퍼. 위의 .card--briefing과 마찬가지로
+   조건 없이 항상 .dashboard-grid의 현재 컬럼 수 전체를 차지한다 — 이
+   3개 카드가 실제로 어떻게 배치되는지는 이 요소 자체의 내부 레이아웃
+   (기본은 세로 스택, >=1024px에서는 3열 그리드가 되며 파일 끝의
+   desktop-compact 블록 참고)이 결정하며, 바깥 그리드의 컬럼 수와는
+   무관하다. */
+.dashboard-grid > .dashboard-grid__row1 {
+  grid-column: 1 / -1;
+}
+
+.dashboard-grid__row1 {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+@media (max-width: 860px) {
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.dashboard-grid--lotto {
+  grid-template-columns: 1fr;
+  margin-top: var(--space-4);
+}
+
+/* ---------- 카드 셸(shell) ---------- */
+
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-6);
+  border-radius: var(--radius-card);
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+  --card-accent: var(--text-dim);
+  min-height: 0;
+}
+
+.card::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: var(--card-accent);
+  opacity: 0.8;
+}
+
+.card--weather {
+  --card-accent: var(--accent-weather);
+  border-color: color-mix(in srgb, var(--accent-weather) 14%, var(--panel-border));
+}
+.card--exchange {
+  --card-accent: var(--accent-exchange);
+  border-color: color-mix(in srgb, var(--accent-exchange) 14%, var(--panel-border));
+}
+.card--news {
+  --card-accent: var(--accent-news);
+  border-color: color-mix(in srgb, var(--accent-news) 14%, var(--panel-border));
+}
+.card--lotto {
+  --card-accent: var(--accent-lotto);
+  border-color: color-mix(in srgb, var(--accent-lotto) 14%, var(--panel-border));
+}
+
+.card__header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+}
+
+/* 높이가 0인 "줄바꿈용" flex 아이템 — order로 뒤에 오는 요소(.card__header-tabs
+   그룹)를 새 줄로 강제로 내리면서도, 그 요소 자체는 줄 전체로 늘어나지
+   않게 하는 표준 트릭이다(만약 이 아이템의 flex-basis를 100%로 주면
+   줄바꿈은 되지만 요소 자체도 풀와이드로 렌더링되어, 자기 콘텐츠 크기만큼만
+   차지해야 하는 작은 pill 버튼 그룹에는 어울리지 않는 모양이 된다). 탭이
+   없는 헤더에서는 뒤에 줄바꿈할 대상이 없으므로 아무 영향이 없다.
+   >=1024px에서는 탭이 인라인으로 배치되므로 이 트릭을 무효화한다. */
+.card__header::after {
+  content: '';
+  order: 3;
+  flex-basis: 100%;
+  height: 0;
+}
+
+.card__title {
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  /* 헤더 안의 나머지 요소들을 전부 오른쪽 끝으로 밀어낸다 — .card__duration
+     하나만 있든(2개 아이템) 탭 그룹까지 있든(아래 .card__header-tabs 참고)
+     똑같이 동작한다. justify-content: space-between을 쓰면 "모든 아이템
+     사이 간격이 동일"해져서 중간 아이템이 마지막 아이템과 묶이지 못하고
+     따로 떨어져 보이는데, margin-right: auto는 그런 문제 없이 원하는
+     그룹핑을 만들어준다. */
+  margin-right: auto;
+  order: 1;
+}
+
+.card__duration {
+  display: inline-flex;
+  align-items: center;
+  /* 모바일에서는 title 바로 뒤에 온다(order:2) — 탭 그룹이 있다면 그
+     뒤에서 (order:3의 ::after 줄바꿈 다음인) order:4로 자기만의 줄로
+     넘어간다. >=1024px 미디어쿼리에서는 탭 그룹이 title과 duration
+     사이로 옮겨진다. */
+  order: 2;
+  gap: 6px;
+  font-family: var(--font-data);
+  font-size: 11px;
+  color: var(--text-faint);
+  background: var(--panel-alt);
+  padding: 4px var(--space-2) 4px 6px;
+  border-radius: var(--radius-pill);
+}
+
+/* 그대로 두면 헤더 아래 자기만의 줄 전체를 차지하게 될 뷰모드 탭
+   그룹에 (카드 고유의 탭 그룹 클래스, 예: .briefing__tabs와 함께)
+   적용한다. 모바일에서는 지금도 그렇게 동작한다 — order:3 +
+   flex-basis:100%가 title+duration 아래 줄로 강제 줄바꿈시키며, 이는
+   현재 레이아웃과 동일하다. >=1024px에서는 (그리드 규칙 근처의
+   미디어쿼리 참고) 대신 title과 duration pill 사이에 인라인으로
+   배치된다. */
+.card__header-tabs {
+  order: 4;
+  width: fit-content;
+}
+
+.card__duration-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--card-accent);
+  opacity: 0.5;
+  transition: opacity 300ms ease-out;
+}
+
+.card__duration-dot--pulse {
+  opacity: 1;
+  animation: duration-pulse 900ms ease-out;
+}
+
+@keyframes duration-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--card-accent) 65%, transparent); }
+  70% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--card-accent) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--card-accent) 0%, transparent); }
+}
+
+.card__body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.card__error {
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  text-align: center;
+  padding: var(--space-3) 0;
+  color: var(--text-dim);
+  font-size: 14px;
+}
+
+.card__error button {
+  border: 1px solid rgba(255, 122, 122, 0.45);
+  background: rgba(255, 122, 122, 0.08);
+  color: var(--accent-danger);
+  padding: var(--space-2) var(--space-4);
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  transition: background 180ms ease-out, transform 180ms ease-out;
+}
+
+.card__error button:hover:not(:disabled) {
+  background: rgba(255, 122, 122, 0.16);
+}
+
+.card__error button:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.card__error button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* ---------- 스켈레톤: 대체할 실제 콘텐츠와 비슷한 모양으로 ---------- */
+
+.skeleton-line {
+  display: block;
+  border-radius: 5px;
+  background: linear-gradient(100deg, var(--panel-alt) 40%, var(--panel-sunken) 50%, var(--panel-alt) 60%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+}
+
+.skeleton-circle {
+  border-radius: 50%;
+  background: linear-gradient(100deg, var(--panel-alt) 40%, var(--panel-sunken) 50%, var(--panel-alt) 60%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.card--skeleton {
+  gap: var(--space-4);
+}
+
+.card--skeleton .skeleton-header {
+  height: 11px;
+  width: 64px;
+  border-radius: 5px;
+}
+
+.card--skeleton .skeleton-weather-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.card--skeleton .skeleton-weather-row .skeleton-circle {
+  width: 44px;
+  height: 44px;
+}
+
+.card--skeleton .skeleton-weather-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.card--skeleton .skeleton-line--number {
+  height: 30px;
+  width: 55%;
+}
+
+.card--skeleton .skeleton-line--sm {
+  height: 11px;
+  width: 40%;
+}
+
+.card--skeleton .skeleton-line--row {
+  height: 13px;
+  width: 100%;
+}
+
+.card--skeleton .skeleton-news-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.card--skeleton .skeleton-news-row .skeleton-circle {
+  width: 16px;
+  height: 16px;
+}
+
+.card--skeleton.card--briefing .skeleton-line--row {
+  height: 13px;
+  width: 100%;
+}
+
+.card--skeleton.card--briefing .skeleton-line--row:last-child {
+  width: 70%;
+}
+
+/* ---------- 날씨 ---------- */
+
+.weather__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-height: 0;
+}
+
+/* 예보가 짧아서 생기는 빈 공간을 그냥 두지 않고 카드의 남은 높이를
+   채우면서, 내용이 넘칠 때는 카드를 더 키우는 대신 내부에서 스크롤되게
+   하는 부분 — desktop-compact 블록의 row1 동일 높이 설정 참고. 이
+   flex/overflow 설정은 상위 요소가 이 카드의 높이를 제한할 때
+   (>=1024px)만 실제로 의미가 있다. 그보다 좁은 너비에서는 채울 여분
+   공간도, 넘칠 콘텐츠도 없으므로 아무 효과가 없다(no-op). */
+.weather__content {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-4);
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* 이걸 지정하지 않으면 overflow-x도 auto로 계산된다(CSS 스펙상 한
+     축이 visible이 아니게 되면 나머지 "visible" 축도 auto처럼
+     동작하도록 강제된다) — 서브픽셀 레이아웃에서 생기는 몇 px의
+     오차만으로도 원치 않는 가로 스크롤바가 나타나기에 충분하다. */
+  overflow-x: hidden;
+}
+
+.weather__city-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 12.5px;
+  color: var(--text-faint);
+  margin-top: -4px;
+}
+
+.weather__source-badge {
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--panel-alt);
+  color: var(--text-faint);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: color 200ms ease-out, background 200ms ease-out;
+}
+
+.weather__periods {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-3);
+  /* briefing 카드의 탭 전환과 동일한 fade 타이밍을 재사용한다. */
+  animation: fade-in 200ms ease-out;
+}
+
+.weather__periods--two {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.weather__period {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: var(--space-3) var(--space-2);
+  border-radius: var(--radius-control);
+  background: var(--panel-alt);
+  text-align: center;
+  min-width: 0;
+}
+
+.weather__period-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  text-transform: uppercase;
+}
+
+/* 백엔드가 값을 가져오지 못했거나(또는 신뢰할 수 없어서) 표시하지
+   않는 구간 — 예를 들어 당일인데 이미 지나간 시간대이거나
+   sanity-check에서 걸러진 경우(backend/models.go의 PeriodForecast
+   문서 주석 참고). 0°로 표시하면 마치 실제 데이터인 것처럼 오해할 수
+   있으므로, 온도 대신 있는 그대로 "값 없음"을 보여준다. */
+.weather__period--unavailable {
+  justify-content: center;
+  min-height: 84px;
+}
+
+.weather__period-na {
+  font-size: 12.5px;
+  color: var(--text-faint);
+}
+
+.weather__period-glyph {
+  font-size: 26px;
+  line-height: 1;
+}
+
+.weather__period-temp {
+  font-family: var(--font-data);
+  font-size: 22px;
+  font-weight: 300;
+  color: var(--text);
+  line-height: 1.1;
+}
+
+.weather__period-desc {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.weather__precip {
+  font-family: var(--font-data);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.weather__precip--high {
+  color: var(--accent-weather);
+  font-weight: 700;
+  background: color-mix(in srgb, var(--accent-weather) 16%, transparent);
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+}
+
+/* .weather__stats와 .weather__detail-link를 감싼다 — 예전에는 각자
+   자기만의 줄을 차지하던 두 "footer" 요소다. 모바일에서는 세로로
+   쌓이며(각자 border/gap을 따로 관리하던 전과 보기엔 동일하지만
+   이제는 하나의 공유 border/gap 아래 있음), >=1024px 미디어쿼리에서는
+   가로 한 줄로 바뀌어 링크가 오른쪽으로 정렬된다. */
+.weather__footer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--panel-border);
+}
+
+.weather__stats {
+  display: flex;
+  flex: 1;
+  justify-content: space-between;
+  margin: 0;
+  font-size: 12px;
+}
+
+.weather__stats dt {
+  color: var(--text-faint);
+  margin-bottom: 2px;
+  font-size: 11px;
+}
+
+.weather__stats dd {
+  margin: 0;
+  font-family: var(--font-data);
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.weather__detail-link {
+  align-self: flex-start;
+  padding: 5px 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: color 200ms ease-out, border-color 200ms ease-out, background 200ms ease-out;
+}
+
+.weather__detail-link:hover {
+  color: var(--text-dim);
+  border-color: var(--panel-border-strong);
+  background: var(--panel-alt);
+}
+
+@media (max-width: 480px) {
+  .weather__periods {
+    display: flex;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+  }
+
+  .weather__period {
+    flex: 0 0 100px;
+    scroll-snap-align: start;
+  }
+}
+
+/* ---------- 환율 ---------- */
+
+.exchange__body {
+  gap: var(--space-1);
+  min-height: 0;
+}
+
+/* .weather__content와 동일하게 "남는 높이를 채우고, 넘치면 내부
+   스크롤"하는 역할 — 그쪽 주석 참고. */
+.exchange__content {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-1);
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* 이 조합에 대해서는 .weather__content의 주석 참고 — 이게 없으면
+     recharts SVG의 서브픽셀 너비 오차만으로도 가로 스크롤바가
+     나타나기에 충분하다. */
+  overflow-x: hidden;
+}
+
+/* pair와 date를 하나로 묶는다(예전에는 date가 카드 하단에 고정되어
+   있었다) — 모바일에서는 세로로 쌓이고 데스크톱에서는 한 줄로;
+   >=1024px 미디어쿼리 참고. */
+.exchange__meta-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.exchange__pair {
+  font-size: 12.5px;
+  color: var(--text-faint);
+  font-family: var(--font-data);
+}
+
+.exchange__rate {
+  font-family: var(--font-data);
+  font-size: 36px;
+  font-weight: 300;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+
+/* hint와 yesterday를 하나로 묶는다 — 모바일에서는 세로로 쌓이고
+   데스크톱에서는 한 줄로 배치된다. */
+.exchange__hint-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.exchange__hint {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.exchange__yesterday {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  font-family: var(--font-data);
+}
+
+.exchange__yesterday-arrow {
+  font-size: 10px;
+}
+
+.exchange__yesterday--rise {
+  color: var(--fx-rise);
+}
+
+.exchange__yesterday--fall {
+  color: var(--fx-fall);
+}
+
+.exchange__chart {
+  margin: var(--space-3) -4px 0;
+}
+
+.exchange__chart-tooltip {
+  padding: 6px var(--space-2);
+  border-radius: var(--radius-control);
+  background: var(--panel-sunken);
+  border: 1px solid var(--panel-border-strong);
+  box-shadow: var(--shadow-card);
+  font-size: 11.5px;
+}
+
+.exchange__chart-tooltip-date {
+  color: var(--text-faint);
+}
+
+.exchange__chart-tooltip-rate {
+  color: var(--text);
+  font-family: var(--font-data);
+  font-weight: 600;
+}
+
+.exchange__chart-skeleton {
+  height: 100px;
+  border-radius: var(--radius-control);
+  background: linear-gradient(100deg, var(--panel-alt) 40%, var(--panel-sunken) 50%, var(--panel-alt) 60%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+}
+
+.exchange__chart-empty {
+  height: 100px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-faint);
+  border: 1px dashed var(--panel-border);
+  border-radius: var(--radius-control);
+}
+
+.exchange__date {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+/* ---------- 뉴스 ---------- */
+
+.news__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-height: 0;
+}
+
+/* .weather__content와 동일하게 "남는 높이를 채우고, 넘치면 내부
+   스크롤"하는 역할 — 그쪽 주석 참고. weather/exchange와 달리 news의
+   콘텐츠(헤드라인 목록)는 실제로 스크롤이 필요해지는 경우가 가장
+   많으므로 여기서는 justify-content: center를 쓰지 않는다 — 스크롤되는
+   목록은 위아래 여백과 함께 가운데 정렬되는 것보다 맨 위부터 시작하는
+   편이 더 자연스럽게 읽힌다. */
+.news__content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* 이 조합에 대해서는 .weather__content의 주석 참고. */
+  overflow-x: hidden;
+}
+
+/* 카테고리 pill과 region 탭을 감싼다 — 모바일에서는 세로로 쌓인다
+   (.news__body의 평범한 형제 요소였을 때와 모양·gap이 동일함),
+   >=1024px 미디어쿼리에서 한 줄로 바뀌어 함께 배치된다. */
+.news__controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.news__category-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.news__category-pill {
+  padding: 6px 11px;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-pill);
+  background: var(--panel-alt);
+  color: var(--text-dim);
+  font-size: 12.5px;
+  font-weight: 600;
+  transition: color 200ms ease-out, border-color 200ms ease-out, background 200ms ease-out;
+}
+
+.news__category-pill:hover {
+  color: var(--text);
+  border-color: var(--panel-border-strong);
+}
+
+.news__category-pill--active {
+  background: color-mix(in srgb, var(--accent-news) 22%, var(--panel-alt));
+  border-color: color-mix(in srgb, var(--accent-news) 45%, transparent);
+  color: var(--text);
+}
+
+.news__region-tabs {
+  margin-bottom: 0;
+}
+
+.news__translation-fallback {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.news__notice {
+  margin: 0 0 var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-control);
+  background: var(--panel-alt);
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.news__skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.news__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.news__item {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  gap: var(--space-3);
+  font-size: 13.5px;
+}
+
+.news__rank {
+  font-family: var(--font-data);
+  color: var(--text-faint);
+  font-weight: 500;
+  font-size: 12px;
+  padding-top: 2px;
+}
+
+.news__item-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.news__link {
+  color: var(--text);
+  text-decoration: none;
+  line-height: 1.45;
+  transition: color 150ms ease-out;
+}
+
+.news__link:hover {
+  color: var(--accent-news);
+  text-decoration: underline;
+}
+
+.news__item-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.news__source {
+  font-family: var(--font-data);
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.news__item-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.news__item-toggle-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 4px;
+  transition: color 200ms ease-out;
+}
+
+.news__item-toggle-btn:hover {
+  color: var(--text-dim);
+}
+
+.news__item-toggle-btn--active {
+  color: var(--accent-news);
+}
+
+.news__item-toggle-sep {
+  color: var(--text-faint);
+}
+
+/* ---------- 브리핑 (시각적으로 구별됨: 3개 소스의 "종합") ---------- */
+
+.card--briefing {
+  --card-accent: linear-gradient(
+    90deg,
+    var(--accent-weather),
+    var(--accent-exchange),
+    var(--accent-news),
+    var(--accent-briefing)
+  );
+  background:
+    radial-gradient(circle at 0% 0%, color-mix(in srgb, var(--accent-weather) 8%, transparent), transparent 55%),
+    radial-gradient(circle at 100% 0%, color-mix(in srgb, var(--accent-news) 8%, transparent), transparent 55%),
+    var(--panel);
+  border-color: color-mix(in srgb, var(--accent-briefing) 18%, var(--panel-border));
+  box-shadow: var(--shadow-briefing);
+  padding: var(--space-6);
+}
+
+.card--briefing::before {
+  background: var(--card-accent);
+  opacity: 1;
+  height: 3px;
+}
+
+.card--briefing .card__title {
+  color: var(--text);
+}
+
+.briefing__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  font-family: var(--font-data);
+  font-size: 10px;
+  font-weight: 700;
+  color: #14151b;
+  background: linear-gradient(135deg, var(--accent-weather), var(--accent-briefing));
+}
+
+.briefing__tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--panel-sunken);
+  width: fit-content;
+}
+
+.briefing__tab {
+  padding: 6px 16px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background 200ms ease-out, color 200ms ease-out;
+}
+
+.briefing__tab:hover {
+  color: var(--text);
+}
+
+.briefing__tab--active {
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: var(--shadow-card);
+}
+
+.briefing__tab--active:hover {
+  color: var(--text);
+}
+
+.briefing__text {
+  /* padding-top이 없는 이유: 예전에는 .card__body 안에서 이 요소 앞에
+     탭이 있었고 그 간격 때문에 padding이 필요했지만, 지금은 그 탭이
+     .card__header로 옮겨갔다 — .card 자체의 header/body 간 gap만으로
+     충분하다. */
+  animation: fade-in 200ms ease-out;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.briefing__sentence {
+  font-size: 16.5px;
+  line-height: 1.75;
+  color: var(--text);
+  margin: 0 0 var(--space-2);
+}
+
+.briefing__sentence:last-child {
+  margin-bottom: 0;
+}
+
+.briefing__section {
+  margin: 0 -8px var(--space-2);
+  padding: 2px 8px;
+  border-radius: 10px;
+  transition: background 400ms ease-out;
+}
+
+.briefing__section:last-child {
+  margin-bottom: 0;
+}
+
+/* 이번 요청에서 실제로 재생성된 섹션(weather/exchange/news) 하나에만
+   잠깐 색을 입혔다가 서서히 사라지게 한다 — 나머지 두 섹션의 텍스트는
+   변경되지 않고 캐시에서 그대로 재사용되었음을 알려주는 시각적 신호다. */
+.briefing__section--fresh {
+  animation: briefing-section-fresh 2.5s ease-out;
+}
+
+@keyframes briefing-section-fresh {
+  0% { background: color-mix(in srgb, var(--accent-briefing) 22%, transparent); }
+  100% { background: transparent; }
+}
+
+.briefing__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--panel-border);
+  font-size: 11.5px;
+  font-family: var(--font-data);
+  color: var(--text-faint);
+}
+
+.briefing__cached-badge {
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--panel-alt);
+  color: var(--text-dim);
+}
+
+.briefing__skeleton {
+  gap: var(--space-3);
+  padding-top: var(--space-2);
+}
+
+.briefing__skeleton-line {
+  display: block;
+  height: 14px;
+  border-radius: 6px;
+  background: linear-gradient(100deg, var(--panel-alt) 40%, var(--panel-sunken) 50%, var(--panel-alt) 60%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+}
+
+.briefing__skeleton-line--short {
+  width: 60%;
+}
+
+/* ---------- 로또 ---------- */
+
+.lotto__body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-6);
+  align-items: start;
+}
+
+@media (max-width: 860px) {
+  .lotto__body {
+    grid-template-columns: 1fr;
+  }
+}
+
+.lotto__col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-width: 0;
+}
+
+.lotto__section-title {
+  margin: 0 0 var(--space-3);
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.lotto__latest-meta {
+  font-family: var(--font-data);
+  font-size: 12.5px;
+  color: var(--text-faint);
+  margin-bottom: var(--space-3);
+}
+
+.lotto__balls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.lotto__plus {
+  color: var(--text-faint);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.lotto__ball {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  font-family: var(--font-data);
+  font-size: 14px;
+  font-weight: 700;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25), inset 0 1px 1px rgba(255, 255, 255, 0.35);
+  flex-shrink: 0;
+}
+
+.lotto__ball--sm {
+  width: 24px;
+  height: 24px;
+  font-size: 11px;
+}
+
+.lotto__ball--bonus {
+  outline: 2px solid var(--panel-border-strong);
+  outline-offset: 2px;
+}
+
+.lotto__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.lotto__insight-text {
+  font-size: 14.5px;
+  line-height: 1.7;
+  color: var(--text);
+  white-space: pre-line;
+}
+
+.lotto__insight-fallback {
+  font-size: 14px;
+  color: var(--text-dim);
+}
+
+.lotto__history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.lotto__history-row {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--panel-border);
+  font-size: 12.5px;
+}
+
+.lotto__history-row:last-child {
+  border-bottom: none;
+}
+
+.lotto__history-no {
+  font-family: var(--font-data);
+  color: var(--text-dim);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.lotto__history-date {
+  font-family: var(--font-data);
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.lotto__history-balls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  justify-self: end;
+}
+
+.lotto__heatmap {
+  display: grid;
+  grid-template-columns: repeat(9, 1fr);
+  gap: 3px;
+}
+
+.lotto__heat-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  aspect-ratio: 1;
+  border-radius: 6px;
+  color: var(--text);
+}
+
+.lotto__heat-num {
+  font-family: var(--font-data);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.lotto__heat-count {
+  font-family: var(--font-data);
+  font-size: 9px;
+  color: var(--text-dim);
+}
+
+.lotto__heat-legend {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.lotto__heat-gradient {
+  flex: 1;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--accent-lotto) 12%, var(--panel-sunken)),
+    var(--accent-lotto)
+  );
+}
+
+.lotto__disclaimer {
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--panel-border);
+  font-size: 11.5px;
+  color: var(--text-faint);
+  text-align: center;
+}
+
+.lotto__recommendation {
+  padding: var(--space-3);
+  background: var(--panel-alt);
+  border-radius: var(--radius-control);
+}
+
+.lotto__rec-ball-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.lotto__rec-group-icon {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.lotto__rec-disclaimer {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin: var(--space-2) 0 0;
+  padding-top: var(--space-2);
+  border-top: 1px dashed var(--panel-border);
+}
+
+.lotto__rec-blackout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  font-size: 13.5px;
+  color: var(--text-dim);
+}
+
+.lotto__rec-blackout p {
+  margin: 0;
+}
+
+.lotto__rec-countdown {
+  font-family: var(--font-data);
+  font-weight: 700;
+  color: var(--accent-lotto);
+}
+
+.lotto__skeleton {
+  gap: var(--space-4);
+}
+
+.lotto__skeleton .skeleton-weather-row {
+  display: flex;
+  gap: var(--space-2);
+}
+
+/* ---------- 데스크톱 컴팩트 모드 (>=1024px) ----------
+   일부러 파일 맨 마지막에 둔다: 이 블록의 여러 규칙은 앞쪽에 있는
+   동일한 specificity의 기본 규칙(예: .weather__footer의
+   flex-direction)을 덮어써야 하는데, cascade layer가 없는 일반
+   스타일시트에서는 미디어쿼리 조건뿐 아니라 소스 순서도 어느 쪽이
+   이기는지를 결정하기 때문이다. 1024px 미만에서는 이 블록 위의 모든
+   내용이 그대로 적용된다 — 모바일과 태블릿은 지금까지와 똑같은
+   세로 스택 레이아웃을 유지한다.
+
+   1024px 이상에서 목표로 하는 것은 단순한 "더 컴팩트하게"보다 강력하다:
+   weather, exchange, news를 하나의 그리드 행에 나란히 배치해서(그러면
+   CSS Grid의 기본값인 align-items:stretch 덕분에 별도의 JS나 수동
+   높이 맞춤 없이도 세 카드의 높이가 저절로 같아진다), 그 행에는
+   "셋 중 가장 큰 카드가 자연스럽게 필요로 하는 높이"(화면에 다 안
+   들어갈 수도 있는 값) 대신 명시적인 높이 예산을 부여하며, 4개 카드
+   전체 블록(row1 + briefing)은 뷰포트 높이로 상한을 둬서 페이지
+   전체를 보기 위해 스크롤할 필요가 없게 한다 — briefing은 row1이
+   차지하고 남은 만큼을 차지하고, 텍스트가 길어지면 내부에서
+   스크롤된다. 이 예산 안에서 실제로 늘어나거나 스크롤되는 것은 각
+   카드 고유의 .xxx__content 영역(weather__content 등 참고)이며,
+   카드 셸 자체는 자신의 그리드 셀 밖으로 절대 커지지 않는다. */
+@media (min-width: 1024px) {
+  /* 그리드 위쪽 헤더 chrome(title/controls/status row)은 이 앱의 실제
+     레이아웃에서 약 192px를 차지한다 — 추측이 아니라 실제 페이지를
+     측정해서 나온 값이다. 이 chrome의 높이가 나중에 바뀌면(예: 에러
+     배너가 나타나는 경우) 아래의 .card--briefing max-height도 함께
+     다시 측정해서 갱신해야 한다 — 둘은 같은 뷰포트 예산을 나눠 가진
+     한 쌍이기 때문이다.
+
+     row1은 "auto"가 아니라 고정 390px이며, 1440x900/1920x1080 실제
+     화면에서 콘텐츠를 보며 튜닝한 값이다 — weather나 exchange가
+     아니라 news의 필요에 맞춰 일부러 이렇게 정했다(5개 헤드라인 중
+     약 3개만 보이고 나머지는 .news__content의 내부 스크롤로 넘어간다).
+     weather와 exchange의 콘텐츠는 더 짧아서 스크롤이 필요 없이 여백을
+     좀 더 두고 가운데 정렬되는 정도다. .card--briefing은 calc()로
+     "뷰포트에서 남은 만큼"을 정확히 가져가므로, 둘을 합쳐도 100vh를
+     절대 넘지 않는다: 화면 높이 900px에서는 여유가 빠듯해서(briefing이
+     긴 날에는 자체 스크롤이 필요할 수 있음) 1080px에서는 여유 공간이
+     더 있어서 briefing이 그만큼 더 받는다. */
+  .dashboard-grid__row1 {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    height: 415px;
+    min-height: 0;
+  }
+
+  .dashboard-grid__row1 > .card {
+    min-height: 0;
+  }
+
+  .card--briefing {
+    min-height: 0;
+    /* 192px chrome + 415px row1 + 그 사이 16px(--space-4) gap. */
+    max-height: calc(100vh - 623px);
+  }
+
+  .card--briefing .card__body {
+    overflow-y: auto;
+    /* 이 조합이 왜 중요한지는 파일 앞쪽의 .weather__content 주석 참고
+       — 이게 없으면 overflow-x도 조용히 auto로 계산되어, 몇 px의
+       오차만으로 가로 스크롤바가 나타난다. */
+    overflow-x: hidden;
+  }
+
+  .card {
+    padding: var(--space-5);
+    gap: var(--space-3);
+  }
+
+  /* 헤더 탭 그룹(.card__header-tabs, 기본 규칙 참고)이 모바일에서만
+     보이던 "자기만의 줄 전체 차지" 동작을 여기서는 없앤다 — 대신
+     title과 duration pill 사이에 인라인으로 배치되며, 모바일에서
+     줄바꿈을 일으키던 트릭도 꺼둔다. */
+  .card__header::after {
+    display: none;
+  }
+
+  .card__header-tabs {
+    order: 2;
+  }
+
+  .card__duration {
+    order: 3;
+  }
+
+  /* weather의 오늘/내일 탭만은 데스크톱에서도 다시 헤더 아래 자기만의
+     줄에 놓이도록 되돌린다(title과 계속 인라인으로 붙어있는 briefing의
+     탭과는 다르다) — 바로 위에서 꺼둔 이 카드 헤더의 줄바꿈 트릭을
+     다시 켜고, 탭 그룹의 order도 그 뒤로 되돌린다. */
+  .card--weather .card__header::after {
+    display: block;
+  }
+
+  .card--weather .card__header-tabs {
+    order: 4;
+  }
+
+  .weather__body,
+  .news__body {
+    gap: var(--space-3);
+  }
+
+  .weather__footer {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .exchange__meta-row,
+  .exchange__hint-row {
+    flex-direction: row;
+    align-items: baseline;
+    justify-content: space-between;
+  }
+
+  /* 다른 병합된 행들과 달리 news__controls는 여기서도 계속 세로로
+     쌓인다 — row1의 3분할 컬럼(1440px 기준 각 약 370px)은 7개의
+     카테고리 pill과 region 토글을 한 줄에 나란히 놓기엔 너무 좁아서,
+     그렇게 하면 토글 버튼 텍스트가 단어 중간에서 줄바꿈되어 버린다. */
+
+  .lotto__col {
+    gap: var(--space-4);
+  }
+
+  .lotto__history {
+    max-height: 260px;
+  }
+}

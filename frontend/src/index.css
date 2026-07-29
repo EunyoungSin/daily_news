@@ -1,0 +1,124 @@
+:root {
+  /* surfaces — a real tonal ramp instead of 2 flat panel colors */
+  --surface-0: #0d1017;
+  --surface-1: #171d2b;
+  --surface-2: #1d2333;
+  --surface-3: #262e42;
+  --bg: var(--surface-0);
+  --panel: var(--surface-1);
+  --panel-alt: var(--surface-2);
+  --panel-sunken: var(--surface-3);
+  --panel-border: rgba(255, 255, 255, 0.07);
+  --panel-border-strong: rgba(255, 255, 255, 0.14);
+
+  --text: #e8eaf2;
+  --text-dim: #8990a8;
+  --text-faint: #565d74;
+
+  /* accent hues — reserved for thin identity marks, not fills */
+  --accent-weather: #49c7d9;
+  --accent-exchange: #a48dff;
+  --accent-news: #ff9166;
+  --accent-briefing: #ffcf6b;
+  --accent-lotto: #ff6ec7;
+  --accent-danger: #ff7a7a;
+
+  /* Korean FX/stock convention: 상승(rise) = red, 하락(fall) = blue —
+     the opposite of US convention, and distinct from the section
+     identity accents above (this pair means "direction", not "which
+     card"). Used only for the exchange card's day-over-day indicator. */
+  --fx-rise: #ff6b6b;
+  --fx-fall: #5b9dff;
+
+  /* two-tier shadow: quiet contact shadow for plain cards, a stronger
+     tinted glow reserved for the one card meant to feel elevated */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 24px -14px rgba(0, 0, 0, 0.5);
+  --shadow-briefing: 0 1px 2px rgba(0, 0, 0, 0.3), 0 20px 40px -16px rgba(0, 0, 0, 0.5), 0 0 32px -8px color-mix(in srgb, var(--accent-briefing) 30%, transparent);
+
+  --radius-card: 20px;
+  --radius-control: 10px;
+  --radius-pill: 999px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+
+  --font-display: 'IBM Plex Sans KR', 'Noto Sans KR', system-ui, sans-serif;
+  --font-data: 'IBM Plex Mono', ui-monospace, 'SF Mono', Consolas, monospace;
+
+  color-scheme: dark light;
+  font-family: var(--font-display);
+  color: var(--text);
+  background: var(--bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --surface-0: #eef0f6;
+    --surface-1: #ffffff;
+    --surface-2: #f4f5fb;
+    --surface-3: #e7e9f2;
+    --panel-border: rgba(20, 24, 40, 0.08);
+    --panel-border-strong: rgba(20, 24, 40, 0.16);
+    --text: #171a26;
+    --text-dim: #565d78;
+    --text-faint: #8990ab;
+    --shadow-card: 0 1px 2px rgba(30, 34, 60, 0.06), 0 10px 24px -14px rgba(30, 34, 60, 0.18);
+    --shadow-briefing: 0 1px 2px rgba(30, 34, 60, 0.06), 0 20px 40px -16px rgba(30, 34, 60, 0.18), 0 0 32px -10px color-mix(in srgb, var(--accent-briefing) 35%, transparent);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  background: radial-gradient(circle at 15% 0%, var(--panel-alt), var(--bg) 55%);
+  background-attachment: fixed;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+p {
+  margin: 0;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+select,
+input {
+  font-family: inherit;
+}
+
+a {
+  color: inherit;
+}

@@ -1,0 +1,13 @@
+# backend
+backend/.env
+backend/static/*
+!backend/static/index.html
+backend/dashboard-backend
+
+# frontend
+frontend/node_modules/
+frontend/dist/
+
+# misc
+.DS_Store
+*.log
