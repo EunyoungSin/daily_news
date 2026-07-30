@@ -245,10 +245,14 @@ func kmaRequest(ctx context.Context, endpoint string, params url.Values) ([]kmaI
 // kmaHTTPTimeout은 kmaRequest 한 번의 시도 시간을 제한한다. data.go.kr의
 // 게이트웨이는 일부 요청에서 눈에 띄게 응답이 지연되는데(keep-alive를 꺼도
 // 약 6번에 1번꼴로 관측됨 — 클라이언트 문제가 아니라 그쪽 인프라의 실제
-// 특성이다), 성공하는 호출은 대부분 1~2초 내에 끝나므로, 시도당 타임아웃을
-// 짧게 잡고 재시도를 1회 추가하는 방식이(kmaRequestWithRetry 참고) 긴
-// 타임아웃 하나를 쓰는 것보다 훨씬 적은 비용으로 그런 지연을 대부분 회복시킨다.
-const kmaHTTPTimeout = 2500 * time.Millisecond
+// 특성이다), 성공하는 호출은 대부분 1~2초 내에 끝난다. 예전에는 이 값을
+// 2.5초로 짧게 잡고 재시도로 대부분의 지연을 회복시키려 했지만, 실제로는
+// 이 여유가 너무 빠듯해서(kmaSubTimeout 참고) 결국 응답이 오고 있었을
+// 요청까지 Open-Meteo 폴백으로 넘기는 경우가 잦았다. 기상청 실측치를
+// 최대한 살리는 쪽을 우선하기로 하고 4초로 늘렸다 — 대신 아래
+// kmaSubTimeout/handler.go의 weatherSectionTimeout도 함께 늘려서, 늘어난
+// 재시도 예산이 그대로 잘려나가지 않도록 했다.
+const kmaHTTPTimeout = 4 * time.Second
 
 func kmaRequestWithRetry(ctx context.Context, endpoint string, params url.Values) ([]kmaItem, error) {
 	var lastErr error
@@ -416,11 +420,12 @@ var errKMAServiceKeyMissing = fmt.Errorf("KMA_SERVICE_KEY 환경변수가 설정
 
 // kmaSubTimeout은 기상청 API 호출에 걸리는 시간을 제한하여, 응답이
 // 느리거나 없는 경우에도 아래쪽 Open-Meteo 폴백에 쓸 시간이 섹션 전체
-// 타임아웃(handler.go의 sectionTimeout 참고) 안에 충분히 남도록 한다.
-// 현재 날씨와 예보 호출이 각각 최대 재시도 예산(kmaHTTPTimeout*2)을 모두
-// 써야 하는 최악의 경우까지 커버해야 하는데, fetchWeatherKMA가 이 둘을
-// 순차가 아니라 동시에 실행함으로써 이를 흡수한다.
-const kmaSubTimeout = 6 * time.Second
+// 타임아웃(handler.go의 weatherSectionTimeout 참고) 안에 충분히 남도록
+// 한다. 현재 날씨와 예보 호출이 각각 최대 재시도 예산(kmaHTTPTimeout*2 =
+// 8초)을 모두 써야 하는 최악의 경우까지 커버해야 하는데, fetchWeatherKMA가
+// 이 둘을 순차가 아니라 동시에 실행함으로써 이를 흡수한다 — 9초로 잡아
+// 8초 worst-case에 스케줄링 오버헤드 여유를 조금 더 얹었다.
+const kmaSubTimeout = 9 * time.Second
 
 // fetchWeatherKMA는 domesticGrid에 있는 국내 도시 하나에 대해 현재 날씨와
 // 오늘/내일 08:00, 14:00 예보를 기상청으로부터 동시에 가져온다(서로 독립적인

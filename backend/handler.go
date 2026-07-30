@@ -11,6 +11,14 @@ import (
 
 const sectionTimeout = 8 * time.Second
 
+// weatherSectionTimeout은 날씨 섹션만을 위한 별도 예산이다. 기상청(KMA)
+// 호출 자체가 최악의 경우 kmaSubTimeout(9초)까지 걸릴 수 있고, 그 이후
+// Open-Meteo 폴백에도 시간이 더 필요하므로, 다른 섹션들과 같은
+// sectionTimeout(8초)을 그대로 썼다가는 KMA가 실제로 응답하고 있는
+// 도중에 잘려나가 버린다. 날씨만 별도 상수로 분리해서, 이 값을 늘려도
+// 환율/뉴스/브리핑 섹션의 타임아웃에는 영향을 주지 않는다.
+const weatherSectionTimeout = 12 * time.Second
+
 func withTiming(fn func() error) (int64, error) {
 	start := time.Now()
 	err := fn()
@@ -46,7 +54,7 @@ func dashboardHandler(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		defer wg.Done()
-		ctx, cancel := context.WithTimeout(r.Context(), sectionTimeout)
+		ctx, cancel := context.WithTimeout(r.Context(), weatherSectionTimeout)
 		defer cancel()
 
 		var data *WeatherData
