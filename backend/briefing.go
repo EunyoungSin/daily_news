@@ -991,11 +991,43 @@ func upsertBriefingSectionCache(ctx context.Context, conn *sql.DB, section, data
 	return err
 }
 
+// briefingSectionStatus* 값들은 BriefingSectionMeta.Status로 그대로
+// JSON에 노출되어 프론트엔드가 안내 배지를 띄울지 결정하는 데 쓰인다.
+const (
+	briefingStatusFresh         = "fresh"          // 방금 새로 생성됨
+	briefingStatusCached        = "cached"         // 입력 불변 — 정상적인 캐시 재사용
+	briefingStatusStaleFallback = "stale_fallback" // 생성 실패, 이전 캐시로 대체 — 사용자 안내 필요
+	briefingStatusFailed        = "failed"         // 생성 실패, 대체할 캐시도 없음
+)
+
+// classifyBriefingFailureReason은 generateSectionText가 반환한 에러를,
+// 사용자에게 그대로 노출할 상세 사유가 아니라 프론트엔드가 안내 문구를
+// 고르는 데 참고할 대략적인 카테고리로 나눈다.
+func classifyBriefingFailureReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, errGroqKeyMissing) {
+		return "missing_api_key"
+	}
+	if errors.Is(err, errBriefingValidationFailed) {
+		return "validation_failed"
+	}
+	if msg := strings.ToLower(err.Error()); strings.Contains(msg, "rate limit") || strings.Contains(msg, "tokens per minute") || strings.Contains(msg, "(tpm)") {
+		return "rate_limit"
+	}
+	return "generation_error"
+}
+
 type briefingSectionOutput struct {
 	Simple      string
 	Detailed    string
 	Cached      bool
 	GeneratedAt time.Time
+	// Status/FailureReason은 그대로 BriefingSectionMeta에 실려 응답에
+	// 포함된다 — briefingStatus* 상수와 classifyBriefingFailureReason 참고.
+	Status        string
+	FailureReason string
 }
 
 // resolveBriefingSection은 섹션별로 캐시를 쓸지 새로 생성할지 결정하는
@@ -1004,13 +1036,16 @@ type briefingSectionOutput struct {
 // 호출하지 않습니다. 그렇지 않으면 새로 텍스트를 생성하고(best-effort로)
 // 저장합니다. 생성이 실패했지만 오래된 캐시 행이 존재한다면, 섹션을
 // 통째로 빼버리는 대신 그 오래된 텍스트를 사용합니다 — 다소 낡은
-// 문장이라도 아예 없는 것보다는 낫습니다.
+// 문장이라도 아예 없는 것보다는 낫습니다. 이 경우 Status를
+// stale_fallback으로 명확히 마킹해서, 프론트엔드가 "방금 생성된 것"과
+// "실패해서 어쩔 수 없이 대체된 것"을 구분해 사용자에게 알릴 수 있게
+// 합니다.
 func resolveBriefingSection(ctx context.Context, section, model, hash, systemPrompt, userContent string, allowedNumbers []float64, groundingText, hallucinationFallback string) briefingSectionOutput {
 	cached, found := lookupBriefingSectionCache(ctx, db, section)
 	if found && cached.dataHash == hash {
 		recordGroqCacheHit()
 		log.Printf("[캐시 재사용] 브리핑(%s): 입력 데이터 변경 없음 (Groq 미호출)", section)
-		return briefingSectionOutput{Simple: cached.simple, Detailed: cached.detailed, Cached: true, GeneratedAt: cached.generatedAt}
+		return briefingSectionOutput{Simple: cached.simple, Detailed: cached.detailed, Cached: true, GeneratedAt: cached.generatedAt, Status: briefingStatusCached}
 	}
 
 	if found {
@@ -1021,25 +1056,29 @@ func resolveBriefingSection(ctx context.Context, section, model, hash, systemPro
 
 	simple, detailed, err := generateSectionText(ctx, section, model, systemPrompt, userContent, allowedNumbers, groundingText, hallucinationFallback)
 	if err != nil {
-		log.Printf("브리핑(%s): 생성 실패: %v", section, err)
+		reason := classifyBriefingFailureReason(err)
+		log.Printf("브리핑(%s): 생성 실패(사유: %s): %v", section, reason, err)
 		if found {
-			log.Printf("브리핑(%s): 이전 캐시로 대체", section)
-			return briefingSectionOutput{Simple: cached.simple, Detailed: cached.detailed, Cached: true, GeneratedAt: cached.generatedAt}
+			log.Printf("브리핑(%s): 이전 캐시로 대체 (stale_fallback)", section)
+			return briefingSectionOutput{
+				Simple: cached.simple, Detailed: cached.detailed, Cached: true, GeneratedAt: cached.generatedAt,
+				Status: briefingStatusStaleFallback, FailureReason: reason,
+			}
 		}
 		if errors.Is(err, errBriefingValidationFailed) {
 			// 조용히 대체할 오래된 캐시가 없고, 재시도 후에도 이 섹션이 여전히
 			// 강한 콘텐츠 검증(CJK/새어나온 영어)에 실패한 경우입니다 — 합쳐진
 			// 브리핑에서 이 섹션을 조용히 빼는 대신 명시적으로 표시합니다.
-			return briefingSectionOutput{Simple: "⚠️ 생성 실패", Detailed: "⚠️ 생성 실패", GeneratedAt: time.Now()}
+			return briefingSectionOutput{Simple: "⚠️ 생성 실패", Detailed: "⚠️ 생성 실패", GeneratedAt: time.Now(), Status: briefingStatusFailed, FailureReason: reason}
 		}
-		return briefingSectionOutput{}
+		return briefingSectionOutput{Status: briefingStatusFailed, FailureReason: reason}
 	}
 
 	generatedAt := time.Now()
 	if upsertErr := upsertBriefingSectionCache(ctx, db, section, hash, simple, detailed, generatedAt); upsertErr != nil {
 		log.Printf("브리핑(%s): 캐시 저장 실패: %v", section, upsertErr)
 	}
-	return briefingSectionOutput{Simple: simple, Detailed: detailed, Cached: false, GeneratedAt: generatedAt}
+	return briefingSectionOutput{Simple: simple, Detailed: detailed, Cached: false, GeneratedAt: generatedAt, Status: briefingStatusFresh}
 }
 
 // getBriefing은 날씨/환율/뉴스 섹션의 텍스트를 각각 독립적으로, 그리고
@@ -1185,7 +1224,7 @@ func getBriefing(ctx context.Context, weather *WeatherData, exchange *ExchangeDa
 
 	for i, out := range outputs {
 		sectionEmpty := out.Simple == "" && out.Detailed == ""
-		sectionMeta := BriefingSectionMeta{Cached: out.Cached, Simple: out.Simple, Detailed: out.Detailed}
+		sectionMeta := BriefingSectionMeta{Cached: out.Cached, Simple: out.Simple, Detailed: out.Detailed, Status: out.Status, FailureReason: out.FailureReason}
 		if !sectionEmpty {
 			anySuccess = true
 			simples = append(simples, out.Simple)

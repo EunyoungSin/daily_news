@@ -43,10 +43,20 @@ function splitSentences(text: string): string[] {
   return sentences
 }
 
+// 여러 섹션이 동시에 대체됐을 때는 카드 상단에 한 번만 통합 배너로
+// 안내하고(showUnifiedStaleBanner), 정확히 하나만 대체됐을 때는 그
+// 섹션 옆에만 작은 배지를 붙인다 — 이 두 문구가 그 두 경우에 쓰인다.
+const STALE_FALLBACK_MESSAGE = '⚠️ 일시적으로 사용량 제한이 있어 이전에 저장된 내용을 보여드립니다'
+const STALE_FALLBACK_MESSAGE_MULTI =
+  '⚠️ 일부 항목은 최신 정보가 아닐 수 있어요, 사용량 제한으로 이전 내용을 보여드리는 중입니다'
+
 // 브리핑 내 weather/exchange/news 중 하나의 섹션. 자신의 generatedAt이
 // 바뀔 때만 잠깐 하이라이트된다 — 즉 이번 요청에서 *이* 섹션이 실제로
 // 재생성됐을 때만이고, 나머지 두 섹션이 갱신됐다고 해서 반응하지 않는다.
-function BriefingSectionBlock({ meta, text }: { meta: BriefingSectionMeta; text: string }) {
+// showStaleBadge는 이 섹션만 단독으로 stale_fallback일 때만 true다 —
+// 여러 섹션이 동시에 그렇다면 카드 상단의 통합 배너가 대신 표시되므로
+// 개별 배지는 생략한다(BriefingCard의 showUnifiedStaleBanner 참고).
+function BriefingSectionBlock({ meta, text, showStaleBadge }: { meta: BriefingSectionMeta; text: string; showStaleBadge: boolean }) {
   const justUpdated = usePulseOnChange(meta.generatedAt, 2500)
 
   if (!text.trim()) return null
@@ -56,6 +66,11 @@ function BriefingSectionBlock({ meta, text }: { meta: BriefingSectionMeta; text:
       {splitSentences(text).map((sentence, i) => (
         <p key={i} className="briefing__sentence">{sentence}</p>
       ))}
+      {showStaleBadge && (
+        <p className="briefing__stale-badge">
+          {STALE_FALLBACK_MESSAGE} ({formatUpdatedAt(meta.generatedAt)} 기준)
+        </p>
+      )}
     </div>
   )
 }
@@ -64,6 +79,15 @@ export default function BriefingCard({ section, pending, onRetry }: Props) {
   const [retrying, setRetrying] = useState(false)
   const [mode, setMode] = useState<Mode>('simple')
   const pulsing = usePulseOnChange(section.data?.generatedAt)
+
+  const briefingMeta = section.data?.briefingMeta
+  const staleSectionCount = briefingMeta
+    ? (['weather', 'exchange', 'news'] as const).filter((key) => briefingMeta[key].status === 'stale_fallback').length
+    : 0
+  // 정확히 하나만 대체됐으면 그 섹션 옆에만 배지를 붙이고, 둘 이상이면
+  // 개별 배지 대신 카드 상단에 통합 배너 하나만 보여준다.
+  const showUnifiedStaleBanner = staleSectionCount >= 2
+  const showPerSectionStaleBadge = staleSectionCount === 1
 
   const handleRetry = async () => {
     setRetrying(true)
@@ -118,18 +142,23 @@ export default function BriefingCard({ section, pending, onRetry }: Props) {
         </div>
       ) : section.success && section.data ? (
         <div className="card__body">
+          {showUnifiedStaleBanner && <p className="briefing__stale-banner">{STALE_FALLBACK_MESSAGE_MULTI}</p>}
+
           <div className="briefing__text">
             <BriefingSectionBlock
               meta={section.data.briefingMeta.weather}
               text={mode === 'simple' ? section.data.briefingMeta.weather.simple : section.data.briefingMeta.weather.detailed}
+              showStaleBadge={showPerSectionStaleBadge && section.data.briefingMeta.weather.status === 'stale_fallback'}
             />
             <BriefingSectionBlock
               meta={section.data.briefingMeta.exchange}
               text={mode === 'simple' ? section.data.briefingMeta.exchange.simple : section.data.briefingMeta.exchange.detailed}
+              showStaleBadge={showPerSectionStaleBadge && section.data.briefingMeta.exchange.status === 'stale_fallback'}
             />
             <BriefingSectionBlock
               meta={section.data.briefingMeta.news}
               text={mode === 'simple' ? section.data.briefingMeta.news.simple : section.data.briefingMeta.news.detailed}
+              showStaleBadge={showPerSectionStaleBadge && section.data.briefingMeta.news.status === 'stale_fallback'}
             />
           </div>
 

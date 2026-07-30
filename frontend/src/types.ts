@@ -133,6 +133,14 @@ export interface NewsSection extends SectionMeta {
   data?: NewsData
 }
 
+// "fresh": 방금 새로 생성됨. "cached": 입력 불변이라 정상적으로 캐시
+// 재사용(문제 상황 아님). "stale_fallback": 이번에 새로 생성을 시도했지만
+// 실패해서(TPM 초과, 반복 감지, API 오류 등) 어쩔 수 없이 이전 캐시로
+// 대체됨(사용자에게 알려야 하는 문제 상황). "failed": 생성 실패, 대체할
+// 캐시도 없음. 과거 배포된 백엔드는 이 필드를 아예 보내지 않을 수 있으므로
+// optional로 둔다.
+export type BriefingSectionStatus = 'fresh' | 'cached' | 'stale_fallback' | 'failed'
+
 export interface BriefingSectionMeta {
   // 이번 요청에서 Groq로 새로 생성한 것이 아니라, DB 캐시에서 재사용한
   // 텍스트일 때(입력 해시가 일치했을 때) true가 된다.
@@ -142,6 +150,11 @@ export interface BriefingSectionMeta {
   // 각 섹션을 독립적으로 렌더링하고 강조 표시하는 데 쓰인다.
   simple: string
   detailed: string
+  status?: BriefingSectionStatus
+  // status가 stale_fallback/failed일 때만 채워지는, 안내 문구 분기용
+  // 대략적인 카테고리(예: "rate_limit") — 사용자에게 그대로 보여줄 값은
+  // 아니다.
+  failureReason?: string
 }
 
 export interface BriefingSectionsMeta {

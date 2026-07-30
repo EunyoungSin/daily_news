@@ -171,6 +171,22 @@ type BriefingSectionMeta struct {
 	// 렌더링하고 강조 표시한다.
 	Simple   string `json:"simple"`
 	Detailed string `json:"detailed"`
+	// Status는 이 섹션 텍스트가 어떻게 만들어졌는지를 세분화한다:
+	//   - "fresh": 이번 요청에서 Groq로 방금 새로 생성됨
+	//   - "cached": 입력 데이터가 그대로라 정상적으로 캐시를 재사용함 —
+	//     문제 상황이 아니다
+	//   - "stale_fallback": 이번에 새로 생성을 시도했지만 실패해서(TPM
+	//     초과, 반복 감지, API 오류 등) 어쩔 수 없이 이전 캐시로 대체됨 —
+	//     사용자에게 알려야 하는 문제 상황이다
+	//   - "failed": 생성에 실패했고 대체할 캐시도 없음
+	// briefing.go의 resolveBriefingSection이 채운다. 과거 배포된
+	// 프론트엔드와의 호환을 위해 omitempty로 둔다.
+	Status string `json:"status,omitempty"`
+	// FailureReason은 Status가 stale_fallback/failed일 때만 채워지며,
+	// 사용자에게 그대로 노출할 상세 사유가 아니라 프론트엔드가 안내
+	// 문구를 고르는 데 참고하는 대략적인 카테고리다(예: "rate_limit",
+	// "generation_error") — classifyBriefingFailureReason 참고.
+	FailureReason string `json:"failureReason,omitempty"`
 }
 
 type BriefingSectionsMeta struct {
