@@ -44,7 +44,21 @@ type PeriodForecast struct {
 	Description       string  `json:"description"`
 	PrecipProbability int     `json:"precipProbability"`
 	Available         bool    `json:"available"`
+	// UnavailableReason은 Available이 false일 때만 채워진다(weather_slot_cache.go의
+	// resolveForecastSlot 참고):
+	//   - unavailableNotYetAvailable: 슬롯 시각이 아직 지나지 않아 정상적으로
+	//     발표 전인 경우 — "곧 발표될 예정입니다"가 맞는 안내다.
+	//   - unavailablePastMissing: 슬롯 시각이 이미 지났는데도 API 응답과
+	//     DB 캐시(weather_slot_cache) 어디에도 값이 없는 예외 상황 — 즉시
+	//     재조회를 한 번 시도한 뒤에도 실패한 상태라, "곧 발표"라는 뉘앙스는
+	//     맞지 않고 "일시적으로 가져오지 못했다"는 안내가 맞다.
+	UnavailableReason string `json:"unavailableReason,omitempty"`
 }
+
+const (
+	unavailableNotYetAvailable = "not_yet_available"
+	unavailablePastMissing     = "past_missing"
+)
 
 type DayForecast struct {
 	Morning   PeriodForecast `json:"morning"`

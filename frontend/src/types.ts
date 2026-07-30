@@ -35,6 +35,12 @@ export interface PeriodForecast {
   description: string
   precipProbability: number
   available: boolean
+  // available이 false일 때만 채워진다(backend/weather_slot_cache.go의
+  // resolveForecastSlot 참고). "not_yet_available"은 슬롯 시각이 아직
+  // 지나지 않아 정상적으로 발표 전인 경우이고, "past_missing"은 슬롯
+  // 시각이 이미 지났는데도 값이 없는(즉시 재조회 시도까지 실패한) 예외
+  // 상황이다 — 이 둘은 서로 다른 안내 문구를 써야 한다.
+  unavailableReason?: 'not_yet_available' | 'past_missing'
 }
 
 export interface DayForecast {
