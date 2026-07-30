@@ -8,8 +8,6 @@ interface Props {
   onRetry: () => Promise<void>
 }
 
-type Mode = 'simple' | 'detailed'
-
 function formatUpdatedAt(iso: string): string {
   return new Date(iso).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })
 }
@@ -77,7 +75,6 @@ function BriefingSectionBlock({ meta, text, showStaleBadge }: { meta: BriefingSe
 
 export default function BriefingCard({ section, pending, onRetry }: Props) {
   const [retrying, setRetrying] = useState(false)
-  const [mode, setMode] = useState<Mode>('simple')
   const pulsing = usePulseOnChange(section.data?.generatedAt)
 
   const briefingMeta = section.data?.briefingMeta
@@ -104,28 +101,6 @@ export default function BriefingCard({ section, pending, onRetry }: Props) {
         <h2 className="card__title">
           <span className="briefing__badge">AI</span> 오늘의 브리핑
         </h2>
-        {!pending && section.success && section.data && (
-          <div className="briefing__tabs card__header-tabs" role="tablist">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={mode === 'simple'}
-              className={mode === 'simple' ? 'briefing__tab briefing__tab--active' : 'briefing__tab'}
-              onClick={() => setMode('simple')}
-            >
-              간단히
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={mode === 'detailed'}
-              className={mode === 'detailed' ? 'briefing__tab briefing__tab--active' : 'briefing__tab'}
-              onClick={() => setMode('detailed')}
-            >
-              자세히
-            </button>
-          </div>
-        )}
         {!pending && (
           <span className="card__duration">
             <span className={pulsing ? 'card__duration-dot card__duration-dot--pulse' : 'card__duration-dot'} />
@@ -147,17 +122,17 @@ export default function BriefingCard({ section, pending, onRetry }: Props) {
           <div className="briefing__text">
             <BriefingSectionBlock
               meta={section.data.briefingMeta.weather}
-              text={mode === 'simple' ? section.data.briefingMeta.weather.simple : section.data.briefingMeta.weather.detailed}
+              text={section.data.briefingMeta.weather.detailed}
               showStaleBadge={showPerSectionStaleBadge && section.data.briefingMeta.weather.status === 'stale_fallback'}
             />
             <BriefingSectionBlock
               meta={section.data.briefingMeta.exchange}
-              text={mode === 'simple' ? section.data.briefingMeta.exchange.simple : section.data.briefingMeta.exchange.detailed}
+              text={section.data.briefingMeta.exchange.detailed}
               showStaleBadge={showPerSectionStaleBadge && section.data.briefingMeta.exchange.status === 'stale_fallback'}
             />
             <BriefingSectionBlock
               meta={section.data.briefingMeta.news}
-              text={mode === 'simple' ? section.data.briefingMeta.news.simple : section.data.briefingMeta.news.detailed}
+              text={section.data.briefingMeta.news.detailed}
               showStaleBadge={showPerSectionStaleBadge && section.data.briefingMeta.news.status === 'stale_fallback'}
             />
           </div>

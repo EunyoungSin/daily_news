@@ -70,7 +70,7 @@ func TestBriefingSectionCacheNilDB(t *testing.T) {
 	if _, found := lookupBriefingSectionCache(context.Background(), nil, "weather"); found {
 		t.Error("expected lookup against a nil db to report not-found")
 	}
-	if err := upsertBriefingSectionCache(context.Background(), nil, "weather", "hash", "s", "d", time.Now()); err != nil {
+	if err := upsertBriefingSectionCache(context.Background(), nil, "weather", "hash", "text", time.Now()); err != nil {
 		t.Errorf("expected upsert against a nil db to no-op without error, got %v", err)
 	}
 }

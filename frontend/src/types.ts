@@ -147,8 +147,9 @@ export interface BriefingSectionMeta {
   cached: boolean
   generatedAt: string
   // 여러 섹션을 이어붙인 문자열이 아니라 이 섹션 자체의 텍스트 —
-  // 각 섹션을 독립적으로 렌더링하고 강조 표시하는 데 쓰인다.
-  simple: string
+  // 각 섹션을 독립적으로 렌더링하고 강조 표시하는 데 쓰인다. 예전에는
+  // simple(1문장 요약)도 함께 내려줬지만, 출력 토큰을 줄이기 위해
+  // detailed 하나만 생성하도록 단순화했다.
   detailed: string
   status?: BriefingSectionStatus
   // status가 stale_fallback/failed일 때만 채워지는, 안내 문구 분기용
@@ -164,10 +165,8 @@ export interface BriefingSectionsMeta {
 }
 
 export interface BriefingData {
-  // 3문장 버전 — 각 섹션의 한 문장짜리 결과를 순서대로
-  // (날씨, 환율, 뉴스) 이어붙인 것.
-  simple: string
-  // 각 섹션의 (최대) 두 문장짜리 결과를 같은 순서로 이어붙인 것.
+  // 각 섹션의 (최대) 두 문장짜리 결과를 순서대로(날씨, 환율, 뉴스)
+  // 이어붙인 것.
   detailed: string
   // 모든 섹션이 캐시에서 재사용되었을 때만(이번 요청에서 Groq 호출이
   // 전혀 없었을 때) true다. 섹션별 세부 내역은 briefingMeta 참고.

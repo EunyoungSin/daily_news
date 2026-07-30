@@ -165,11 +165,11 @@ type NewsSection struct {
 type BriefingSectionMeta struct {
 	Cached      bool   `json:"cached"`
 	GeneratedAt string `json:"generatedAt"`
-	// Simple/Detailed는 (여러 섹션을 합친 문자열이 아니라) 이 섹션 자체의
-	// 텍스트다 — 프론트엔드는 합쳐진 BriefingData.Simple/Detailed를 다시
-	// 섹션별로 쪼개려 하는 대신, 이 값을 그대로 써서 각 섹션을 독립적으로
-	// 렌더링하고 강조 표시한다.
-	Simple   string `json:"simple"`
+	// Detailed는 (여러 섹션을 합친 문자열이 아니라) 이 섹션 자체의 텍스트다
+	// — 프론트엔드는 합쳐진 BriefingData.Detailed를 다시 섹션별로 쪼개려
+	// 하는 대신, 이 값을 그대로 써서 각 섹션을 독립적으로 렌더링하고 강조
+	// 표시한다. 예전에는 simple(1문장 요약)도 함께 내려줬지만, 출력 토큰을
+	// 줄이기 위해 detailed 하나만 생성하도록 단순화했다.
 	Detailed string `json:"detailed"`
 	// Status는 이 섹션 텍스트가 어떻게 만들어졌는지를 세분화한다:
 	//   - "fresh": 이번 요청에서 Groq로 방금 새로 생성됨
@@ -196,11 +196,10 @@ type BriefingSectionsMeta struct {
 }
 
 type BriefingData struct {
-	// Simple은 3문장짜리 버전이다 — 각 섹션의 한 문장짜리 결과를 순서대로
-	// (weather, exchange, news) 이어붙인 것이다.
-	Simple string `json:"simple"`
-	// Detailed는 각 섹션의 (최대) 두 문장짜리 결과를 같은 순서로 이어붙인
-	// 것이다.
+	// Detailed는 각 섹션의 (최대) 두 문장짜리 결과를 순서대로(weather,
+	// exchange, news) 이어붙인 것이다. 예전에는 이보다 짧은 simple(각
+	// 섹션 1문장씩 이어붙인) 버전도 함께 내려줬지만, 출력 토큰을 줄이기
+	// 위해 detailed 하나만 생성하도록 단순화했다.
 	Detailed string `json:"detailed"`
 	// Cached는 모든 섹션이 캐시에서 재사용되었을 때만(이번 요청에서 Groq
 	// 호출이 한 번도 없었을 때만) true다. GeneratedAt은 세 섹션의 생성
