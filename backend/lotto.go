@@ -21,15 +21,31 @@ var kst = mustLoadLocation("Asia/Seoul")
 var lottoFirstDrawDate = time.Date(2002, 12, 7, 0, 0, 0, 0, kst)
 
 const (
-	lottoHistoryWindow           = 50              // 화면에 표시/집계하는 회차 수
-	lottoRecentWindow            = 10              // "최근 출현"에 사용하는 회차 수
-	lottoFetchConcurrencyDefault = 5               // dhlottery API 동시 호출 상한 기본값 (LOTTO_FETCH_CONCURRENCY로 조정 가능)
-	lottoDrawHourKST             = 21              // 추첨은 KST 20:45경 진행되며, 그 다음 시각부터 "완료"로 간주
-	lottoFetchTimeout            = 8 * time.Second // 개별 회차 조회 1회 시도당 타임아웃
-	lottoFetchMaxRetries         = 2               // 개별 회차 조회 실패 시 추가 재시도 횟수 (최초 시도 포함 최대 3회)
-	lottoFetchRetryDelay         = 500 * time.Millisecond
-	lottoBackfillTimeout         = 3 * time.Minute // 백그라운드 채우기 작업 전체(최대 50회차)에 허용하는 상한 — 이를 트리거한 HTTP 요청의 타임아웃과는 무관하다
+	lottoHistoryWindow           = 50                     // 화면에 표시/집계하는 회차 수
+	lottoRecentWindow            = 10                     // "최근 출현"에 사용하는 회차 수
+	lottoFetchConcurrencyDefault = 2                      // dhlottery API 동시 호출 상한 기본값 — 짧은 시간에 요청이 몰리면 dhlottery가 이후 요청을 응답 없이 드롭하는 것으로 보여, 사실상 순차에 가깝게 대폭 낮췄다 (LOTTO_FETCH_CONCURRENCY로 조정 가능)
+	lottoDrawHourKST             = 21                     // 추첨은 KST 20:45경 진행되며, 그 다음 시각부터 "완료"로 간주
+	lottoFetchTimeout            = 8 * time.Second        // 개별 회차 조회 1회 시도당 타임아웃
+	lottoRequestInterval         = 400 * time.Millisecond // 회차 요청 사이 전역 최소 간격 — 사람이 브라우저로 하나씩 조회하는 속도에 가깝게 맞춰 dhlottery의 차단 로직을 피한다
+	lottoBackfillTimeout         = 5 * time.Minute        // 백그라운드 채우기 작업 전체(최대 50회차)에 허용하는 상한 — 동시성/속도를 낮춘 만큼 여유를 더 두었다. 이를 트리거한 HTTP 요청의 타임아웃과는 무관하다
+
+	// dhlottery가 기본 Go 클라이언트의 User-Agent("Go-http-client/...")를
+	// 보고 봇으로 판단해 차단할 가능성을 줄이기 위해, 일반 브라우저처럼
+	// 보이는 값을 명시적으로 지정한다.
+	lottoUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
+
+// lottoFetchBackoffSchedule은 회차 조회 실패 시 재시도 전 대기 시간이다.
+// 실패 직후 곧바로(수 초 간격) 다시 두드리면 이미 차단된 상태를 악화시킬
+// 수 있으므로, 5초 → 15초 → 40초로 점점 크게 벌린다. 이 스케줄을 모두
+// 소진하고도 실패한 회차는 이번 사이클에서는 건너뛰고, DB에는 여전히
+// "빠진 회차"로 남는다 — 다음 backfill 사이클(다음 요청 또는 다음 서버
+// 재시작)이 computeLottoSyncRange를 통해 자동으로 다시 집어 든다.
+var lottoFetchBackoffSchedule = []time.Duration{
+	5 * time.Second,
+	15 * time.Second,
+	40 * time.Second,
+}
 
 // lottoHTTPClient는 dhlottery 호출 전용 클라이언트다. Timeout을 명시적으로
 // 두어, 혹시라도 컨텍스트 취소가 누락되는 경우에도 개별 호출이 무한정
@@ -43,6 +59,37 @@ func lottoFetchConcurrencyLimit() int {
 		}
 	}
 	return lottoFetchConcurrencyDefault
+}
+
+// lottoRequestPacer는 세마포어(동시 실행 개수)와는 별개로, dhlottery로 나가는
+// 모든 요청(재시도 포함)이 전역적으로 최소 lottoRequestInterval만큼 간격을
+// 두고 시작하도록 강제한다. 동시성 설정이 2 이상이어도 실제 "초당 요청 수"는
+// 이 페이서가 직접 통제한다.
+var lottoRequestPacer struct {
+	mu   sync.Mutex
+	next time.Time
+}
+
+func lottoWaitForTurn(ctx context.Context) error {
+	lottoRequestPacer.mu.Lock()
+	now := time.Now()
+	start := lottoRequestPacer.next
+	if start.Before(now) {
+		start = now
+	}
+	lottoRequestPacer.next = start.Add(lottoRequestInterval)
+	lottoRequestPacer.mu.Unlock()
+
+	wait := time.Until(start)
+	if wait <= 0 {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(wait):
+		return nil
+	}
 }
 
 // lottoBackfillState는 백그라운드 채우기 goroutine이 중복 실행되지 않도록
@@ -130,6 +177,13 @@ type dhlotteryResponse struct {
 }
 
 func fetchLottoDraw(ctx context.Context, drwNo int) (*dhlotteryResponse, error) {
+	// 실제 요청을 보내기 전에 전역 페이서 차례를 기다린다 — 세마포어로 몇 개가
+	// "동시에" 도는지와 무관하게, 실제 발신 간격 자체를 사람이 하나씩 조회하는
+	// 속도에 가깝게 강제로 벌려 놓기 위함이다.
+	if err := lottoWaitForTurn(ctx); err != nil {
+		return nil, err
+	}
+
 	url := fmt.Sprintf("https://www.dhlottery.co.kr/common.do?method=getLottoNumber&drwNo=%d", drwNo)
 
 	// 개별 호출은 부모 컨텍스트(백그라운드 채우기 작업 전체의 lottoBackfillTimeout
@@ -143,6 +197,7 @@ func fetchLottoDraw(ctx context.Context, drwNo int) (*dhlotteryResponse, error) 
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("User-Agent", lottoUserAgent)
 
 	resp, err := lottoHTTPClient.Do(req)
 	if err != nil {
@@ -162,17 +217,20 @@ func fetchLottoDraw(ctx context.Context, drwNo int) (*dhlotteryResponse, error) 
 }
 
 // fetchLottoDrawWithRetry는 타임아웃을 포함한 일시적 오류에 곧바로 포기하지
-// 않고, 짧게 대기한 뒤 최대 lottoFetchMaxRetries회 추가로 재시도한다.
+// 않고, lottoFetchBackoffSchedule에 따라 점점 길게 대기한 뒤 재시도한다.
 // 부모 ctx가 이미 취소된 상태라면(예: 백필 작업 전체 시한 초과) 대기 없이
-// 즉시 중단한다.
+// 즉시 중단한다. 스케줄을 모두 소진해도 실패하면 이 회차는 이번 사이클에서
+// 포기하고 다음 backfill 사이클에 다시 맡긴다 — syncLottoDraws 주석 참고.
 func fetchLottoDrawWithRetry(ctx context.Context, drwNo int) (*dhlotteryResponse, error) {
+	maxAttempts := len(lottoFetchBackoffSchedule) + 1
 	var lastErr error
-	for attempt := 0; attempt <= lottoFetchMaxRetries; attempt++ {
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
+			delay := lottoFetchBackoffSchedule[attempt-1]
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(lottoFetchRetryDelay):
+			case <-time.After(delay):
 			}
 		}
 
@@ -181,7 +239,7 @@ func fetchLottoDrawWithRetry(ctx context.Context, drwNo int) (*dhlotteryResponse
 			return data, nil
 		}
 		lastErr = err
-		log.Printf("로또: 회차 %d 조회 실패 (%d/%d회 시도): %v", drwNo, attempt+1, lottoFetchMaxRetries+1, err)
+		log.Printf("로또: 회차 %d 조회 실패 (%d/%d회 시도): %v", drwNo, attempt+1, maxAttempts, err)
 	}
 	return nil, lastErr
 }
@@ -271,7 +329,7 @@ func syncLottoDraws(ctx context.Context, conn *sql.DB) error {
 			results[idx] = fetchResult{drwNo: n, data: data, err: err}
 
 			done := completed.Add(1)
-			if done%10 == 0 || int(done) == total {
+			if done%5 == 0 || int(done) == total {
 				log.Printf("로또: %d/%d 회차 수집 진행 완료", done, total)
 			}
 		}(i, drwNo)
