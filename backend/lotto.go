@@ -245,36 +245,48 @@ func fetchLottoDrawWithRetry(ctx context.Context, drwNo int) (*dhlotteryResponse
 }
 
 // computeLottoSyncRange는 DB 조회만으로(외부 API 호출 없이) 지금 채워야 할
-// 회차 목록을 빠르게 계산한다. 테이블이 비어 있으면 최근 lottoHistoryWindow개
-// 회차 전체가, 그렇지 않으면 보통 매주 새 회차 하나만 대상이 된다. 이 함수는
-// 순수 DB 쿼리라 요청 스코프의 짧은 컨텍스트로 호출해도 안전하다.
+// 회차 목록을 빠르게 계산한다. 대상 구간은 항상 [theoretical-lottoHistoryWindow+1,
+// theoretical]이며, 그 구간 안에서 DB에 "실제로 없는" 회차만 반환한다 —
+// 예전에는 MAX(drw_no)+1부터만 봐서 구간이 항상 빈틈없이(contiguous) 채워져
+// 있다고 가정했지만, 회차별 개별 저장으로 바뀌면서 일부만 성공하고 일부는
+// 실패해 중간에 구멍(gap)이 남는 상황이 정상적으로 발생할 수 있다 — 이
+// 함수가 그 구멍까지 정확히 찾아내야 다음 사이클이 그 회차만 다시 시도할 수
+// 있다. 이 함수는 순수 DB 쿼리라 요청 스코프의 짧은 컨텍스트로 호출해도
+// 안전하다.
 func computeLottoSyncRange(ctx context.Context, conn *sql.DB) (toFetch []int, alreadyCount int, err error) {
 	if err = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM lotto_draws`).Scan(&alreadyCount); err != nil {
 		return nil, 0, fmt.Errorf("count lotto_draws: %w", err)
 	}
 
-	var dbLatest sql.NullInt64
-	if err = conn.QueryRowContext(ctx, `SELECT MAX(drw_no) FROM lotto_draws`).Scan(&dbLatest); err != nil {
-		return nil, 0, fmt.Errorf("query latest drw_no: %w", err)
-	}
-
 	theoretical := theoreticalLatestDrwNo(time.Now())
-
-	start := theoretical - lottoHistoryWindow + 1
-	if dbLatest.Valid {
-		start = int(dbLatest.Int64) + 1
-	}
-	if start < 1 {
-		start = 1
+	windowStart := theoretical - lottoHistoryWindow + 1
+	if windowStart < 1 {
+		windowStart = 1
 	}
 
-	if start > theoretical {
-		return nil, alreadyCount, nil
+	rows, err := conn.QueryContext(ctx, `SELECT drw_no FROM lotto_draws WHERE drw_no >= ? AND drw_no <= ?`, windowStart, theoretical)
+	if err != nil {
+		return nil, alreadyCount, fmt.Errorf("query existing drw_no in range: %w", err)
+	}
+	defer rows.Close()
+
+	existing := make(map[int]bool, theoretical-windowStart+1)
+	for rows.Next() {
+		var n int
+		if err := rows.Scan(&n); err != nil {
+			return nil, alreadyCount, err
+		}
+		existing[n] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, alreadyCount, err
 	}
 
-	toFetch = make([]int, 0, theoretical-start+1)
-	for n := start; n <= theoretical; n++ {
-		toFetch = append(toFetch, n)
+	toFetch = make([]int, 0, theoretical-windowStart+1)
+	for n := windowStart; n <= theoretical; n++ {
+		if !existing[n] {
+			toFetch = append(toFetch, n)
+		}
 	}
 	return toFetch, alreadyCount, nil
 }
@@ -290,10 +302,23 @@ func lottoNeedsSync(ctx context.Context, conn *sql.DB) (bool, error) {
 	return len(toFetch) > 0, nil
 }
 
-// syncLottoDraws는 DB에 저장된 최신 회차와 이론상 최신 회차 사이에 빠진
-// 회차를 모두 dhlottery에서 조회해 채워 넣는다. 오래 걸릴 수 있는 실제
-// 네트워크 작업이므로, 항상 lottoEnsureBackfillStarted를 통해 사용자 요청과
-// 무관한 백그라운드 goroutine에서만 호출해야 한다.
+// lottoInsertTimeout은 회차 하나를 저장하는 INSERT 자체의 타임아웃이다.
+// context.Background()에서 독립적으로 파생시키므로(아래 syncLottoDraws
+// 참고), 배치 전체의 ctx가 마침 그 순간 만료되더라도 이미 성공적으로
+// 조회해둔 데이터를 저장하는 마지막 한 단계는 항상 자기 몫의 시간을
+// 보장받는다.
+const lottoInsertTimeout = 5 * time.Second
+
+// syncLottoDraws는 DB에 없는 회차를 모두 dhlottery에서 조회해 채워 넣는다.
+// 각 회차는 서로 완전히 독립적으로 처리된다 — 조회에 성공하는 즉시 그
+// 회차 하나만 곧바로 저장하며, 다른 회차들이 아직 진행 중이거나 실패하는
+// 것과는 무관하다. 예전에는 전체 회차의 조회가 다 끝난 뒤에야 한꺼번에
+// 저장했는데, 그러면 배치 전체가 lottoBackfillTimeout에 걸려 취소될 때
+// 이미 성공적으로 조회해둔 회차까지 함께 저장하지 못한 채 유실됐다(그
+// 시점엔 배치의 ctx 자체가 이미 만료된 상태라 저장 시도 자체가 실패했다) —
+// "신규 50개 회차 중 0개 저장 완료" 로그가 그 증상이다. 오래 걸릴 수 있는
+// 실제 네트워크 작업이므로, 항상 lottoEnsureBackfillStarted를 통해 사용자
+// 요청과 무관한 백그라운드 goroutine에서만 호출해야 한다.
 func syncLottoDraws(ctx context.Context, conn *sql.DB) error {
 	toFetch, count, err := computeLottoSyncRange(ctx, conn)
 	if err != nil {
@@ -307,54 +332,53 @@ func syncLottoDraws(ctx context.Context, conn *sql.DB) error {
 	total := len(toFetch)
 	log.Printf("로또: 이미 저장된 회차 %d개, 신규 %d개 수집 시작", count, total)
 
-	type fetchResult struct {
-		drwNo int
-		data  *dhlotteryResponse
-		err   error
-	}
-
-	results := make([]fetchResult, total)
 	sem := make(chan struct{}, lottoFetchConcurrencyLimit())
 	var wg sync.WaitGroup
-	var completed atomic.Int32
+	var completed, inserted, failed atomic.Int32
 
-	for i, drwNo := range toFetch {
+	for _, drwNo := range toFetch {
 		wg.Add(1)
-		go func(idx, n int) {
+		go func(n int) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
 			data, err := fetchLottoDrawWithRetry(ctx, n)
-			results[idx] = fetchResult{drwNo: n, data: data, err: err}
 
 			done := completed.Add(1)
 			if done%5 == 0 || int(done) == total {
-				log.Printf("로또: %d/%d 회차 수집 진행 완료", done, total)
+				log.Printf("로또: %d/%d 회차 처리 진행", done, total)
 			}
-		}(i, drwNo)
+
+			if err != nil {
+				log.Printf("로또: 회차 %d 최종 조회 실패(재시도 소진): %v", n, err)
+				failed.Add(1)
+				return
+			}
+			if data.ReturnValue != "success" {
+				// 아직 추첨되지 않은 회차 — 이론상 추정치가 실제보다 앞서
+				// 나간 경우다(예: 이번 주 추첨 직전). 실패로 세지 않는다 —
+				// 다음 사이클에 이론상 최신 회차가 갱신되면 자연히 다시
+				// 확인된다.
+				return
+			}
+
+			insertCtx, cancel := context.WithTimeout(context.Background(), lottoInsertTimeout)
+			insertErr := insertLottoDraw(insertCtx, conn, data)
+			cancel()
+			if insertErr != nil {
+				log.Printf("로또: 회차 %d 저장 실패: %v", n, insertErr)
+				failed.Add(1)
+				return
+			}
+
+			inserted.Add(1)
+			log.Printf("로또: 회차 %d 저장 완료", n)
+		}(drwNo)
 	}
 	wg.Wait()
 
-	inserted := 0
-	for _, r := range results {
-		if r.err != nil {
-			log.Printf("로또: 회차 %d 최종 조회 실패(재시도 소진): %v", r.drwNo, r.err)
-			continue
-		}
-		if r.data.ReturnValue != "success" {
-			// 아직 추첨되지 않은 회차 — 이론상 추정치가 실제보다 앞서
-			// 나간 경우다(예: 이번 주 추첨 직전).
-			continue
-		}
-		if err := insertLottoDraw(ctx, conn, r.data); err != nil {
-			log.Printf("로또: 회차 %d 저장 실패: %v", r.drwNo, err)
-			continue
-		}
-		inserted++
-	}
-
-	log.Printf("로또: 신규 %d개 회차 중 %d개 저장 완료", total, inserted)
+	log.Printf("로또: 신규 %d개 회차 중 %d개 저장 완료, %d개 실패(다음 사이클에 재시도)", total, inserted.Load(), failed.Load())
 	return nil
 }
 
