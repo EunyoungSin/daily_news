@@ -1,7 +1,13 @@
-import { useState } from 'react'
-import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import type { ExchangeRatePoint, ExchangeSection } from '../types'
+import { lazy, Suspense, useState } from 'react'
+import type { ExchangeSection } from '../types'
 import { usePulseOnChange } from '../hooks/usePulseOnChange'
+import { formatRate } from '../utils/exchangeFormat'
+
+// recharts(+d3/victory-vendor 등 무거운 의존성 트리)는 대시보드 첫 화면에
+// 곧바로 필요하지 않으므로(데이터 로딩 중에는 스켈레톤만 보임) 지연
+// 로딩한다 — 이걸로 recharts가 vendor-react/main 청크에서 완전히 빠져
+// 별도 청크로 분리된다(vite.config.ts의 manualChunks 참고).
+const ExchangeChart = lazy(() => import('./ExchangeChart'))
 
 interface Props {
   section: ExchangeSection
@@ -12,80 +18,6 @@ interface Props {
   // 바뀐다 — 오래된 추세선은 오래된 단일 수치보다 더 오해를 주기
   // 때문이다.
   loading: boolean
-}
-
-// "YYYY-MM-DD" -> "MM/DD" — 좁은 카드 안 7개 포인트짜리 축에 들어갈
-// 만큼 짧게 줄인다.
-function formatChartDate(date: string): string {
-  const parts = date.split('-')
-  return parts.length === 3 ? `${parts[1]}/${parts[2]}` : date
-}
-
-// 백엔드의 displayRate는 항상 rate의 "보기 편한" 쪽이다 — 이미 1 이상이면
-// 원래 값 그대로, 아니면 그 역수(항상 1보다 큼)를 쓴다
-// (backend/exchange.go의 computeExchangeDisplay 참고) — 그래서 프론트엔드는
-// 여기서 소수점 2자리 고정, 콤마 구분 포맷만 쓰면 되고, 0.00069 같은
-// 1 미만 원본 rate에 필요한 동적 소수 자릿수 조정은 필요 없다.
-function formatRate(value: number): string {
-  return value.toLocaleString('ko-KR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-}
-
-interface ChartPoint {
-  date: string
-  label: string
-  rate: number
-}
-
-function ExchangeChartTooltip({ active, payload }: { active?: boolean; payload?: Array<{ payload: ChartPoint }> }) {
-  if (!active || !payload?.length) return null
-  const point = payload[0].payload
-  return (
-    <div className="exchange__chart-tooltip">
-      <div className="exchange__chart-tooltip-date">{point.date}</div>
-      <div className="exchange__chart-tooltip-rate">{formatRate(point.rate)}</div>
-    </div>
-  )
-}
-
-// raw rate가 아니라 displayRate를 기준으로 그린다 — 그래야 KRW->USD
-// 쌍도 헤드라인 수치나 "어제" 라인과 같은 익숙한 "~1,449" 스케일로
-// 그려지고, 노이즈처럼 보이는 거의 평평한 0.00068~0.00069 라인이
-// 되지 않는다.
-function ExchangeChart({ weekly }: { weekly: ExchangeRatePoint[] }) {
-  const data: ChartPoint[] = weekly.map((p) => ({ date: p.date, label: formatChartDate(p.date), rate: p.displayRate }))
-
-  return (
-    <div className="exchange__chart">
-      <ResponsiveContainer width="100%" height={100}>
-        <LineChart data={data} margin={{ top: 6, right: 20, bottom: 0, left: 4 }}>
-          <XAxis
-            dataKey="label"
-            tick={{ fontSize: 10, fill: 'var(--text-faint)' }}
-            axisLine={{ stroke: 'var(--panel-border)' }}
-            tickLine={false}
-          />
-          <YAxis
-            domain={['auto', 'auto']}
-            tick={{ fontSize: 10, fill: 'var(--text-faint)' }}
-            axisLine={false}
-            tickLine={false}
-            width={44}
-            tickFormatter={(v: number) => v.toLocaleString('ko-KR', { maximumFractionDigits: 0 })}
-          />
-          <Tooltip content={<ExchangeChartTooltip />} cursor={{ stroke: 'var(--panel-border-strong)' }} />
-          <Line
-            type="monotone"
-            dataKey="rate"
-            stroke="var(--accent-exchange)"
-            strokeWidth={2}
-            dot={{ r: 3, fill: 'var(--accent-exchange)', strokeWidth: 0 }}
-            activeDot={{ r: 5 }}
-            isAnimationActive={false}
-          />
-        </LineChart>
-      </ResponsiveContainer>
-    </div>
-  )
 }
 
 function ExchangeChartSkeleton() {
@@ -161,7 +93,9 @@ export default function ExchangeCard({ section, onRetry, loading }: Props) {
           {loading || retrying ? (
             <ExchangeChartSkeleton />
           ) : section.data.weekly && section.data.weekly.length > 0 ? (
-            <ExchangeChart weekly={section.data.weekly} />
+            <Suspense fallback={<ExchangeChartSkeleton />}>
+              <ExchangeChart weekly={section.data.weekly} />
+            </Suspense>
           ) : (
             <p className="exchange__chart-empty">최근 7일 추이 데이터를 사용할 수 없습니다</p>
           )}

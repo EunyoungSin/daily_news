@@ -1,7 +1,15 @@
-import { useEffect, useMemo, useState } from 'react'
-import type { LottoDraw, LottoRecommendation, LottoRecommendationGroup, LottoRecommendationNumber, LottoSection } from '../types'
+import { lazy, Suspense, useState } from 'react'
+import type { LottoSection } from '../types'
 import { usePulseOnChange } from '../hooks/usePulseOnChange'
-import { useLottoCollection } from '../hooks/useLottoCollection'
+import LottoBall from './lotto/LottoBall'
+import LottoRecommendation from './lotto/LottoRecommendation'
+import CollectionToggle from './lotto/CollectionToggle'
+
+// 회차 목록(최대 50행)과 히트맵(45칸)은 스크롤을 내려야 보이고 데이터도
+// 무거워서 지연 로딩한다 — vite.config.ts의 manualChunks와 함께 이
+// 두 컴포넌트를 초기 번들에서 분리한다.
+const LottoHistoryList = lazy(() => import('./lotto/LottoHistoryList'))
+const LottoHeatmap = lazy(() => import('./lotto/LottoHeatmap'))
 
 interface Props {
   section: LottoSection | null
@@ -10,169 +18,30 @@ interface Props {
   onRetry: () => Promise<void>
 }
 
-// 실제 동행복권 공 색상: 1-10 노랑, 11-20 파랑, 21-30 빨강, 31-40 회색, 41-45 초록.
-function ballColor(n: number): string {
-  if (n <= 10) return '#fbc400'
-  if (n <= 20) return '#69c8f2'
-  if (n <= 30) return '#ff7272'
-  if (n <= 40) return '#aaaaaa'
-  return '#b0d840'
-}
-
-function LottoBall({ n, small, bonus }: { n: number; small?: boolean; bonus?: boolean }) {
-  return (
-    <span
-      className={
-        'lotto__ball' + (small ? ' lotto__ball--sm' : '') + (bonus ? ' lotto__ball--bonus' : '')
-      }
-      style={{ background: ballColor(n) }}
-    >
-      {n}
-    </span>
-  )
-}
-
-function HistoryRow({ draw }: { draw: LottoDraw }) {
-  return (
-    <li className="lotto__history-row">
-      <span className="lotto__history-no">{draw.drwNo}회</span>
-      <span className="lotto__history-date">{draw.drwDate}</span>
-      <span className="lotto__history-balls">
-        {draw.numbers.map((n) => (
-          <LottoBall n={n} small key={n} />
-        ))}
-        <span className="lotto__plus">+</span>
-        <LottoBall n={draw.bonus} small bonus />
-      </span>
-    </li>
-  )
-}
-
 function formatUpdatedAt(iso: string): string {
   return new Date(iso).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })
 }
 
-const RECOMMENDATION_GROUP_ICON: Record<LottoRecommendationGroup, string> = {
-  hot: '🔥',
-  mid: '⚖️',
-  cold: '❄️',
-}
-
-const RECOMMENDATION_GROUP_LABEL: Record<LottoRecommendationGroup, string> = {
-  hot: '최근 출현 많음',
-  mid: '중간 빈도',
-  cold: '최근 출현 적음',
-}
-
-function RecommendationBall({ n }: { n: LottoRecommendationNumber }) {
+function LottoHistorySkeleton() {
   return (
-    <div className="lotto__rec-ball-wrap">
-      <span className="lotto__rec-group-icon" title={RECOMMENDATION_GROUP_LABEL[n.group]} aria-hidden="true">
-        {RECOMMENDATION_GROUP_ICON[n.group]}
-      </span>
-      <LottoBall n={n.number} />
+    <div className="lotto__section" aria-label="회차별 당첨번호 불러오는 중">
+      <span className="skeleton-line skeleton-header" />
+      <span className="skeleton-line skeleton-line--row" />
+      <span className="skeleton-line skeleton-line--row" />
+      <span className="skeleton-line skeleton-line--row" />
     </div>
   )
 }
 
-// nextAvailableAt까지 남은 시간을 시/분 단위로 카운트다운하며 30초마다
-// 갱신한다 (몇 시간 단위의 카운트다운이니 초 단위 정밀도까지는 필요 없다).
-function useCountdownLabel(targetIso: string | undefined): string {
-  const [label, setLabel] = useState('')
-
-  useEffect(() => {
-    if (!targetIso) {
-      setLabel('')
-      return
-    }
-
-    const targetMs = new Date(targetIso).getTime()
-
-    const tick = () => {
-      const diffMs = targetMs - Date.now()
-      if (diffMs <= 0) {
-        setLabel('곧 공개')
-        return
-      }
-      const totalMinutes = Math.floor(diffMs / 60000)
-      const hours = Math.floor(totalMinutes / 60)
-      const minutes = totalMinutes % 60
-      setLabel(`${hours}시간 ${minutes}분 후 공개`)
-    }
-
-    tick()
-    const id = setInterval(tick, 30000)
-    return () => clearInterval(id)
-  }, [targetIso])
-
-  return label
-}
-
-function RecommendationSection({ recommendation }: { recommendation: LottoRecommendation }) {
-  const countdown = useCountdownLabel(recommendation.isBlackout ? recommendation.nextAvailableAt : undefined)
-
+function LottoHeatmapSkeleton() {
   return (
-    <div className="lotto__section lotto__recommendation">
-      <h3 className="lotto__section-title">🎲 이번 주 추천 번호</h3>
-
-      {recommendation.isBlackout ? (
-        <div className="lotto__rec-blackout">
-          <p>
-            현재는 이번 회차 판매가 마감되어 추천 번호를 준비 중입니다. 일요일 오전 6시부터 다음 회차 추천 번호를
-            확인하실 수 있어요.
-          </p>
-          {countdown && <p className="lotto__rec-countdown">{countdown}</p>}
-        </div>
-      ) : (
-        <div className="lotto__balls">
-          {recommendation.numbers?.map((n) => (
-            <RecommendationBall n={n} key={n.number} />
-          ))}
-        </div>
-      )}
-
-      <p className="lotto__rec-disclaimer">
-        최근 50회 출현 빈도를 상/중/하로 나눠 골고루 섞은 재미용 번호로, 실제 당첨 확률과는 무관하며 특정 조합의
-        구매를 권하는 것이 아닙니다.
-      </p>
-    </div>
-  )
-}
-
-// 데이터 수집 ON/OFF 토글 — 로또 카드와는 별개의 상태(useLottoCollection)를
-// 다루므로 독립된 컴포넌트로 분리했다. ON인 동안 "42/50 회차 수집됨" 진행
-// 상황을 함께 보여준다. onToggle은 토글 직후 useLotto의 데이터를 즉시
-// 다시 가져오게 해서(section.isBackfilling 갱신), 다음 자동 폴링을 기다리지
-// 않고 바로 "수집 중" 상태로 화면이 반응하게 한다.
-function CollectionToggle({ onToggle }: { onToggle: () => void }) {
-  const { status, busy, start, stop } = useLottoCollection()
-  const running = status?.running ?? false
-
-  const handleClick = async () => {
-    if (running) {
-      await stop()
-    } else {
-      await start()
-    }
-    onToggle()
-  }
-
-  return (
-    <div className="lotto__collection-toggle">
-      <button
-        type="button"
-        className={running ? 'lotto__toggle-btn lotto__toggle-btn--on' : 'lotto__toggle-btn'}
-        onClick={handleClick}
-        disabled={busy}
-        aria-pressed={running}
-      >
-        🔄 데이터 수집: {running ? 'ON' : 'OFF'}
-      </button>
-      {status && (running || status.savedCount > 0) && (
-        <span className="lotto__collection-progress">
-          {status.savedCount}/{status.windowSize} 회차 수집됨
-        </span>
-      )}
+    <div className="lotto__section" aria-label="번호별 출현 횟수 불러오는 중">
+      <span className="skeleton-line skeleton-header" />
+      <div className="skeleton-weather-row">
+        {Array.from({ length: 9 }).map((_, i) => (
+          <span className="skeleton-circle" key={i} style={{ width: 28, height: 28 }} />
+        ))}
+      </div>
     </div>
   )
 }
@@ -180,17 +49,6 @@ function CollectionToggle({ onToggle }: { onToggle: () => void }) {
 export default function LottoCard({ section, loading, error, onRetry }: Props) {
   const [retrying, setRetrying] = useState(false)
   const pulsing = usePulseOnChange(section?.data?.latest.drwNo)
-
-  const freqEntries = useMemo(() => {
-    const freq = section?.data?.frequency ?? {}
-    return Array.from({ length: 45 }, (_, i) => i + 1).map((n) => ({
-      n,
-      count: freq[String(n)] ?? 0,
-    }))
-  }, [section])
-
-  const maxCount = useMemo(() => Math.max(1, ...freqEntries.map((f) => f.count)), [freqEntries])
-  const minCount = useMemo(() => Math.min(...freqEntries.map((f) => f.count)), [freqEntries])
 
   const handleRetry = async () => {
     setRetrying(true)
@@ -262,7 +120,7 @@ export default function LottoCard({ section, loading, error, onRetry }: Props) {
               </div>
             </div>
 
-            <RecommendationSection recommendation={section.data.recommendation} />
+            <LottoRecommendation recommendation={section.data.recommendation} />
 
             <div className="lotto__section">
               <h3 className="lotto__section-title">최근 10회 출현 번호</h3>
@@ -294,40 +152,13 @@ export default function LottoCard({ section, loading, error, onRetry }: Props) {
           </div>
 
           <div className="lotto__col">
-            <div className="lotto__section">
-              <h3 className="lotto__section-title">회차별 당첨번호 (최근 {section.data.history.length}회)</h3>
-              <ol className="lotto__history">
-                {section.data.history.map((draw) => (
-                  <HistoryRow draw={draw} key={draw.drwNo} />
-                ))}
-              </ol>
-            </div>
+            <Suspense fallback={<LottoHistorySkeleton />}>
+              <LottoHistoryList history={section.data.history} />
+            </Suspense>
 
-            <div className="lotto__section">
-              <h3 className="lotto__section-title">번호별 출현 횟수 (최근 {section.data.history.length}회)</h3>
-              <div className="lotto__heatmap">
-                {freqEntries.map(({ n, count }) => {
-                  const ratio = maxCount === minCount ? 0.5 : (count - minCount) / (maxCount - minCount)
-                  const mix = Math.round(12 + ratio * 78)
-                  return (
-                    <div
-                      key={n}
-                      className="lotto__heat-cell"
-                      style={{ background: `color-mix(in srgb, var(--accent-lotto) ${mix}%, var(--panel-sunken))` }}
-                      title={`${n}번: ${count}회`}
-                    >
-                      <span className="lotto__heat-num">{n}</span>
-                      <span className="lotto__heat-count">{count}</span>
-                    </div>
-                  )
-                })}
-              </div>
-              <div className="lotto__heat-legend">
-                <span>적음</span>
-                <span className="lotto__heat-gradient" aria-hidden="true" />
-                <span>많음</span>
-              </div>
-            </div>
+            <Suspense fallback={<LottoHeatmapSkeleton />}>
+              <LottoHeatmap frequency={section.data.frequency} historyLength={section.data.history.length} />
+            </Suspense>
           </div>
         </div>
       )}
