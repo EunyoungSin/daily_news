@@ -10,6 +10,11 @@ services:
     dockerfilePath: ./Dockerfile
     dockerContext: .
     plan: free
+    # /healthz는 DB/외부 API를 전혀 건드리지 않고 즉시 200을 반환하므로,
+    # Render가 "프로세스가 요청을 받을 수 있는지"만으로 헬스체크를 판단하게
+    # 한다 — dhlottery/Groq/NewsData.io 장애가 헬스체크 실패로 오인되어
+    # 불필요한 재시작이 도는 것을 막는다.
+    healthCheckPath: /healthz
     envVars:
       - key: GROQ_API_KEY
         sync: false
@@ -29,3 +34,9 @@ services:
         sync: false
       - key: DB_USE_TLS
         value: "true"
+      # dhlottery가 차단되어 있는 등 로또 수집 자체가 문제를 일으킬 때,
+      # 코드 재배포 없이 Render 대시보드에서 바로 "false"로 바꿔 로또
+      # 섹션/백그라운드 수집을 완전히 멈출 수 있다. sync: false라서 여기
+      # 값은 초기 생성 시에만 참고되고, 이후에는 대시보드에서 직접 관리한다.
+      - key: LOTTO_ENABLED
+        sync: false

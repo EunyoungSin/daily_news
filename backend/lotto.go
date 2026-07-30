@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -61,6 +62,17 @@ func lottoFetchConcurrencyLimit() int {
 	return lottoFetchConcurrencyDefault
 }
 
+// lottoEnabled는 로또 섹션/백그라운드 채우기 전체를 켜고 끄는 스위치다.
+// dhlottery가 차단 상태인 동안 계속 재시도하는 것 자체가(응답을 기다리는
+// 고루틴, 반복되는 아웃바운드 연결 시도) 리소스가 빠듯한 배포 환경에서
+// 다른 요청 처리에 부담을 줄 수 있어, 명시적으로 LOTTO_ENABLED=false를
+// 설정하면 dhlottery 호출 자체를 아예 시도하지 않도록 완전히 멈출 수 있게
+// 했다. 기본값은 true(값을 아예 안 주거나 "false"가 아니면 계속 켜져
+// 있음)다.
+func lottoEnabled() bool {
+	return strings.ToLower(os.Getenv("LOTTO_ENABLED")) != "false"
+}
+
 // lottoRequestPacer는 세마포어(동시 실행 개수)와는 별개로, dhlottery로 나가는
 // 모든 요청(재시도 포함)이 전역적으로 최소 lottoRequestInterval만큼 간격을
 // 두고 시작하도록 강제한다. 동시성 설정이 2 이상이어도 실제 "초당 요청 수"는
@@ -111,7 +123,15 @@ func lottoIsBackfilling() bool {
 // context.Background()에서 파생된, 이를 호출한 HTTP 요청과는 완전히
 // 무관한 lottoBackfillTimeout 시한을 사용하므로, 사용자의 요청이 먼저
 // 끝나거나 타임아웃되어도 채우기 작업 자체는 계속 진행된다.
+//
+// lottoEnabled()가 false면 아무 것도 하지 않는다 — 호출부(lottoHandler,
+// main.go)가 이미 각자 이 플래그를 확인하지만, 여기서도 한 번 더
+// 확인해서 이 함수를 호출하는 곳이 늘어나도 실수로 우회될 여지를 없앤다.
 func lottoEnsureBackfillStarted(conn *sql.DB) {
+	if !lottoEnabled() {
+		return
+	}
+
 	lottoBackfillState.mu.Lock()
 	if lottoBackfillState.inProgress {
 		lottoBackfillState.mu.Unlock()

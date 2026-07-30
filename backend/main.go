@@ -35,6 +35,15 @@ func withCORS(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// healthzHandler는 프로세스가 요청을 받아 응답할 수 있는 상태인지만
+// 확인한다 — DB, dhlottery, Groq, NewsData.io 등 어떤 외부 의존성도
+// 건드리지 않는다. 그런 의존성이 죽었다고 해서 로드밸런서/플랫폼이
+// 정상적으로 살아있는 프로세스를 재시작하는 것을 원치 않기 때문이다.
+func healthzHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("ok"))
+}
+
 func newStaticHandler() http.Handler {
 	staticFS, err := fs.Sub(embeddedStatic, "static")
 	if err != nil {
@@ -84,14 +93,23 @@ func main() {
 	} else {
 		db = conn
 		log.Println("MySQL 연결 및 마이그레이션 완료")
-		// 서버 시작 시점에 곧바로 백그라운드 채우기를 시도해둔다 — 첫 번째
-		// GET /api/lotto 요청을 기다리지 않고도 배포 직후(빈 DB) 최초 50회
-		// 수집이 미리 시작되도록 하기 위함이다.
-		lottoEnsureBackfillStarted(db)
+		if lottoEnabled() {
+			// 서버 시작 시점에 곧바로 백그라운드 채우기를 시도해둔다 — 첫 번째
+			// GET /api/lotto 요청을 기다리지 않고도 배포 직후(빈 DB) 최초 50회
+			// 수집이 미리 시작되도록 하기 위함이다.
+			lottoEnsureBackfillStarted(db)
+		} else {
+			log.Println("로또: LOTTO_ENABLED=false — dhlottery 수집을 건너뜁니다")
+		}
 	}
 
 	mux := http.NewServeMux()
 
+	// /healthz는 DB 연결이나 외부 API 호출 없이 곧바로 200을 반환한다 —
+	// Render 등 플랫폼의 헬스체크가 "프로세스가 요청을 받을 수 있는
+	// 상태인지"만 판단하도록, 다른 엔드포인트처럼 외부 의존성(DB, dhlottery,
+	// Groq 등)의 상태에 좌우되지 않게 하기 위함이다.
+	mux.HandleFunc("/healthz", healthzHandler)
 	mux.HandleFunc("/api/dashboard", withCORS(dashboardHandler))
 	mux.HandleFunc("/api/news", withCORS(newsHandler))
 	mux.HandleFunc("/api/lotto", withCORS(lottoHandler))

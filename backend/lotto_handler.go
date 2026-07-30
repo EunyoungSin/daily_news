@@ -18,10 +18,25 @@ const lottoTimeout = 15 * time.Second
 
 func lottoHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	w.Header().Set("Content-Type", "application/json")
+
+	if !lottoEnabled() {
+		// DB 조회조차 하지 않고 곧바로 응답한다 — LOTTO_ENABLED=false는
+		// dhlottery 쪽 문제(차단/장애)를 배포 환경에서 완전히 격리해
+		// 나머지 섹션에 영향을 주지 않게 하려는 것이 목적이므로, 이 경로는
+		// 어떤 외부 의존성(DB 포함)도 건드리지 않는다.
+		writeLottoSection(w, LottoSection{
+			SectionMeta: SectionMeta{
+				Success:    true,
+				DurationMs: time.Since(start).Milliseconds(),
+				Notice:     "로또 섹션은 현재 점검 중입니다.",
+			},
+		})
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), lottoTimeout)
 	defer cancel()
-
-	w.Header().Set("Content-Type", "application/json")
 
 	if db == nil {
 		writeLottoSection(w, LottoSection{
