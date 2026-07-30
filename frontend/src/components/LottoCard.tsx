@@ -189,7 +189,14 @@ export default function LottoCard({ section, loading, error, onRetry }: Props) {
         </div>
       )}
 
-      {!loading && failureMessage && !section?.data && (
+      {section?.isBackfilling && !section.data && (
+        <div className="card__body card__preparing" aria-live="polite">
+          <p>⏳ 로또 데이터를 처음 준비하는 중입니다.</p>
+          <p className="card__preparing-sub">몇 초 후 자동으로 다시 확인합니다.</p>
+        </div>
+      )}
+
+      {!loading && failureMessage && !section?.data && !section?.isBackfilling && (
         <div className="card__body card__error">
           <p>⚠️ {failureMessage}</p>
           <button type="button" onClick={handleRetry} disabled={retrying}>

@@ -251,7 +251,12 @@ type LottoData struct {
 
 type LottoSection struct {
 	SectionMeta
-	Data *LottoData `json:"data,omitempty"`
+	// IsBackfilling은 서버가 최초 50회 데이터(또는 그 이후 누락된 회차)를
+	// 백그라운드에서 아직 채우는 중일 때 true다. 프론트엔드는 이 경우 짧은
+	// 간격으로 재요청해 완료 여부를 폴링한다 — lotto.go의
+	// lottoEnsureBackfillStarted 참고.
+	IsBackfilling bool       `json:"isBackfilling"`
+	Data          *LottoData `json:"data,omitempty"`
 }
 
 // Stage는 핸들러가 스트리밍으로 내려보내는 두 NDJSON 라인을 구분한다:

@@ -4,19 +4,17 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"log"
 	"net/http"
-	"sync"
 	"time"
 )
 
-const lottoTimeout = 20 * time.Second
-
-// lottoSyncMu는 동시 요청 간에 syncLottoDraws가 순차적으로만 실행되도록
-// 직렬화한다. 겹치는 두 GET /api/lotto 요청이 동시에 같은 신규 회차를
-// 각자 삽입하려 드는 상황을 막기 위함이다.
-var lottoSyncMu sync.Mutex
+// lottoTimeout은 이제 DB 조회(및 AI 인사이트/추천 계산)만을 위한 예산이다.
+// dhlottery에서 회차를 실제로 채워 넣는, 오래 걸릴 수 있는 작업은
+// lottoEnsureBackfillStarted를 통해 이 요청과 무관한 백그라운드
+// goroutine(lottoBackfillTimeout)에서 처리되므로 더 이상 이 타임아웃 안에
+// 묶여 있지 않다.
+const lottoTimeout = 15 * time.Second
 
 func lottoHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
@@ -36,28 +34,48 @@ func lottoHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	lottoSyncMu.Lock()
-	syncErr := syncLottoDraws(ctx, db)
-	lottoSyncMu.Unlock()
-	if syncErr != nil {
-		log.Printf("로또: 회차 동기화 실패: %v", syncErr)
-		// 계속 진행한다 — dhlottery의 일시적인 문제 때문에 섹션 전체를
-		// 실패로 처리하지 않고, DB에 이미 있는 데이터로 응답한다.
+	// 채워야 할 회차가 있는지는 DB 조회만으로 빠르게 확인한다. 실제 채우기는
+	// (이미 진행 중이 아니라면) 백그라운드에서 시작하고, 이 요청은 그 완료를
+	// 기다리지 않는다 — 최초 50회 수집처럼 오래 걸리는 작업이 사용자 요청의
+	// 타임아웃에 묶여 실패하는 것을 막기 위함이다.
+	needsSync, syncCheckErr := lottoNeedsSync(ctx, db)
+	if syncCheckErr != nil {
+		log.Printf("로또: 동기화 필요 여부 확인 실패: %v", syncCheckErr)
+	} else if needsSync {
+		lottoEnsureBackfillStarted(db)
 	}
+	isBackfilling := needsSync || lottoIsBackfilling()
 
 	data, err := buildLottoData(ctx, db)
 	durationMs := time.Since(start).Milliseconds()
 
 	if err != nil {
 		writeLottoSection(w, LottoSection{
-			SectionMeta: SectionMeta{Success: false, DurationMs: durationMs, Error: err.Error()},
+			SectionMeta:   SectionMeta{Success: false, DurationMs: durationMs, Error: err.Error()},
+			IsBackfilling: isBackfilling,
+		})
+		return
+	}
+
+	if data == nil {
+		// 아직 수집된 회차가 하나도 없다 — 에러가 아니라, 백그라운드 채우기가
+		// 아직 끝나지 않은 정상적인 초기 상태다. 프론트엔드는 isBackfilling을
+		// 보고 짧은 간격으로 다시 요청한다.
+		writeLottoSection(w, LottoSection{
+			SectionMeta: SectionMeta{
+				Success:    true,
+				DurationMs: durationMs,
+				Notice:     "로또 데이터를 처음 준비하는 중입니다. 잠시 후 다시 확인해 주세요.",
+			},
+			IsBackfilling: true,
 		})
 		return
 	}
 
 	writeLottoSection(w, LottoSection{
-		SectionMeta: SectionMeta{Success: true, DurationMs: durationMs},
-		Data:        data,
+		SectionMeta:   SectionMeta{Success: true, DurationMs: durationMs},
+		IsBackfilling: isBackfilling,
+		Data:          data,
 	})
 }
 
@@ -67,7 +85,9 @@ func buildLottoData(ctx context.Context, conn *sql.DB) (*LottoData, error) {
 		return nil, err
 	}
 	if len(history) == 0 {
-		return nil, errors.New("아직 수집된 로또 회차가 없습니다")
+		// 에러가 아니다 — 백그라운드 채우기가 아직 끝나지 않은 것뿐이므로,
+		// 호출자(lottoHandler)가 isBackfilling 상태로 판단하게 둔다.
+		return nil, nil
 	}
 
 	frequency, err := queryFrequency(ctx, conn, lottoHistoryWindow)

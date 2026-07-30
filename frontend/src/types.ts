@@ -237,6 +237,9 @@ export interface LottoData {
 }
 
 export interface LottoSection extends SectionMeta {
+  // 서버가 최초 50회(또는 그 이후 누락된 회차) 데이터를 백그라운드에서
+  // 아직 채우는 중이면 true. true인 동안 useLotto는 짧은 간격으로 폴링한다.
+  isBackfilling: boolean
   data?: LottoData
 }
 

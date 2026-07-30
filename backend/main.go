@@ -84,6 +84,10 @@ func main() {
 	} else {
 		db = conn
 		log.Println("MySQL 연결 및 마이그레이션 완료")
+		// 서버 시작 시점에 곧바로 백그라운드 채우기를 시도해둔다 — 첫 번째
+		// GET /api/lotto 요청을 기다리지 않고도 배포 직후(빈 DB) 최초 50회
+		// 수집이 미리 시작되도록 하기 위함이다.
+		lottoEnsureBackfillStarted(db)
 	}
 
 	mux := http.NewServeMux()

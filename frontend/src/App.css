@@ -446,6 +446,21 @@
   cursor: default;
 }
 
+.card__preparing {
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  text-align: center;
+  padding: var(--space-3) 0;
+  color: var(--text-dim);
+  font-size: 14px;
+}
+
+.card__preparing-sub {
+  font-size: 12px;
+  opacity: 0.75;
+}
+
 /* ---------- 스켈레톤: 대체할 실제 콘텐츠와 비슷한 모양으로 ---------- */
 
 .skeleton-line {
