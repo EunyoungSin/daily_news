@@ -1,9 +1,7 @@
 package main
 
 import (
-	"context"
 	"testing"
-	"time"
 )
 
 func TestComputeChangePercent(t *testing.T) {
@@ -355,28 +353,13 @@ func TestToBriefingExchangeInputTrendMatchesWeeklyArray(t *testing.T) {
 	}
 }
 
-// TestGetCachedOrFetchExchangeReusesFreshEntry는 (실제로 Frankfurter를
-// 호출하는 대신) 캐시를 직접 채워 넣어서 이 테스트가 네트워크 접근에
-// 의존하지 않도록 한다 — getCachedOrFetchExchange가 다시 가져오는 대신
-// 신선한 캐시 항목을 그대로 반환하는지만 확인하면 된다.
-func TestGetCachedOrFetchExchangeReusesFreshEntry(t *testing.T) {
-	key := exchangeFetchCacheKey("USD", "KRW")
-	seeded := &ExchangeData{From: "USD", To: "KRW", Current: ExchangeRatePoint{Rate: 1459.45, DisplayRate: 1459.45}}
-
-	exchangeFetchCache.mu.Lock()
-	exchangeFetchCache.items[key] = exchangeFetchCacheEntry{data: seeded, fetchedAt: time.Now()}
-	exchangeFetchCache.mu.Unlock()
-	t.Cleanup(func() {
-		exchangeFetchCache.mu.Lock()
-		delete(exchangeFetchCache.items, key)
-		exchangeFetchCache.mu.Unlock()
-	})
-
-	got, err := getCachedOrFetchExchange(context.Background(), "USD", "KRW")
-	if err != nil {
-		t.Fatalf("expected the fresh cache entry to be served without error, got %v", err)
-	}
-	if got != seeded {
-		t.Errorf("expected the exact cached *ExchangeData back, got a different value: %+v", got)
+// TestExchangeCacheKeyIncludesPrefix는 raw_data_cache가 날씨/환율/뉴스를
+// 테이블 하나에서 공유하므로, 캐시 키에 "exchange:" 접두사가 항상 붙어서
+// 다른 데이터 종류와 절대 섞이지 않는지 확인한다 — 캐시 히트/미스
+// 자체(DB 연동)는 이 프로젝트의 다른 DB 캐시들과 마찬가지로 실제 서버로
+// 라이브 검증한다(raw_data_cache.go의 isRawCacheFresh 문서 주석 참고).
+func TestExchangeCacheKeyIncludesPrefix(t *testing.T) {
+	if got, want := exchangeFetchCacheKey("USD", "KRW"), "exchange:USD:KRW"; got != want {
+		t.Errorf("exchangeFetchCacheKey(USD, KRW) = %q, want %q", got, want)
 	}
 }

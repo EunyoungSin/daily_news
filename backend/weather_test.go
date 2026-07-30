@@ -188,28 +188,18 @@ func TestSanityCheckDayForecastClearsSuspiciousZero(t *testing.T) {
 	}
 }
 
-// TestGetCachedOrFetchWeatherReusesFreshEntry는 (실제로 KMA/Open-Meteo를
-// 호출하는 대신) 캐시를 직접 채워 넣는다. 그래서 이 테스트는 네트워크
-// 접근에 의존하지 않으며 — getCachedOrFetchWeather가 다시 가져오는 대신
-// fresh한 캐시 항목을 그대로 반환하는지만 확인하면 된다.
-func TestGetCachedOrFetchWeatherReusesFreshEntry(t *testing.T) {
-	const key = "seoul"
-	seeded := &WeatherData{Current: CurrentWeather{City: key, CityLabel: "테스트-서울"}}
-
-	weatherFetchCache.mu.Lock()
-	weatherFetchCache.items[key] = weatherFetchCacheEntry{data: seeded, fetchedAt: time.Now()}
-	weatherFetchCache.mu.Unlock()
-	t.Cleanup(func() {
-		weatherFetchCache.mu.Lock()
-		delete(weatherFetchCache.items, key)
-		weatherFetchCache.mu.Unlock()
-	})
-
-	got, err := getCachedOrFetchWeather(context.Background(), key)
-	if err != nil {
-		t.Fatalf("expected the fresh cache entry to be served without error, got %v", err)
+// TestWeatherCacheKeyIncludesPrefixAndNormalizesCity는 raw_data_cache가
+// 날씨/환율/뉴스를 테이블 하나에서 공유하므로, 캐시 키에 "weather:" 접두사가
+// 항상 붙어서 다른 데이터 종류와 절대 섞이지 않는지, 그리고 알 수 없는
+// city 값이 normalizeCity를 거쳐 defaultCity로 정규화된 키가 되는지
+// 확인한다 — 캐시 히트/미스 자체(DB 연동)는 이 프로젝트의 다른 DB
+// 캐시들과 마찬가지로 실제 서버로 라이브 검증한다(raw_data_cache.go의
+// isRawCacheFresh 문서 주석 참고).
+func TestWeatherCacheKeyIncludesPrefixAndNormalizesCity(t *testing.T) {
+	if got := weatherCacheKey("seoul"); got != "weather:seoul" {
+		t.Errorf("weatherCacheKey(seoul) = %q, want %q", got, "weather:seoul")
 	}
-	if got != seeded {
-		t.Errorf("expected the exact cached *WeatherData back, got a different value: %+v", got)
+	if got, want := weatherCacheKey("존재하지-않는-도시"), "weather:"+defaultCity; got != want {
+		t.Errorf("weatherCacheKey(unknown) = %q, want %q (normalizeCity falls back to defaultCity)", got, want)
 	}
 }

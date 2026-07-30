@@ -120,11 +120,16 @@ CREATE TABLE IF NOT EXISTS ai_insight_cache (
 // 길이가 필요해서 VARCHAR(20)이 아니라 VARCHAR(50)을 쓴다. text가 utf8mb4인
 // 이유는 ai_insight_cache와 동일하다: latin1을 기본값으로 쓰는 서버에서는
 // 한글 텍스트를 위해 명시적으로 지정해야 한다.
+// simple_text는 더 이상 쓰이지 않는다 — 브리핑이 simple(1문장)/detailed
+// (1~2문장) 두 버전 대신 detailed 하나만 생성하도록 단순화됐다(Groq 출력
+// 토큰 절감 목적). 컬럼 자체는 기존 배포와의 호환을 위해 남겨두되(굳이
+// DROP COLUMN까지 할 필요는 없다), NOT NULL이면 새로 값을 안 채워도 되게
+// nullable로 둔다 — makeSimpleTextNullable 참고.
 const createBriefingSectionCacheTable = `
 CREATE TABLE IF NOT EXISTS briefing_section_cache (
 	section VARCHAR(50) PRIMARY KEY,
 	data_hash VARCHAR(64) NOT NULL,
-	simple_text TEXT NOT NULL,
+	simple_text TEXT NULL,
 	detailed_text TEXT NOT NULL,
 	generated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
@@ -136,6 +141,13 @@ CREATE TABLE IF NOT EXISTS briefing_section_cache (
 // 아무 일도 하지 않는다.
 const widenBriefingSectionCacheColumn = `
 ALTER TABLE briefing_section_cache MODIFY COLUMN section VARCHAR(50) NOT NULL`
+
+// makeSimpleTextNullable은 simple_text가 아직 NOT NULL이던 시절(브리핑이
+// simple/detailed 두 버전을 함께 생성하던 때) briefing_section_cache를
+// 생성한 기존 설치본을 위한 일회성 ALTER다. MODIFY COLUMN은 매 시작마다
+// 실행해도 안전하다 — 컬럼이 이미 NULL 허용이면 아무 일도 하지 않는다.
+const makeSimpleTextNullable = `
+ALTER TABLE briefing_section_cache MODIFY COLUMN simple_text TEXT NULL`
 
 // cycle_start_date는 "이번 주" 추천을 식별하는 일요일 06:00 KST 값이며
 // (lotto_recommendation.go 참고) 기본키다 — 사이클마다 정확히 한 행만
@@ -179,6 +191,20 @@ CREATE TABLE IF NOT EXISTS weather_slot_cache (
 const deleteOldWeatherSlotCache = `
 DELETE FROM weather_slot_cache WHERE slot_date < DATE_SUB(CURDATE(), INTERVAL 7 DAY)`
 
+// raw_data_cache는 날씨/환율/뉴스 "원본" API 응답 전체를 JSON 문자열
+// 그대로 저장한다(raw_data_cache.go 참고) — 예전에는 프로세스 메모리
+// TTL 캐시였는데, Render 무료 티어처럼 인스턴스가 잠들었다 재시작되면
+// 메모리가 초기화돼 캐시도 함께 사라졌다. cache_key 예시:
+// "weather:daegu", "exchange:USD:KRW", "news:domestic:top" — 세 데이터
+// 종류가 값 하나의 테이블을 공유하지만 키 접두사로 절대 섞이지 않는다.
+const createRawDataCacheTable = `
+CREATE TABLE IF NOT EXISTS raw_data_cache (
+	cache_key VARCHAR(100) PRIMARY KEY,
+	data_json TEXT NOT NULL,
+	fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	expires_at DATETIME NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+
 // migrate는 lotto/briefing 관련 테이블이 없으면 생성한다.
 // 매 시작마다 실행해도 안전하다.
 func migrate(conn *sql.DB) error {
@@ -194,6 +220,9 @@ func migrate(conn *sql.DB) error {
 	if _, err := conn.Exec(widenBriefingSectionCacheColumn); err != nil {
 		return fmt.Errorf("widen briefing_section_cache.section: %w", err)
 	}
+	if _, err := conn.Exec(makeSimpleTextNullable); err != nil {
+		return fmt.Errorf("make briefing_section_cache.simple_text nullable: %w", err)
+	}
 	if _, err := conn.Exec(createLottoRecommendationTable); err != nil {
 		return fmt.Errorf("create lotto_recommendation: %w", err)
 	}
@@ -202,6 +231,9 @@ func migrate(conn *sql.DB) error {
 	}
 	if _, err := conn.Exec(deleteOldWeatherSlotCache); err != nil {
 		return fmt.Errorf("clean up old weather_slot_cache rows: %w", err)
+	}
+	if _, err := conn.Exec(createRawDataCacheTable); err != nil {
+		return fmt.Errorf("create raw_data_cache: %w", err)
 	}
 	return nil
 }

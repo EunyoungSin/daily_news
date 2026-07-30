@@ -294,25 +294,17 @@ func findYesterdayRate(weekly []ExchangeRatePoint, currentDate string) *Exchange
 	return best
 }
 
-// exchangeFetchCacheTTL은 최근 fetchExchange 결과를 한동안 재사용할 수
-// 있게 한다 — 실제 환율은 하루에 몇 번밖에 갱신되지 않으므로, 이 기간
-// 안에 대시보드를 새로고침/재시도할 때마다 Frankfurter를 다시 호출하는
-// 건 순전한 낭비다. 환율은 날씨보다 훨씬 드물게 변하므로
-// weatherFetchCacheTTL보다 길게 잡았다.
-const exchangeFetchCacheTTL = 30 * time.Minute
-
-var exchangeFetchCache = struct {
-	mu    sync.RWMutex
-	items map[string]exchangeFetchCacheEntry
-}{items: make(map[string]exchangeFetchCacheEntry)}
-
-type exchangeFetchCacheEntry struct {
-	data      *ExchangeData
-	fetchedAt time.Time
-}
+// exchangeRawCacheTTL은 raw_data_cache에 저장된 fetchExchange 결과를
+// 한동안 재사용할 수 있게 한다 — 실제 환율은 하루에 몇 번밖에 갱신되지
+// 않으므로, 이 기간 안에 대시보드를 새로고침/재시도할 때마다
+// Frankfurter를 다시 호출하는 건 순전한 낭비다. 환율은 날씨보다 훨씬
+// 드물게 변하므로 weatherRawCacheTTL보다 길게 잡았다. 예전에는 프로세스
+// 메모리에만 있었지만, 이제는 raw_data_cache 테이블(raw_data_cache.go)에
+// 저장되어 서버가 재시작돼도 그대로 남아있다.
+const exchangeRawCacheTTL = 30 * time.Minute
 
 func exchangeFetchCacheKey(from, to string) string {
-	return from + ":" + to
+	return "exchange:" + from + ":" + to
 }
 
 // getCachedOrFetchExchange는 dashboardHandler가 사용하는 진입점이다 —
@@ -328,25 +320,9 @@ func getCachedOrFetchExchange(ctx context.Context, from, to string) (*ExchangeDa
 	}
 	key := exchangeFetchCacheKey(from, to)
 
-	exchangeFetchCache.mu.RLock()
-	entry, found := exchangeFetchCache.items[key]
-	exchangeFetchCache.mu.RUnlock()
-
-	if found && time.Since(entry.fetchedAt) < exchangeFetchCacheTTL {
-		log.Printf("환율(%s): 최근 %s 이내 캐시 재사용 (Frankfurter 미호출)", key, exchangeFetchCacheTTL)
-		return entry.data, nil
-	}
-
-	data, err := fetchExchange(ctx, from, to)
-	if err != nil {
-		return nil, err
-	}
-
-	exchangeFetchCache.mu.Lock()
-	exchangeFetchCache.items[key] = exchangeFetchCacheEntry{data: data, fetchedAt: time.Now()}
-	exchangeFetchCache.mu.Unlock()
-
-	return data, nil
+	return fetchWithRawCache(ctx, db, key, exchangeRawCacheTTL, func(ctx context.Context) (*ExchangeData, error) {
+		return fetchExchange(ctx, from, to)
+	})
 }
 
 func fetchExchange(ctx context.Context, from, to string) (*ExchangeData, error) {

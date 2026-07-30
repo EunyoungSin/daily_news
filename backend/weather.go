@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"sync"
 	"time"
 )
 
@@ -105,50 +104,29 @@ type openMeteoResponse struct {
 	} `json:"hourly"`
 }
 
-// weatherFetchCacheTTL은 최근 fetchWeather 결과를 몇 분간 재사용 가능하게
-// 유지하여, 그 시간 안에 "조회"/자동 새로고침을 반복하거나(또는 같은 도시를
-// 여러 브라우저 탭에서 열어놓는 경우) 매번 기상청/Open-Meteo를 다시 호출하지
-// 않도록 한다. 이는 weatherSlotCache(weather_slot_cache.go)와는 별개다.
-// weatherSlotCache는 개별 예보 슬롯을 하루 종일 MySQL에 영속 저장하여
-// 재시작 후에도 남아 있고 특정 시각의 누락 데이터를 채워 넣는 반면, 이
-// 캐시는 순전히 메모리상에서 외부 호출 전체를 짧게 캐싱할 뿐이며 재시작하면
-// 사라지고 MySQL은 전혀 건드리지 않는다.
-const weatherFetchCacheTTL = 10 * time.Minute
+// weatherRawCacheTTL은 raw_data_cache에 저장된 fetchWeather 결과를 몇 분간
+// 재사용 가능하게 유지하여, 그 시간 안에 "조회"/자동 새로고침을
+// 반복하거나(또는 같은 도시를 여러 브라우저 탭에서 열어놓는 경우) 매번
+// 기상청/Open-Meteo를 다시 호출하지 않도록 한다. 이는
+// weatherSlotCache(weather_slot_cache.go)와는 별개다. weatherSlotCache는
+// 개별 예보 슬롯을 하루 종일 MySQL에 영속 저장하여 재시작 후에도 남아
+// 있고 특정 시각의 누락 데이터를 채워 넣는 반면, 이 캐시는 fetchWeather의
+// 반환값 전체(현재 날씨 + 오늘/내일 예보)를 그대로 JSON으로 캐싱한다 —
+// 예전에는 프로세스 메모리에만 있어서 서버가 재시작되면(Render 무료
+// 티어가 슬립 후 깨어날 때 등) 사라졌지만, 이제는 raw_data_cache
+// 테이블(raw_data_cache.go)에 저장되어 재시작 후에도 그대로 남아있다.
+const weatherRawCacheTTL = 10 * time.Minute
 
-var weatherFetchCache = struct {
-	mu    sync.RWMutex
-	items map[string]weatherFetchCacheEntry
-}{items: make(map[string]weatherFetchCacheEntry)}
-
-type weatherFetchCacheEntry struct {
-	data      *WeatherData
-	fetchedAt time.Time
+func weatherCacheKey(city string) string {
+	return "weather:" + normalizeCity(city)
 }
 
 // getCachedOrFetchWeather는 dashboardHandler의 진입점이다 — 기상청/Open-Meteo를
 // 다시 호출하는 대신 최근 fetchWeather 결과를 재사용한다.
 func getCachedOrFetchWeather(ctx context.Context, city string) (*WeatherData, error) {
-	key := normalizeCity(city)
-
-	weatherFetchCache.mu.RLock()
-	entry, found := weatherFetchCache.items[key]
-	weatherFetchCache.mu.RUnlock()
-
-	if found && time.Since(entry.fetchedAt) < weatherFetchCacheTTL {
-		log.Printf("날씨(%s): 최근 %s 이내 캐시 재사용 (KMA/Open-Meteo 미호출)", key, weatherFetchCacheTTL)
-		return entry.data, nil
-	}
-
-	data, err := fetchWeather(ctx, city)
-	if err != nil {
-		return nil, err
-	}
-
-	weatherFetchCache.mu.Lock()
-	weatherFetchCache.items[key] = weatherFetchCacheEntry{data: data, fetchedAt: time.Now()}
-	weatherFetchCache.mu.Unlock()
-
-	return data, nil
+	return fetchWithRawCache(ctx, db, weatherCacheKey(city), weatherRawCacheTTL, func(ctx context.Context) (*WeatherData, error) {
+		return fetchWeather(ctx, city)
+	})
 }
 
 // fetchWeather는 국내 도시에 대해 기상청(KMA)으로 요청을 보낸다 —

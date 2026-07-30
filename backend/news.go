@@ -186,29 +186,22 @@ func fetchNewsDataIO(ctx context.Context, category, region string) (*NewsData, e
 	return data, nil
 }
 
-// newsFetchCacheTTL은 동일한 category+region 조합의 fetch 결과(와 그 번역)를
-// 일정 시간 동안 재사용할 수 있게 한다. 이렇게 하는 이유는 GET /api/news와
-// AI 브리핑 내부의 뉴스 fetch(dashboardHandler — 브리핑은 기사 내용이 필요하지만
-// 이를 직접 노출하지는 않는다)가 사용자가 페이지를 로드할 때마다 동일한 요청에
-// 대해 각각 NewsData.io credit을 소모하지 않도록 하기 위해서다: NewsData.io
-// 무료 요금제는 하루 200 credit뿐이다. 30분(초기값 5분에서 늘림)으로 정한 것은
-// 뉴스 헤드라인이 그보다 자주 확인해야 할 만큼 빠르게 바뀌지 않기 때문이며,
-// 이렇게 하면 실제로 서로 다른 category/region 조합을 위해 쓸 수 있는 하루
-// 200-credit 예산을 훨씬 더 넉넉하게 남겨둘 수 있다.
-const newsFetchCacheTTL = 30 * time.Minute
-
-var newsFetchCache = struct {
-	mu    sync.Mutex
-	items map[string]newsFetchCacheEntry
-}{items: make(map[string]newsFetchCacheEntry)}
-
-type newsFetchCacheEntry struct {
-	data      *NewsData
-	fetchedAt time.Time
-}
+// newsRawCacheTTL은 동일한 category+region 조합의 raw_data_cache 항목(과 그
+// 번역)을 일정 시간 동안 재사용할 수 있게 한다. 이렇게 하는 이유는
+// GET /api/news와 AI 브리핑 내부의 뉴스 fetch(dashboardHandler — 브리핑은
+// 기사 내용이 필요하지만 이를 직접 노출하지는 않는다)가 사용자가 페이지를
+// 로드할 때마다 동일한 요청에 대해 각각 NewsData.io credit을 소모하지
+// 않도록 하기 위해서다: NewsData.io 무료 요금제는 하루 200 credit뿐이다.
+// 30분(초기값 5분에서 늘림)으로 정한 것은 뉴스 헤드라인이 그보다 자주
+// 확인해야 할 만큼 빠르게 바뀌지 않기 때문이며, 이렇게 하면 실제로 서로
+// 다른 category/region 조합을 위해 쓸 수 있는 하루 200-credit 예산을 훨씬
+// 더 넉넉하게 남겨둘 수 있다. 예전에는 프로세스 메모리에만 있었지만,
+// 이제는 raw_data_cache 테이블(raw_data_cache.go)에 저장되어 서버가
+// 재시작돼도 그대로 남아있다.
+const newsRawCacheTTL = 30 * time.Minute
 
 func newsFetchCacheKey(category, region string) string {
-	return region + ":" + category
+	return "news:" + region + ":" + category
 }
 
 // newsDataIOQuotaThreshold는 newsDataIOUsage가 무료 요금제의 하루 200-credit
@@ -256,36 +249,77 @@ func newsDataIOUsageCount() int {
 // 갱신되지 않는지 설명 없이 오래된 뉴스를 조용히 보여주는 일이 없게 한다.
 const newsDataIOQuotaNotice = "오늘 뉴스 조회 한도에 근접해 갱신을 잠시 제한합니다"
 
+// newsShouldServeStaleForQuota는 오늘 NewsData.io 사용량이 한도에
+// 근접했을 때, 캐시가 만료됐더라도 재조회를 건너뛰고 그 캐시를 그대로
+// 서빙해야 하는지를 판단하는 순수 함수다 — DB 접근이 없어 단위 테스트가
+// 쉽다. found가 false면(대체할 캐시 자체가 없으면) 쿼터와 무관하게 항상
+// false다 — 되돌아갈 곳이 없다면 어차피 새로 조회하는 수밖에 없다.
+func newsShouldServeStaleForQuota(found bool, todayCount int) bool {
+	return found && todayCount >= newsDataIOQuotaThreshold
+}
+
 // getCachedOrFetchNews는 /api/news와 브리핑이 공통으로 호출해야 하는
 // 단일 진입점이다 — 최근에 가져온 결과를 투명하게 재사용해서 NewsData.io를
 // 다시 호출하지 않도록 한다. 오늘 사용량이 무료 요금제의 credit 한도에
 // 가까워지면, 정상적인 TTL 범위를 벗어났더라도 credit을 추가로 쓰는 대신
 // (존재한다면) 오래된 캐시 항목을 그대로 서빙한다.
+//
+// weather.go/exchange.go의 getCachedOrFetchWeather/Exchange와 달리
+// fetchWithRawCache(raw_data_cache.go)를 그대로 재사용하지 않고 캐시
+// 조회/저장 로직을 직접 푼 이유는, 뉴스에만 있는 "오늘 크레딧 사용량이
+// 한도에 근접하면 만료된 캐시라도 재조회 자체를 시도하지 않고 미리
+// 서빙한다"는 세 번째 분기 때문이다 — 이 분기는 fetchFn을 호출하기도
+// 전에 끼어들어야 해서, 공통 헬퍼의 "fetchFn 실패 시에만 캐시로 폴백"
+// 흐름에 깔끔하게 들어맞지 않는다.
 func getCachedOrFetchNews(ctx context.Context, category, region string) (data *NewsData, notice string, err error) {
 	key := newsFetchCacheKey(category, region)
 
-	newsFetchCache.mu.Lock()
-	entry, found := newsFetchCache.items[key]
-	newsFetchCache.mu.Unlock()
+	row, found := lookupRawDataCache(ctx, db, key)
+	now := time.Now()
 
-	if found && time.Since(entry.fetchedAt) < newsFetchCacheTTL {
-		log.Printf("뉴스(%s): 최근 %s 이내 캐시 재사용 (NewsData.io 미호출)", key, newsFetchCacheTTL)
-		return entry.data, "", nil
+	if found && isRawCacheFresh(row, now) {
+		var cached NewsData
+		if jsonErr := json.Unmarshal([]byte(row.dataJSON), &cached); jsonErr == nil {
+			log.Printf("뉴스(%s): %s까지 유효 (NewsData.io 미호출)", key, row.expiresAt.Format("15:04:05"))
+			return &cached, "", nil
+		}
+		log.Printf("뉴스(%s): 저장된 JSON 파싱 실패, 무시하고 새로 가져옵니다", key)
+		found = false
 	}
 
-	if found && newsDataIOUsageCount() >= newsDataIOQuotaThreshold {
-		log.Printf("뉴스(%s): 오늘 NewsData.io 사용량(%d)이 한도에 근접, 캐시 재사용 (신규 호출 생략)", key, newsDataIOUsageCount())
-		return entry.data, newsDataIOQuotaNotice, nil
+	if newsShouldServeStaleForQuota(found, newsDataIOUsageCount()) {
+		var stale NewsData
+		if jsonErr := json.Unmarshal([]byte(row.dataJSON), &stale); jsonErr == nil {
+			log.Printf("뉴스(%s): 오늘 NewsData.io 사용량(%d)이 한도에 근접, 만료된 캐시를 그대로 서빙 (신규 호출 생략)", key, newsDataIOUsageCount())
+			return &stale, newsDataIOQuotaNotice, nil
+		}
 	}
 
-	fetched, err := fetchNewsDataIO(ctx, category, region)
-	if err != nil {
-		return nil, "", err
+	fetched, fetchErr := fetchNewsDataIO(ctx, category, region)
+	if fetchErr != nil {
+		if found {
+			var stale NewsData
+			if jsonErr := json.Unmarshal([]byte(row.dataJSON), &stale); jsonErr == nil {
+				log.Printf("뉴스(%s): NewsData.io 호출 실패(%v) — %s에 가져온 만료 캐시를 잠정치로 사용", key, fetchErr, row.fetchedAt.Format("2006-01-02 15:04:05"))
+				return &stale, "", nil
+			}
+		}
+		return nil, "", fetchErr
 	}
 
-	newsFetchCache.mu.Lock()
-	newsFetchCache.items[key] = newsFetchCacheEntry{data: fetched, fetchedAt: time.Now()}
-	newsFetchCache.mu.Unlock()
+	encoded, marshalErr := json.Marshal(fetched)
+	if marshalErr != nil {
+		log.Printf("뉴스(%s): 직렬화 실패, 캐시 저장은 생략하고 방금 가져온 값을 그대로 반환합니다: %v", key, marshalErr)
+		return fetched, "", nil
+	}
+	// rawCacheUpsertTimeout 문서 주석 참고 — 호출자의 요청 스코프 ctx가 아니라
+	// 독립적인 컨텍스트를 써야, NewsData.io 호출이 요청 타임아웃 예산을 거의
+	// 다 쓰고 나서야 성공한 경우에도 저장 자체가 취소되지 않는다.
+	insertCtx, cancel := context.WithTimeout(context.Background(), rawCacheUpsertTimeout)
+	defer cancel()
+	if upsertErr := upsertRawDataCache(insertCtx, db, key, string(encoded), now, now.Add(newsRawCacheTTL)); upsertErr != nil {
+		log.Printf("뉴스(%s): DB 저장 실패: %v", key, upsertErr)
+	}
 
 	return fetched, "", nil
 }
