@@ -250,10 +250,19 @@ export interface LottoData {
 }
 
 export interface LottoSection extends SectionMeta {
-  // 서버가 최초 50회(또는 그 이후 누락된 회차) 데이터를 백그라운드에서
-  // 아직 채우는 중이면 true. true인 동안 useLotto는 짧은 간격으로 폴링한다.
+  // 사용자가 로또 카드의 ON/OFF 토글로 데이터 수집을 켜서 백그라운드에서
+  // 회차를 채우는 중이면 true. true인 동안 useLotto는 짧은 간격으로 폴링한다.
   isBackfilling: boolean
   data?: LottoData
+}
+
+// GET /api/lotto/collection/status의 응답 — 로또 카드의 ON/OFF 토글이
+// 진행 상황("42/50 회차 수집됨")을 보여주는 데 쓴다.
+export interface LottoCollectionStatus {
+  running: boolean
+  lastCollectedAt?: string
+  savedCount: number
+  windowSize: number
 }
 
 export type SectionKey = 'weather' | 'exchange' | 'briefing'

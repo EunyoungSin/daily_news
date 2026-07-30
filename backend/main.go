@@ -93,14 +93,9 @@ func main() {
 	} else {
 		db = conn
 		log.Println("MySQL 연결 및 마이그레이션 완료")
-		if lottoEnabled() {
-			// 서버 시작 시점에 곧바로 백그라운드 채우기를 시도해둔다 — 첫 번째
-			// GET /api/lotto 요청을 기다리지 않고도 배포 직후(빈 DB) 최초 50회
-			// 수집이 미리 시작되도록 하기 위함이다.
-			lottoEnsureBackfillStarted(db)
-		} else {
-			log.Println("로또: LOTTO_ENABLED=false — dhlottery 수집을 건너뜁니다")
-		}
+		// 로또 수집은 더 이상 서버 시작 시 자동으로 걸리지 않는다 — 화면의
+		// ON/OFF 토글이 POST /api/lotto/collection/start를 통해 명시적으로
+		// 시작해야 한다(기본값은 꺼짐).
 	}
 
 	mux := http.NewServeMux()
@@ -113,6 +108,9 @@ func main() {
 	mux.HandleFunc("/api/dashboard", withCORS(dashboardHandler))
 	mux.HandleFunc("/api/news", withCORS(newsHandler))
 	mux.HandleFunc("/api/lotto", withCORS(lottoHandler))
+	mux.HandleFunc("/api/lotto/collection/start", withCORS(lottoCollectionStartHandler))
+	mux.HandleFunc("/api/lotto/collection/stop", withCORS(lottoCollectionStopHandler))
+	mux.HandleFunc("/api/lotto/collection/status", withCORS(lottoCollectionStatusHandler))
 	mux.HandleFunc("/api/debug/groq-usage", withCORS(groqUsageHandler))
 	mux.Handle("/", newStaticHandler())
 

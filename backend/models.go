@@ -267,10 +267,10 @@ type LottoData struct {
 
 type LottoSection struct {
 	SectionMeta
-	// IsBackfilling은 서버가 최초 50회 데이터(또는 그 이후 누락된 회차)를
-	// 백그라운드에서 아직 채우는 중일 때 true다. 프론트엔드는 이 경우 짧은
-	// 간격으로 재요청해 완료 여부를 폴링한다 — lotto.go의
-	// lottoEnsureBackfillStarted 참고.
+	// IsBackfilling은 사용자가 로또 카드의 ON/OFF 토글로 데이터 수집을 켜서
+	// 백그라운드에서 회차를 채우는 중일 때 true다. 프론트엔드는 이 경우 짧은
+	// 간격으로 재요청해 진행 상황을 폴링한다 — lotto.go의
+	// lottoStartCollection/lottoIsCollecting 참고.
 	IsBackfilling bool       `json:"isBackfilling"`
 	Data          *LottoData `json:"data,omitempty"`
 }

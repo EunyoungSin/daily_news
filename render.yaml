@@ -34,9 +34,3 @@ services:
         sync: false
       - key: DB_USE_TLS
         value: "true"
-      # dhlottery가 차단되어 있는 등 로또 수집 자체가 문제를 일으킬 때,
-      # 코드 재배포 없이 Render 대시보드에서 바로 "false"로 바꿔 로또
-      # 섹션/백그라운드 수집을 완전히 멈출 수 있다. sync: false라서 여기
-      # 값은 초기 생성 시에만 참고되고, 이후에는 대시보드에서 직접 관리한다.
-      - key: LOTTO_ENABLED
-        sync: false
