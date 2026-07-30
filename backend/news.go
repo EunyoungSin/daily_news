@@ -11,6 +11,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 const (
@@ -153,12 +155,22 @@ func fetchNewsDataIO(ctx context.Context, category, region string) (*NewsData, e
 			description = *a.Description
 		}
 		items[i] = NewsItem{
-			ID:          a.ArticleID,
-			Title:       a.Title,
+			ID: a.ArticleID,
+			// NewsData.io가 한글 텍스트를 완성형(NFC)이 아니라 조합형
+			// (NFD, 예: "계룡건설" 대신 낱자모로 분해된 형태)으로 내려주는
+			// 기사가 실제로 관측됐다 — [가-힣] 범위만 매칭하는
+			// findForeignCJK/findUngroundedProperNoun/findTopicMismatch
+			// 등 한글 전용 정규식들이 그런 텍스트에서는 한글을 아예
+			// "한글이 아닌 것"처럼 인식하지 못한다(예: "1000","14","CEO",
+			// "SR" 같은 비한글 토큰만 남고 회사명/사건명이 통째로 사라짐).
+			// 여기서 한 번만 NFC로 정규화해두면, 이후 모든 소비처(브리핑
+			// 프롬프트, 번역, hallucination 검사, 뉴스 카드 표시)가 이
+			// 문제를 신경 쓸 필요가 없다.
+			Title:       norm.NFC.String(a.Title),
 			Link:        a.Link,
-			SourceName:  sourceName,
+			SourceName:  norm.NFC.String(sourceName),
 			PubDate:     a.PubDate,
-			Description: description,
+			Description: norm.NFC.String(description),
 		}
 	}
 

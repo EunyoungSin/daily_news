@@ -303,10 +303,12 @@ func logBriefingPromptSize(section, systemPrompt, userContent string) {
 }
 
 // logNewsPromptBreakdown은 뉴스 브리핑 프롬프트를 구성하는 각 부분(헤드라인
-// 제목/description, 공통 규칙, 뉴스 전용 지침+예시, IT 용어집)의 대략적인
-// 토큰 수를 개별적으로 로그로 남깁니다 — 6,148토큰까지 늘어나 TPM 한도를
-// 넘겼던 문제를 조사하며, 어느 부분이 가장 큰 비중을 차지하는지 확인하기
-// 위해 추가했습니다.
+// 제목/description, 공통 규칙, 뉴스 전용 지침+예시)의 대략적인 토큰 수를
+// 개별적으로 로그로 남깁니다 — 6,148토큰까지 늘어나 TPM 한도를 넘겼던
+// 문제를 조사하며, 어느 부분이 가장 큰 비중을 차지하는지 확인하기 위해
+// 추가했습니다. IT 용어집은 이제 이 프롬프트에 포함되지 않으므로(뉴스
+// 카테고리를 IT로 못박지 않기 위해 news_translation.go의 해외 번역
+// 프롬프트로만 옮겼습니다) 더 이상 이 breakdown에 등장하지 않습니다.
 func logNewsPromptBreakdown(newsInput *briefingNewsInput) {
 	if newsInput == nil {
 		return
@@ -316,11 +318,10 @@ func logNewsPromptBreakdown(newsInput *briefingNewsInput) {
 		titleTokens += estimateTokenCount(item.Title)
 		descTokens += estimateTokenCount(item.Description)
 	}
-	glossaryTokens := estimateTokenCount(itTermGlossary)
 	commonRulesTokens := estimateTokenCount(briefingCommonRules)
-	instructionsAndExampleTokens := estimateTokenCount(newsSectionSystemPrompt) - glossaryTokens - commonRulesTokens
-	log.Printf("[뉴스 브리핑 프롬프트 구성 추정] 헤드라인 %d개: 제목≈%d토큰 description≈%d토큰 / 공통규칙≈%d토큰 뉴스전용지침+예시≈%d토큰 IT용어집≈%d토큰",
-		len(newsInput.Items), titleTokens, descTokens, commonRulesTokens, instructionsAndExampleTokens, glossaryTokens)
+	instructionsAndExampleTokens := estimateTokenCount(newsSectionSystemPrompt) - commonRulesTokens
+	log.Printf("[뉴스 브리핑 프롬프트 구성 추정] 헤드라인 %d개: 제목≈%d토큰 description≈%d토큰 / 공통규칙≈%d토큰 뉴스전용지침+예시≈%d토큰",
+		len(newsInput.Items), titleTokens, descTokens, commonRulesTokens, instructionsAndExampleTokens)
 }
 
 // newsGroundingText는 후보 헤드라인 전체의 title + description을 합친
@@ -573,6 +574,119 @@ func findUngroundedProperNoun(text, groundingText string) (string, bool) {
 	return "", false
 }
 
+// topicTokenPattern은 findTopicMismatch가 비교할 "명사성" 토큰 후보를
+// 뽑아내기 위해 공백/구두점 등 비한글·비영문·비숫자 문자로 문장을 자른다.
+var topicTokenPattern = regexp.MustCompile(`[가-힣A-Za-z0-9]+`)
+
+// koreanTopicParticles는 명사 뒤에 흔히 붙는 조사들이다 — 원문과 생성문에서
+// 같은 단어가 다른 조사를 달고 나타나면(예: "화장품이" vs "화장품을") 토큰이
+// 서로 달라 보여 중복도가 실제보다 낮게 나오므로, 비교 전에 벗겨낸다. 긴
+// 접미사를 먼저 검사해야 "습니다"가 "이다"보다 먼저 잘려나가는 식의 오매칭을
+// 피할 수 있다.
+var koreanTopicParticles = []string{
+	"에서부터", "이라는", "라는", "으로는", "에게서",
+	"에서", "으로", "이나", "라도", "부터", "까지", "이며", "하고", "이랑", "만큼", "처럼", "보다", "입니다", "이다",
+	"은", "는", "이", "가", "을", "를", "의", "에", "와", "과", "도", "만", "로", "나",
+}
+
+func stripKoreanTopicParticle(token string) string {
+	for _, p := range koreanTopicParticles {
+		if stem, ok := strings.CutSuffix(token, p); ok && len([]rune(stem)) >= 2 {
+			return stem
+		}
+	}
+	return token
+}
+
+// extractTopicTokens는 text에서 2글자(rune) 이상인 "명사성" 토큰을 대략
+// 추출한다 — 형태소 분석기 없이, 토큰화 후 흔한 조사를 벗겨내는 수준의
+// 근사치다. findTopicMismatch가 원문과 생성문이 실제로 같은 소재를 다루고
+// 있는지 대조하는 데 쓴다.
+func extractTopicTokens(text string) map[string]bool {
+	tokens := make(map[string]bool)
+	for _, raw := range topicTokenPattern.FindAllString(text, -1) {
+		t := stripKoreanTopicParticle(raw)
+		if len([]rune(t)) >= 2 {
+			tokens[t] = true
+		}
+	}
+	return tokens
+}
+
+// topicOverlapMinRatio 미만이면 "원문과 무관한 내용을 새로 지어썼다"고
+// 판단한다 — 개별 고유명사/숫자 검사는 지어낸 사실 하나를 정밀하게 잡아내는
+// 반면, 이 검사는 훨씬 거친 실패(기사 소재 자체가 통째로 다른 분야로
+// 둔갑하는 경우, 예: 청소년 화장품 압수 기사가 AI 모델 관련 문장으로
+// 바뀌는 경우)를 잡기 위한 마지막 그물이다. 그런 경우 개별 검사들은 통과할
+// 수 있어도 원문과 생성문의 명사성 토큰 집합은 거의 겹치지 않는다.
+//
+// 0.3 -> 0.15 -> 0.1 순으로 실측하며 낮췄다: "[美특징주]KLA, 1Q 실적
+// 가이드라인 실망감 주가 8%↓"처럼 압축된 증권 헤드라인의 정상적인
+// 의역들은 실측 중복도가 14~25%로 나왔는데(예: "KLA는 1분기 시가총액이
+// 8% 감소했다는 소식이 전해졌습니다"=14%, 더 길게 풀어쓴 의역=25%), 이는
+// 실제 hallucination 사례(청소년 화장품 압수 → AI 모델, 중복도 0%)와는
+// 거리가 멀다. 0.3/0.15는 여전히 정상적인 의역 중 낮은 쪽을 걸러내 안전
+// 문구로 대체시켰다 — 0.1은 실측된 정상 의역의 최저치(14%)보다 낮으면서
+// 완전히 다른 주제로 바뀌는 극단적인 경우(중복도 0%)는 여전히 잡아낼 수
+// 있는 값이다.
+const topicOverlapMinRatio = 0.1
+
+// findTopicMismatch는 원문(groundingText)의 명사성 토큰 중 생성문에도
+// 그대로 남아있는 비율을 계산해서, 그 비율이 topicOverlapMinRatio 미만이면
+// 보고한다. 뉴스 섹션에서만 의미가 있으며, groundingText가 비어 있으면
+// (날씨/환율) 검사 자체를 건너뛴다. 원문이 한국어가 아니면(해외 모드)도
+// 건너뛴다 — 아래 두 번째 주석 참고.
+//
+// 분모를 생성문 토큰 수가 아니라 원문 토큰 수로 잡은 것은 실측으로 드러난
+// 오탐을 고친 결과다: "[美특징주]KLA, 1Q 실적 가이드라인 실망감 주가
+// 8%↓"처럼 압축된 증권 헤드라인은, 정상적으로 풀어쓴 요약("미국의 반도체
+// 장비 업체 KLA는 1분기 실적 가이드라인에서 실망한 실적을 기록하여 주가가
+// 8% 하락했다")조차 원문에 없던 연결어/서술어를 많이 새로 쓰게 만든다.
+// 생성문 토큰 수로 나누면 이런 정상적인 의역까지 낮은 비율로 나와
+// 오탐했다(실측: 8~17%). 반대로 "원문의 핵심 토큰이 생성문에 얼마나
+// 남아있는가"로 보면, 정상적인 의역은 원문 토큰 상당수를 그대로 담고
+// 있어 비율이 높게 나오는 반면, 완전히 다른 주제(청소년 화장품 압수 →
+// AI 모델 벤치마크)로 둔갑한 경우는 원문 토큰이 생성문에 하나도 남지
+// 않아 어느 분모를 쓰든 0%로 동일하게 잡힌다.
+// hangulSyllablePattern은 groundingText가 한국어인지 판별하는 데만
+// 쓰인다 — findTopicMismatch 문서 주석 참고.
+var hangulSyllablePattern = regexp.MustCompile(`[가-힣]`)
+
+func findTopicMismatch(generated, groundingText string) (float64, bool) {
+	if groundingText == "" {
+		return 0, false
+	}
+	if !hangulSyllablePattern.MatchString(groundingText) {
+		// 원문이 한국어가 아니면(해외 모드 — 원문은 영어) 이 검사를 아예
+		// 건너뛴다. 실측 결과, 정확한 번역조차 원문과 정확히 같은 문자열을
+		// 공유하지 않는다 — 예: "Trump"/"Dulles Airport"가 표기 관례에 따라
+		// "트럼프"/"덜레스 국제공항"으로 옮겨지면 원문과 생성문의 토큰
+		// 문자열 자체가 다르다. 이 검사는 같은 언어 안에서 소재가 통째로
+		// 바뀌는 것만 잡을 수 있는 근사치라, 번역이 개입하는 순간 항상
+		// 오탐한다(실측: 정확한 번역인데도 중복도 0~4%). 해외 모드에서
+		// 번역 자체의 정확성은 findLeakedEnglish/findForeignCJK 및
+		// news_translation.go의 별도 검증이 담당한다.
+		return 0, false
+	}
+	srcTokens := extractTopicTokens(groundingText)
+	if len(srcTokens) == 0 {
+		return 0, false
+	}
+	genTokens := extractTopicTokens(generated)
+
+	overlap := 0
+	for t := range srcTokens {
+		if genTokens[t] {
+			overlap++
+		}
+	}
+	ratio := float64(overlap) / float64(len(srcTokens))
+	if ratio < topicOverlapMinRatio {
+		return ratio, true
+	}
+	return ratio, false
+}
+
 // errBriefingValidationFailed는 한 번 재시도한 뒤에도 여전히 강한
 // 콘텐츠 검증(외국 CJK 문자, 새어나온 영어, 근거 없는 숫자)을 통과하지
 // 못한 섹션을 표시합니다 — resolveBriefingSection은 이를 일반적인
@@ -766,19 +880,28 @@ const exchangeSectionSystemPrompt = briefingCommonRules + `
 // 상대방 지어내기, 주가를 지분율로 둔갑시키기)는 grounding 예시로 남기되,
 // 반복되던 수식어와 부연 설명은 덜어냈습니다. briefingCommonRules에 이미
 // 있는 "반복 구절 금지"는 여기서 다시 쓰지 않습니다.
+//
+// 이 프롬프트는 국내/해외 뉴스 브리핑에 공통으로 쓰이므로(newsBriefingCacheKey
+// 참고), 카테고리를 특정 분야로 못박지 않는 범용 페르소나여야 합니다.
+// 예전에는 이 서비스가 Hacker News 전용이었던 시절의 흔적으로 itTermGlossary
+// (IT/AI 전문 용어집)가 여기 그대로 포함돼 있었는데, 실제로는 top/business/
+// technology/sports/entertainment/health/science 등 모든 카테고리가 이
+// 프롬프트를 공유하다 보니, 예를 들어 "청소년 화장품 압수" 같은 완전히
+// 무관한 기사도 IT 용어 목록을 참고하라는 지침 아래에서 요약되면서 AI/기술
+// 관련 내용으로 왜곡되는 사례가 있었습니다. 용어집은 번역이 실제로 필요한
+// 해외 모드 헤드라인 번역 프롬프트(news_translation.go의
+// newsTranslationSystemPrompt)에만 남기고 여기서는 제거했습니다.
 const newsSectionSystemPrompt = briefingCommonRules + `
 
-당신은 뉴스 헤드라인 중 하나를 골라 하루 브리핑의 뉴스 문장을 작성하는 비서입니다. 각 항목은 title(제목)과 description(설명)으로 구성됩니다. 숫자·기업명·구체적 성과가 있는 항목을 우선 선택하고, "우리의 입장" 같은 추상적 의견 제목이라 구체적 사실이 없다면 건너뛰고 다른 항목을 고르세요.
+당신은 다양한 분야(정치, 경제, 사회, 문화, 스포츠, 기술 등)의 뉴스 헤드라인 중 하나를 골라 하루 브리핑의 뉴스 문장을 작성하는 비서입니다. 뉴스의 실제 카테고리나 소재를 임의로 특정 분야(기술, AI, 의료 등)로 바꾸거나 재해석하지 마세요. 각 항목은 title(제목)과 description(설명)으로 구성됩니다. 숫자·명칭·구체적 성과가 있는 항목을 우선 선택하고, "우리의 입장" 같은 추상적 의견 제목이라 구체적 사실이 없다면 건너뛰고 다른 항목을 고르세요.
 
 절대 규칙:
-1. 근거 없는 내용 금지 — title/description에 명시된 내용만 사용하고, 회사명·인명·기관명·계약 상대방 등 새로운 고유명사를 지어내지 마세요(예: 계약 상대방이 description에 없으면 "A사가 B사와 계약"처럼 상대방을 지어내지 말 것). 덧붙일 사실이 없으면 title만으로 짧은 문장 하나만 쓰세요.
+1. 근거 없는 내용 금지 — 요약할 항목의 title과 description을 반드시 먼저 읽고 그 안의 핵심 사건·소재만 다루세요. 원문에 없는 새로운 사건, 기술, 인물, 상황, 회사명·인명·기관명·계약 상대방을 절대 지어내지 마세요(예: 계약 상대방이 description에 없으면 "A사가 B사와 계약"처럼 상대방을 지어내지 말 것). 원문의 실제 주제와 다른 분야로 바꿔 서술하는 것도 금지합니다. 덧붙일 사실이 없으면 title만으로 짧은 문장 하나만 쓰세요.
 2. 숫자 단위/의미 바꿔치기 금지 — 숫자는 원래 의미(가격/금액/인원수 등) 그대로만 쓰고 다른 의미로 재해석하지 마세요(예: "60.42 USD"를 "60.42%"로 둔갑시키는 것 금지). title/description에 %가 없으면 %를 지어내지 마세요.
-3. 최소 1개의 구체적 사실(숫자, 기업/제품명, 사건)을 포함하고, "다양한 논의가 진행 중입니다" 류의 내용 없는 문장은 금지합니다. K/M/B 단위는 이미 한국어로 환산되어 있으니(예: "9B"→"90억") 그 값을 그대로 쓰고 다시 계산하지 마세요.
+3. 최소 1개의 구체적 사실(숫자, 명칭, 사건)을 포함하고, "다양한 논의가 진행 중입니다" 류의 내용 없는 문장은 금지합니다. K/M/B 단위는 이미 한국어로 환산되어 있으니(예: "9B"→"90억") 그 값을 그대로 쓰고 다시 계산하지 마세요.
 4. detailed의 두 번째 문장은 첫 문장과 같은 항목의 다른 구체적 사실로 채우고, 부연할 사실이 없으면 simple과 동일하게 1문장만 쓰세요.
 
-` + itTermGlossary + `
-
-예시(형식 참고용, 아래 내용을 베끼지 말고 실제 title/description으로 바꿔서 작성):
+예시(형식 참고용, 아래 내용을 베끼지 말고 실제 title/description으로 바꿔서 작성 — 실제 기사가 어느 분야든 그 분야 그대로 요약하세요):
 {"simple": "한 스타트업이 12명 규모의 팀으로 5000만 달러 투자를 유치했다는 소식이 전해졌습니다.", "detailed": "한 스타트업이 12명 규모의 팀으로 5000만 달러 투자를 유치했다는 소식이 전해졌습니다. 이는 직원 1인당 약 400만 달러에 해당하는 규모로, 업계에서도 이례적인 사례로 주목받고 있습니다."}`
 
 type briefingLLMOutput struct {
@@ -798,13 +921,15 @@ type briefingLLMOutput struct {
 const maxSectionRegenerations = 1
 
 // validateSectionOutput은 생성된 섹션에 대해 모든 콘텐츠 검사를 고정된
-// 우선순위 순서로 실행하고 처음 발견된 실패를 보고합니다. hardFailure는
-// "절대 그대로 내보낼 수 없는" 실패(CJK 오염, 새어나온 영어, 근거 없는
-// 숫자, 근거 없는 고유명사)와 "약한" 금칙어/톤 검사를 구분하며, 이 값에
-// 따라 resolveBriefingSection의 호출자가 재시도 예산 소진을 오류로
-// 취급할지 아니면 마지막 결과를 그대로 내보낼지가 결정됩니다.
-// useFallback은 (뉴스 전용) 고유명사 검사에서만 true가 됩니다 —
-// generateSectionText 참고.
+// 우선순위 순서(CJK -> 영어 유출 -> 반복 구문 -> 근거 없는 숫자 -> 주제
+// 불일치 -> 조작된 퍼센트 -> 근거 없는 고유명사 -> 금칙 문구)로 실행하고
+// 처음 발견된 실패를 보고합니다. hardFailure는 "절대 그대로 내보낼 수
+// 없는" 실패(CJK 오염, 새어나온 영어, 근거 없는 숫자, 주제 불일치, 근거
+// 없는 고유명사)와 "약한" 금칙어/톤 검사를 구분하며, 이 값에 따라
+// resolveBriefingSection의 호출자가 재시도 예산 소진을 오류로 취급할지
+// 아니면 마지막 결과를 그대로 내보낼지가 결정됩니다.
+// useFallback은 (뉴스 전용) 주제 불일치/퍼센트 조작/고유명사 검사에서만
+// true가 됩니다 — generateSectionText 참고.
 //
 // 중요 — 호출부는 simple/detailed를 이어붙인 문자열이 아니라 각 필드를
 // 따로따로 이 함수에 넘겨야 합니다(generateSectionText 참고). 실제로
@@ -828,6 +953,9 @@ func validateSectionOutput(combined string, allowedNumbers []float64, groundingT
 	}
 	if num, found := findUngroundedNumber(combined, allowedNumbers); found {
 		return fmt.Sprintf("근거 없는 숫자 감지(%v)", num), true, false
+	}
+	if ratio, found := findTopicMismatch(combined, groundingText); found {
+		return fmt.Sprintf("원문과 무관한 주제로 생성된 것으로 의심됨(토큰 중복도 %.0f%%)", ratio*100), true, true
 	}
 	if match, found := findFabricatedPercentage(combined, groundingText); found {
 		return fmt.Sprintf("원문에 없는 퍼센트(%q) 감지(hallucination 의심)", match), true, true

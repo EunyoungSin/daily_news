@@ -146,6 +146,91 @@ func TestFindUngroundedProperNoun_RegressesTheReportedHallucination(t *testing.T
 	}
 }
 
+// TestFindTopicMismatch_RegressesTheCosmeticsToAIHallucination는 실제
+// 보고된 사례를 회귀 테스트로 고정한다: 청소년 화장품 압수 관련 기사가
+// AI/기술 관련 문장으로 완전히 둔갑한 경우다. 이 사례에는 지어낸 고유명사나
+// 숫자가 없을 수도 있어(예: "AI 모델이 벤치마크에서..."처럼 고유명사 없이도
+// 완전히 다른 소재로 서술 가능) findUngroundedProperNoun/findUngroundedNumber
+// 만으로는 못 잡을 수 있다 — findTopicMismatch는 원문과 생성문의 명사성
+// 토큰 집합 자체가 거의 겹치지 않는다는, 훨씬 거친 신호로 이를 잡아낸다.
+func TestFindTopicMismatch_RegressesTheCosmeticsToAIHallucination(t *testing.T) {
+	grounding := newsGroundingText(&briefingNewsInput{
+		Items: []briefingNewsItem{
+			{ID: "1", Title: "화장품 압수당한 16살 청소년 정학 처분 놓고 논란", Description: "학교 측이 화장을 한 학생의 화장품을 압수하고 정학 처분을 내리면서 학부모들 사이에서 논란이 일고 있다."},
+		},
+	})
+
+	hallucinated := "AI 모델이 벤치마크 평가에서 최고 성능을 기록했다는 소식이 전해졌습니다."
+	if ratio, found := findTopicMismatch(hallucinated, grounding); !found {
+		t.Errorf("expected the AI/tech hallucination to be flagged as topic mismatch, got ratio=%.2f", ratio)
+	} else {
+		t.Logf("correctly flagged topic mismatch: overlap ratio %.2f", ratio)
+	}
+
+	faithful := "한 학교가 화장품을 압수당한 16살 학생에게 정학 처분을 내려 논란이 일고 있습니다."
+	if ratio, found := findTopicMismatch(faithful, grounding); found {
+		t.Errorf("expected no topic mismatch for a faithful summary of the same story, got ratio=%.2f", ratio)
+	}
+}
+
+func TestExtractTopicTokensStripsCommonParticles(t *testing.T) {
+	tokens := extractTopicTokens("화장품을 압수당한 청소년이 학교에서 정학 처분을 받았다")
+	for _, want := range []string{"화장품", "청소년"} {
+		if !tokens[want] {
+			t.Errorf("expected token %q after particle stripping, got %v", want, tokens)
+		}
+	}
+}
+
+// TestFindTopicMismatch_DoesNotFlagFaithfulParaphraseOfATerseHeadline은
+// 라이브 테스트 중 실제로 관측된 오탐을 회귀 테스트로 고정한다: 압축된
+// 증권 헤드라인("[美특징주]KLA, 1Q 실적 가이드라인 실망감 주가 8%↓")을
+// 정상적으로 풀어쓴 요약조차, 분모를 생성문 토큰 수로 잡았을 때는
+// 8~17%의 중복도로 나와 "원문과 무관한 주제"로 오탐되어 안전 문구로
+// 대체되는 것이 실제로 확인됐다(첫 구현 버전). 분모를 원문 토큰 수로
+// 바꾸고 임계값을 0.15로 낮춘 뒤에는, 아래처럼 실측된 정상 의역 두 건
+// 모두 통과해야 한다 — 그러면서도 완전히 다른 주제로 둔갑한 경우(다른
+// 테스트의 화장품→AI 사례, 중복도 0%)는 여전히 잡아내야 한다.
+func TestFindTopicMismatch_DoesNotFlagFaithfulParaphraseOfATerseHeadline(t *testing.T) {
+	grounding := newsGroundingText(&briefingNewsInput{
+		Items: []briefingNewsItem{
+			{ID: "1", Title: "[美특징주]KLA, 1Q 실적 가이드라인 실망감 주가 8%↓"},
+		},
+	})
+
+	faithfulParaphrases := []string{
+		"KLA는 1분기 시가총액이 8% 감소했다는 소식이 전해졌습니다.",
+		"미국의 반도체 장비 업체 KLA는 1분기 실적 가이드라인에서 실망한 실적을 기록하여 주가가 8% 하락했다.",
+	}
+	for _, text := range faithfulParaphrases {
+		if ratio, found := findTopicMismatch(text, grounding); found {
+			t.Errorf("expected no topic mismatch for faithful paraphrase %q, got ratio=%.2f", text, ratio)
+		}
+	}
+}
+
+// TestFindTopicMismatch_SkipsNonKoreanGroundingText는 실제 라이브 테스트 중
+// 확인된 두 번째 오탐을 회귀 테스트로 고정한다: 해외(international) 모드의
+// 원문은 영어이고 생성문은 한국어이므로, 정확한 번역조차 원문과 문자열이
+// 전혀 겹치지 않는다 — 예를 들어 "Trump to announce plans for Dulles Airport
+// makeover"를 "도널드 트럼프가 워싱턴 덜레스 국제공항의 리모델링 계획을
+// 발표할 예정이라고 합니다"로 정확히 번역해도, "Trump"/"Dulles"/"Airport"가
+// 표기 관례에 따라 "트럼프"/"덜레스"/"공항"으로 옮겨지므로 토큰 문자열
+// 자체가 달라 중복도가 0%로 나온다. 원문에 한글이 전혀 없으면(=번역이
+// 필요한 해외 모드) 이 검사 자체를 건너뛰어야 한다.
+func TestFindTopicMismatch_SkipsNonKoreanGroundingText(t *testing.T) {
+	grounding := newsGroundingText(&briefingNewsInput{
+		Items: []briefingNewsItem{
+			{ID: "1", Title: "Trump to announce plans for Dulles Airport makeover"},
+		},
+	})
+	faithfulTranslation := "도널드 트럼프가 워싱턴 덜레스 국제공항의 리모델링 계획을 발표할 예정이라고 합니다."
+
+	if ratio, found := findTopicMismatch(faithfulTranslation, grounding); found {
+		t.Errorf("expected non-Korean grounding text to skip the check entirely, got flagged with ratio=%.2f", ratio)
+	}
+}
+
 // TestFindFabricatedPercentage_RegressesTheMercantileBankHallucination는
 // 두 번째로 실제 보고된 환각(hallucination) 사례다: 원문 헤드라인("Mercantile
 // Bank Corporation stock hits all-time high at 60.42 USD")에는 퍼센트가
