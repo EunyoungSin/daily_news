@@ -227,7 +227,14 @@ func toBriefingExchangeInput(exchange *ExchangeData) *briefingExchangeInput {
 // 올라가기 때문에 해시 대상 입력에 포함시키면 실제로 생성 텍스트에 영향을
 // 주는 유일한 요소인 헤드라인 자체는 전혀 바뀌지 않았는데도 거의 모든
 // 요청마다 캐시가 무효화되는 결과가 됐습니다.
-const briefingNewsHeadlineCount = 5
+//
+// 이 값은 news.go의 newsItemCount(뉴스 카드가 화면에 보여주는 개수, 5개)와는
+// 의도적으로 분리되어 있습니다. 브리핑은 어차피 한 문장짜리 요약이라
+// 헤드라인 하나만 골라 쓰면 충분한데도, 이전에는 5개를 전부 프롬프트에
+// 넣고 있었습니다 — TPM 초과 문제를 겪은 뒤 브리핑용 입력만 3개로 줄였고
+// (뉴스 카드 자체는 여전히 5개를 모두 보여줍니다), 이는 hashJSON의 캐시
+// 키와 newsGroundingText/allowedNewsNumbers의 범위에도 함께 반영됩니다.
+const briefingNewsHeadlineCount = 3
 
 // Description을 Title과 함께 포함시킨 것은 실제로 보고된 hallucination을
 // 고치기 위한 조치입니다: 헤드라인 하나만 주어지면 모델은 "detailed"
@@ -247,15 +254,13 @@ type briefingNewsInput struct {
 
 // briefingNewsDescriptionMaxRunes는 기사 description 중 실제로 프롬프트에
 // 들어가는 분량을 제한합니다. NewsData.io의 description은 길면 수백 자에
-// 달하는데, 한 요청에 헤드라인 5개 분량이 들어가면 금방 누적됩니다 — 이
-// 기능을 만들면서 실측한 결과, description을 전체 다 포함시키면 뉴스 브리핑
-// 호출 한 번이 (제목만 사용할 때) 약 1~2천 토큰에서 약 1만 600 토큰으로
-// 뛰었습니다. 요약에는 구체적 사실 하나를 더 뽑아낼 만큼의 description만
-// 있으면 충분하지 전체가 필요한 게 아니므로, 문맥을 약간 포기하는 대신
-// 요청당 토큰 비용을 실질적으로 크게 낮춥니다(이 앱의 Groq 무료 티어
-// 쿼터는 이미 빠듯한 상태이며, 같은 세션의 테스트 중에도 반복해서 한도에
-// 부딪혔습니다).
-const briefingNewsDescriptionMaxRunes = 240
+// 달하는데, 한 요청에 헤드라인 여러 개 분량이 들어가면 금방 누적됩니다 —
+// 240자였을 때 실측 결과 뉴스 브리핑 요청 하나가 6,148토큰까지 늘어나
+// llama-3.1-8b-instant의 분당 한도(6,000 TPM)를 단일 요청만으로 초과하는
+// 것이 확인되어, 100자로 더 줄였습니다. 요약에는 구체적 사실 하나를 더
+// 뽑아낼 만큼의 description만 있으면 충분하지 전체가 필요한 게 아니므로,
+// 문맥을 약간 포기하는 대신 요청당 토큰 비용을 실질적으로 낮춥니다.
+const briefingNewsDescriptionMaxRunes = 100
 
 func truncateRunes(s string, maxRunes int) string {
 	runes := []rune(s)
@@ -282,6 +287,40 @@ func toBriefingNewsInput(news *NewsData) *briefingNewsInput {
 		}
 	}
 	return &briefingNewsInput{Items: result}
+}
+
+// logBriefingPromptSize는 실제 Groq 호출(캐시 미스 시) 전에, 섹션별
+// system/user 프롬프트의 대략적인 토큰 수를 로그로 남깁니다. groq.go의
+// estimateTokenCount 문서 주석에 있듯 이는 근사치일 뿐이며, 실제 값은
+// callGroqChat이 Groq 응답의 usage.prompt_tokens를 그대로 로그로 남기므로
+// 그쪽이 진짜 기준입니다 — 이 로그는 어느 섹션/구성 요소가 큰지 사전에
+// 가늠해보는 용도입니다.
+func logBriefingPromptSize(section, systemPrompt, userContent string) {
+	sysTokens := estimateTokenCount(systemPrompt)
+	userTokens := estimateTokenCount(userContent)
+	log.Printf("[브리핑 프롬프트 크기 추정] %s: system≈%d토큰 user≈%d토큰 합계≈%d토큰 (근사치, 실제 값은 [Groq 응답] 로그의 promptTokens 참고)",
+		section, sysTokens, userTokens, sysTokens+userTokens)
+}
+
+// logNewsPromptBreakdown은 뉴스 브리핑 프롬프트를 구성하는 각 부분(헤드라인
+// 제목/description, 공통 규칙, 뉴스 전용 지침+예시, IT 용어집)의 대략적인
+// 토큰 수를 개별적으로 로그로 남깁니다 — 6,148토큰까지 늘어나 TPM 한도를
+// 넘겼던 문제를 조사하며, 어느 부분이 가장 큰 비중을 차지하는지 확인하기
+// 위해 추가했습니다.
+func logNewsPromptBreakdown(newsInput *briefingNewsInput) {
+	if newsInput == nil {
+		return
+	}
+	var titleTokens, descTokens int
+	for _, item := range newsInput.Items {
+		titleTokens += estimateTokenCount(item.Title)
+		descTokens += estimateTokenCount(item.Description)
+	}
+	glossaryTokens := estimateTokenCount(itTermGlossary)
+	commonRulesTokens := estimateTokenCount(briefingCommonRules)
+	instructionsAndExampleTokens := estimateTokenCount(newsSectionSystemPrompt) - glossaryTokens - commonRulesTokens
+	log.Printf("[뉴스 브리핑 프롬프트 구성 추정] 헤드라인 %d개: 제목≈%d토큰 description≈%d토큰 / 공통규칙≈%d토큰 뉴스전용지침+예시≈%d토큰 IT용어집≈%d토큰",
+		len(newsInput.Items), titleTokens, descTokens, commonRulesTokens, instructionsAndExampleTokens, glossaryTokens)
 }
 
 // newsGroundingText는 후보 헤드라인 전체의 title + description을 합친
@@ -681,21 +720,23 @@ func allowedNewsNumbers(input *briefingNewsInput) []float64 {
 	return nums
 }
 
+// 아래 프롬프트는 세 섹션(날씨/환율/뉴스) 모두가 공유하며 캐시 미스마다
+// 매번 전송되므로, 여기서 아끼는 토큰은 3배로 누적됩니다. 각 불릿이
+// validateSectionOutput의 특정 검사(CJK/영어 잔존/반복 구절/JSON 형식 등)에
+// 대응되는 규칙 자체는 그대로 유지하면서, 문장을 더 짧게 압축했습니다.
 const briefingCommonRules = `공통 규칙:
-- 항상 정중한 존댓말(합니다/습니다체)로 작성하세요. 반말이나 명령조는 금지합니다.
-- "ㅋㅋ", "대박", "레전드", "헐", "인정", "TMI" 같은 인터넷 은어나 유행어를 절대 사용하지 마세요.
-- 과장되거나 감탄사 섞인 표현, 이모지는 쓰지 마세요. 담백하고 정보 전달 위주로 작성하세요.
-- 제목이나 소제목 없이, 마크다운 문법(#, **, -, 번호 목록 등)을 전혀 사용하지 않는 순수한 문장으로만 구성하세요.
-- 데이터에 없는 내용을 지어내거나, 데이터와 무관한 일반 상식/통념(계절적 특성, 시장의 일반적 경향 같은 추상적 설명 포함)을 문장으로 만들지 마세요.
-- 같은 구절이나 표현을 문장 안에서 반복하지 마세요 (예: "60.42%의 지분을 보유한 60.42%의 지분을 보유한"처럼 같은 어구를 두 번 이어 쓰는 것은 절대 금지).
-- 응답은 반드시 순수 한국어(한글)로만 작성하세요. 한자, 중국어, 일본어 문자를 단 하나도 섞지 마세요. 숫자와 알파벳 약어(USD, KRW 등)를 제외한 모든 텍스트는 한글이어야 합니다.
-- 영어 원문 표현을 절대 그대로 남기지 마세요. 헤드라인이나 데이터의 일부가 영어로 되어 있어도, 반드시 완전한 한국어 문장으로 재구성하세요. 일부만 번역하고 나머지를 원문 그대로 두는 것은 허용되지 않습니다. 회사명·제품명·인명 같은 고유명사만 예외로 원문 그대로 둘 수 있습니다.
-- 반드시 아래 JSON 형식으로만 응답하세요. JSON 앞뒤에 다른 텍스트, 설명, 마크다운 코드블록을 절대 포함하지 마세요.
+- 항상 정중한 존댓말(합니다체)로, 반말/명령조·인터넷 은어("ㅋㅋ","대박","헐","인정","TMI" 등)·과장된 표현·이모지 없이 담백하게 작성하세요.
+- 마크다운(#, **, -, 번호 목록)이나 제목 없이 순수한 문장으로만 구성하세요.
+- 데이터에 없는 내용이나 일반 상식(계절적 특성 등 추상적 설명 포함)을 지어내지 마세요.
+- 같은 구절을 문장 안에서 반복하지 마세요(예: "60.42%의 지분을 보유한 60.42%의 지분을 보유한"처럼 같은 어구를 두 번 잇는 것 금지).
+- 응답은 순수 한국어로만 작성하세요. 한자·중국어·일본어 문자는 하나도 섞지 마세요(숫자, USD/KRW 같은 알파벳 약어는 예외).
+- 영어 원문을 그대로 남기지 말고 완전한 한국어 문장으로 재구성하세요(고유명사는 예외).
+- 아래 JSON 형식으로만 응답하고, 앞뒤에 다른 텍스트나 코드블록을 넣지 마세요.
 
-응답 형식 (이 구조의 순수 JSON 객체만 출력):
+응답 형식 (순수 JSON 객체만 출력):
 {"simple": "...", "detailed": "..."}
-- simple: 정확히 1개의 문장.
-- detailed: 실제로 부연할 구체적 데이터가 있으면 정확히 2개의 문장(첫 문장은 simple과 동일한 핵심 사실+조언, 두 번째 문장은 데이터에 있는 구체적 사실을 근거로 한 부연), 부연할 구체적 데이터가 없으면 simple과 동일한 1개의 문장만 작성하세요. 문장 수를 맞추려고 근거 없는 문장을 지어내지 마세요.`
+- simple: 정확히 1문장.
+- detailed: 부연할 구체적 데이터가 있으면 2문장(첫 문장=simple과 동일한 핵심 사실, 두 번째 문장=데이터 근거 부연), 없으면 simple과 동일한 1문장만 — 문장 수를 맞추려고 지어내지 마세요.`
 
 const weatherSectionSystemPrompt = briefingCommonRules + `
 
@@ -719,19 +760,25 @@ const exchangeSectionSystemPrompt = briefingCommonRules + `
 {"simple": "환율은 1 USD당 1320.55 KRW입니다.", "detailed": "환율은 1 USD당 1320.55 KRW입니다. 지난 7일간 환율은 1.3% 하락해 원화가 소폭 강세를 보이고 있습니다."}
 {"simple": "환율은 100 JPY당 905.00 KRW입니다.", "detailed": "환율은 100 JPY당 905.00 KRW입니다. 지난 7일간 환율은 0.5% 상승해 엔화가 소폭 강세를 보이고 있습니다."}`
 
+// 아래는 실측 결과 6,148토큰까지 늘어나 llama-3.1-8b-instant의 분당 한도
+// (6,000 TPM)를 단일 요청만으로 초과시켰던 뉴스 섹션 프롬프트를 압축한
+// 버전입니다 — 각 "절대 규칙"이 막으려는 구체적 hallucination 사례(계약
+// 상대방 지어내기, 주가를 지분율로 둔갑시키기)는 grounding 예시로 남기되,
+// 반복되던 수식어와 부연 설명은 덜어냈습니다. briefingCommonRules에 이미
+// 있는 "반복 구절 금지"는 여기서 다시 쓰지 않습니다.
 const newsSectionSystemPrompt = briefingCommonRules + `
 
-당신은 뉴스 헤드라인 중 하나를 골라 하루 브리핑의 뉴스 문장을 작성하는 비서입니다. [뉴스 데이터]의 각 항목은 title(제목)과 description(설명)으로 구성됩니다. 숫자·기업명·구체적 성과가 담긴, 즉 구체적 사실을 뽑아낼 수 있는 항목을 우선 선택하세요. 가장 먼저 나온 항목이라도 "우리의 입장", "~에 대한 생각" 같은 추상적인 의견/논의 제목이라 구체적 사실이 없다면 건너뛰고, 구체적 수치나 사건이 있는 다른 항목을 선택하세요.
+당신은 뉴스 헤드라인 중 하나를 골라 하루 브리핑의 뉴스 문장을 작성하는 비서입니다. 각 항목은 title(제목)과 description(설명)으로 구성됩니다. 숫자·기업명·구체적 성과가 있는 항목을 우선 선택하고, "우리의 입장" 같은 추상적 의견 제목이라 구체적 사실이 없다면 건너뛰고 다른 항목을 고르세요.
 
-절대 규칙 — 근거 없는 내용 생성 금지: 요약할 때 그 항목의 title과 description에 명시적으로 등장하는 내용만 사용하세요. 회사명, 인명, 기관명, 계약/제휴 내용, 금액, 날짜 등 어떤 사실도 지어내거나 추측해서 덧붙이지 마세요. 특히 title과 description 어디에도 등장하지 않는 새로운 고유명사(회사명, 기관명, 상품명, 계약 상대방 등)를 절대 만들어내지 마세요 — 예를 들어 "A사가 원전·가스터빈을 수주했다"는 제목만 있고 계약 상대방 이름이 description에도 없다면, 상대방 회사명을 지어내서 "A사가 B사와 계약을 체결했다"처럼 쓰면 안 됩니다. description이 비어 있거나, title과 완전히 같거나 대부분 동일해서(실질적으로 추가 정보가 없어서) 덧붙일 사실이 없다면, 없는 내용을 채우려 하지 말고 title에 있는 사실만으로 짧은 문장 하나만 작성하세요. 없는 내용을 추가하는 것보다 짧고 정확한 것이 항상 낫습니다.
-
-절대 규칙 — 숫자의 단위/의미를 바꿔치기 금지: title/description에 등장한 숫자는 그 숫자가 원래 나타내던 것(가격, 금액, 인원수, 날짜 등)만을 의미합니다. 그 숫자를 그대로 재사용하면서 단위나 의미를 다른 것으로 바꾸는 것(예: "60.42 USD"라는 주가를 "60.42%"라는 지분 비율로 둔갑시키는 것, 인원수를 금액으로 바꾸는 것 등)은 숫자 자체가 맞더라도 명백한 hallucination이며 절대 금지입니다. title/description에 퍼센트(%) 표현이 전혀 없다면 문장에 퍼센트를 지어내지 마세요. 마찬가지로, title/description에 없는 "지분 보유", "지분 매각", "인수", "합병", "소송" 같은 구체적 사건/거래를 숫자에 끼워 맞춰 지어내지 마세요.
-
-뉴스 문장은 title을 그대로 옮기지 말고 그 의미를 요약하되, 반드시 title 또는 description에 등장하는 구체적인 사실(숫자, 기업/제품명, 구체적 성과나 사건)을 최소 하나 이상 포함하세요. "다양한 논의가 진행 중입니다", "토론이 활발합니다", "관심이 모아지고 있습니다", "~에 대한 입장/생각을 설명하고 있습니다" 같은 내용 없는 일반론 문장은 금지합니다. title/description에 있던 K/M/B 같은 숫자 단위 축약은 이미 정확한 한국어 환산값으로 전부 바뀌어서 전달됩니다(예: 원문의 "9B"는 "90억"으로, "$12M"은 "1200만 달러"로 이미 바뀌어 있음). 그 한국어 값을 그대로 사용하세요. "M"이나 "B" 같은 원래 단위 알파벳은 데이터에 남아있지 않으니, 있지도 않은 단위를 상상해서 다시 계산하지 마세요. detailed의 두 번째 문장은 반드시 첫 번째 문장과 같은 항목을 다루면서 그 title/description 안의 다른 구체적 사실(다른 수치, 관련 회사/제품명 등)로 채우세요. 두 문장에서 서로 다른 항목으로 넘어가지 마세요. description에 두 번째로 부연할 구체적 사실이 없다면, 억지로 채우지 말고 simple과 동일한 1개의 문장만 작성하세요. 같은 구절이나 표현을 문장 안에서 반복해서 쓰지 마세요.
+절대 규칙:
+1. 근거 없는 내용 금지 — title/description에 명시된 내용만 사용하고, 회사명·인명·기관명·계약 상대방 등 새로운 고유명사를 지어내지 마세요(예: 계약 상대방이 description에 없으면 "A사가 B사와 계약"처럼 상대방을 지어내지 말 것). 덧붙일 사실이 없으면 title만으로 짧은 문장 하나만 쓰세요.
+2. 숫자 단위/의미 바꿔치기 금지 — 숫자는 원래 의미(가격/금액/인원수 등) 그대로만 쓰고 다른 의미로 재해석하지 마세요(예: "60.42 USD"를 "60.42%"로 둔갑시키는 것 금지). title/description에 %가 없으면 %를 지어내지 마세요.
+3. 최소 1개의 구체적 사실(숫자, 기업/제품명, 사건)을 포함하고, "다양한 논의가 진행 중입니다" 류의 내용 없는 문장은 금지합니다. K/M/B 단위는 이미 한국어로 환산되어 있으니(예: "9B"→"90억") 그 값을 그대로 쓰고 다시 계산하지 마세요.
+4. detailed의 두 번째 문장은 첫 문장과 같은 항목의 다른 구체적 사실로 채우고, 부연할 사실이 없으면 simple과 동일하게 1문장만 쓰세요.
 
 ` + itTermGlossary + `
 
-예시 (형식 참고용일 뿐이며, 아래 내용을 절대 그대로 베끼지 말고 실제 title/description 내용으로 바꿔서 작성하세요):
+예시(형식 참고용, 아래 내용을 베끼지 말고 실제 title/description으로 바꿔서 작성):
 {"simple": "한 스타트업이 12명 규모의 팀으로 5000만 달러 투자를 유치했다는 소식이 전해졌습니다.", "detailed": "한 스타트업이 12명 규모의 팀으로 5000만 달러 투자를 유치했다는 소식이 전해졌습니다. 이는 직원 1인당 약 400만 달러에 해당하는 규모로, 업계에서도 이례적인 사례로 주목받고 있습니다."}`
 
 type briefingLLMOutput struct {
@@ -758,6 +805,17 @@ const maxSectionRegenerations = 1
 // 취급할지 아니면 마지막 결과를 그대로 내보낼지가 결정됩니다.
 // useFallback은 (뉴스 전용) 고유명사 검사에서만 true가 됩니다 —
 // generateSectionText 참고.
+//
+// 중요 — 호출부는 simple/detailed를 이어붙인 문자열이 아니라 각 필드를
+// 따로따로 이 함수에 넘겨야 합니다(generateSectionText 참고). 실제로
+// briefingCommonRules가 "detailed의 첫 문장은 simple과 동일한 핵심 사실"을
+// 요구하므로, 정상적으로 생성된 응답도 simple+detailed를 이어붙이면 같은
+// 문장이 항상 두 번 나타납니다 — 이걸 findRepeatedPhrase에 통째로 넘기면
+// 실제 생성 루프가 없는데도 모든 2문장짜리 detailed 응답이 "반복 감지"로
+// 오탐되어 불필요한 70B 승격을 유발합니다(실제 운영 로그에서 확인됨). 이
+// 함수를 각 필드에 개별 호출하면, 진짜 루프(한 필드 *안에서* 같은 구절이
+// 되풀이되는 경우, 예: "60.42%의 지분을 보유한 60.42%의 지분을 보유한")는
+// 여전히 정확히 잡아내면서 이 구조적 중복 오탐만 없앨 수 있습니다.
 func validateSectionOutput(combined string, allowedNumbers []float64, groundingText string) (reason string, hardFailure, useFallback bool) {
 	if match, found := findForeignCJK(combined); found {
 		return fmt.Sprintf("한자/CJK 문자 감지(%q)", match), true, false
@@ -803,6 +861,20 @@ func validateSectionOutput(combined string, allowedNumbers []float64, groundingT
 // groundingText/hallucinationFallback은 뉴스 섹션에서만 의미가
 // 있습니다 — groundingText가 비어 있으면 고유명사 검사 자체를 건너뜁니다
 // (날씨/환율은 빈 문자열 ""을 넘깁니다).
+//
+// briefingSectionTemperature/briefingSectionMaxTokens: 날씨/환율 섹션에서
+// 8B 모델이 같은 문장을 반복 생성하는 현상이 관측되어 두 가지를 함께
+// 조정했습니다. (1) max_tokens가 아예 설정되어 있지 않아 Groq의 모델별
+// 기본 상한이 그대로 적용되고 있었는데, 반복 루프에 빠지면 그 상한에
+// 도달할 때까지 계속 토큰을 낭비할 수 있었습니다 — simple/detailed 합쳐
+// 2문장이면 충분하므로 넉넉하되 유한한 값으로 낮춰 루프를 훨씬 일찍
+// 끊어냅니다. (2) temperature 0.2가 오히려 일부 모델에서 반복을 유발하는
+// 사례가 보고되어 있어 0.3으로 소폭 올렸습니다 — 어느 조정이 실제
+// 원인이었는지와 무관하게 validateSectionOutput의 findRepeatedPhrase가
+// 여전히 최종 방어선으로 남아 있습니다.
+const briefingSectionTemperature = 0.3
+const briefingSectionMaxTokens = 500
+
 func generateSectionText(ctx context.Context, name, model, systemPrompt, userContent string, allowedNumbers []float64, groundingText, hallucinationFallback string) (simple, detailed string, err error) {
 	apiKey := os.Getenv("GROQ_API_KEY")
 	if apiKey == "" {
@@ -815,7 +887,7 @@ func generateSectionText(ctx context.Context, name, model, systemPrompt, userCon
 		content, callErr := callGroqChat(ctx, apiKey, currentModel, []groqChatMessage{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userContent},
-		}, 0.2, true)
+		}, briefingSectionTemperature, briefingSectionMaxTokens, true)
 		if callErr != nil {
 			return "", "", callErr
 		}
@@ -832,12 +904,23 @@ func generateSectionText(ctx context.Context, name, model, systemPrompt, userCon
 		}
 
 		simple, detailed = output.Simple, output.Detailed
+		// combined는 로그 출력용일 뿐, 검증에는 쓰지 않는다 — validateSectionOutput의
+		// 문서 주석 참고: simple/detailed를 이어붙여 통째로 검사하면 "detailed
+		// 첫 문장 = simple과 동일"이라는 정상 설계가 반복 오탐을 일으킨다.
 		combined := simple + " " + detailed
 
-		reason, hardFailure, useFallback := validateSectionOutput(combined, allowedNumbers, groundingText)
+		reason, hardFailure, useFallback := validateSectionOutput(simple, allowedNumbers, groundingText)
+		if reason == "" {
+			reason, hardFailure, useFallback = validateSectionOutput(detailed, allowedNumbers, groundingText)
+		}
 		if reason == "" {
 			return simple, detailed, nil
 		}
+
+		// 검증 실패의 원문 전체를 로그로 남깁니다 — reason에는 매칭된 짧은
+		// 구절만 담기므로, 반복이 정확히 어느 지점부터 시작됐는지 보려면
+		// combined 전체가 필요합니다.
+		log.Printf("브리핑(%s) 시도 %d/%d 검증 실패: %s\n전체 응답: %s", name, attempt+1, maxSectionRegenerations+1, reason, combined)
 
 		if attempt >= maxSectionRegenerations {
 			if hardFailure {
@@ -851,8 +934,20 @@ func generateSectionText(ctx context.Context, name, model, systemPrompt, userCon
 			return simple, detailed, nil
 		}
 
+		if groqEscalationCountToday() >= maxDailyGroqEscalations {
+			log.Printf("브리핑(%s): %s, 그러나 오늘 70B 승격 횟수가 안전 한도(%d회)에 도달해 승격 없이 마지막 결과를 사용합니다", name, reason, maxDailyGroqEscalations)
+			if hardFailure {
+				if useFallback && hallucinationFallback != "" {
+					return hallucinationFallback, hallucinationFallback, nil
+				}
+				return "", "", fmt.Errorf("%s: %w (%s, 승격 한도 도달)", name, errBriefingValidationFailed, reason)
+			}
+			return simple, detailed, nil
+		}
+
 		escalated := escalationGroqModel()
-		log.Printf("브리핑(%s): %s, 모델 승격 후 재생성 시도 (%s -> %s)", name, reason, currentModel, escalated)
+		log.Printf("브리핑(%s): %s, 모델 승격 후 재생성 시도 (%s -> %s, 오늘 승격 %d/%d회째)",
+			name, reason, currentModel, escalated, groqEscalationCountToday()+1, maxDailyGroqEscalations)
 		currentModel = escalated
 	}
 
@@ -1060,6 +1155,11 @@ func getBriefing(ctx context.Context, weather *WeatherData, exchange *ExchangeDa
 			hallucinationFallback: newsHallucinationFallback(news),
 		},
 	}
+	for _, j := range jobs {
+		logBriefingPromptSize(j.name, j.systemPrompt, j.userContent)
+	}
+	logNewsPromptBreakdown(newsInput)
+
 	// jobs는 항상 [weather, exchange, news] 순서로 고정되어 있습니다 —
 	// 아래에서 j.name과 매칭하는 대신 위치(인덱스) 기준으로
 	// BriefingSectionsMeta를 채우는 데 사용됩니다. 뉴스 작업의 name이

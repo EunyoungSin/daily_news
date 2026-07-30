@@ -75,7 +75,7 @@ func TestBriefingSectionCacheNilDB(t *testing.T) {
 	}
 }
 
-func TestToBriefingNewsInputCapsAtFive(t *testing.T) {
+func TestToBriefingNewsInputCapsAtHeadlineCount(t *testing.T) {
 	items := make([]NewsItem, 8)
 	for i := range items {
 		items[i] = NewsItem{ID: strconv.Itoa(i), Title: "headline"}
@@ -199,6 +199,32 @@ func TestFindRepeatedPhrase_RegressesTheMercantileBankRepetitionLoop(t *testing.
 	clean := "대구는 오늘 대체로 맑아 우산 없이 외출하기 좋은 날씨입니다."
 	if phrase, found := findRepeatedPhrase(clean); found {
 		t.Errorf("expected no repeat in an ordinary sentence, got %q", phrase)
+	}
+}
+
+// TestValidateSectionOutputPerField_AvoidsSimpleDetailedOverlapFalsePositive는
+// 실제 운영 중 발견된 오탐을 회귀 테스트로 고정한다: briefingCommonRules는
+// detailed의 첫 문장이 simple과 동일하도록 요구하므로, 두 필드를 이어붙인
+// combined 문자열에는 같은 문장이 항상 두 번 나타난다. generateSectionText는
+// validateSectionOutput을 combined가 아니라 simple/detailed에 각각 따로
+// 호출하므로, 이 정상적인 구조적 중복은 반복 감지에 걸리지 않아야 한다.
+func TestValidateSectionOutputPerField_AvoidsSimpleDetailedOverlapFalsePositive(t *testing.T) {
+	simple := "환율은 1 USD당 1452.35 KRW입니다."
+	detailed := simple + " 지난 7일간 환율은 1.4% 하락해 원화가 소폭 강세를 보이고 있습니다."
+
+	// 옛 동작(회귀 확인용): combined를 통째로 검사하면 오탐이 발생했다는
+	// 사실 자체를 먼저 확인한다 — 이 sanity check가 실패하면 아래 assertion이
+	// 애초에 무엇을 회귀 방지하는지 의미가 없어진다.
+	combined := simple + " " + detailed
+	if _, found := findRepeatedPhrase(combined); !found {
+		t.Fatal("sanity check failed: expected the old combined-string check to demonstrate the false positive")
+	}
+
+	if reason, _, _ := validateSectionOutput(simple, []float64{1, 1452.35}, ""); reason != "" {
+		t.Errorf("simple alone should not fail validation, got %q", reason)
+	}
+	if reason, _, _ := validateSectionOutput(detailed, []float64{1, 1452.35, 7, 1.4}, ""); reason != "" {
+		t.Errorf("detailed alone should not fail validation, got %q", reason)
 	}
 }
 

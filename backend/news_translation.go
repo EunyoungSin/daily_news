@@ -13,22 +13,11 @@ import (
 // (briefing.go)이 공유한다. "frontier model" 같은 용어가 등장할 때마다
 // 동일하게 번역되도록 하기 위해서다 — 두 곳에서 각자 관리하는 별도의
 // 용어 목록이 서로 어긋나는 일을 막는다.
-const itTermGlossary = `IT/AI 전문 용어는 자연스러운 한국어 관용 표현으로 번역하되, 업계에서 이미 굳어진 표현이 있으면 그 표현을 그대로 사용하세요. 자주 등장하는 용어 예시:
-   - frontier model → 최상위(프론티어) 모델
-   - fine-tune / fine-tuning → 파인튜닝
-   - RL(reinforcement learning) → 강화학습(RL)
-   - open model / open source → 오픈소스 모델
-   - open-weights → 오픈 웨이트
-   - benchmark → 벤치마크
-   - inference → 추론
-   - training → 학습
-   - dataset → 데이터셋
-   - parameter → 파라미터
-   - prompt → 프롬프트
-   - agent → 에이전트
-   - context window → 컨텍스트 윈도우
-   - token → 토큰
-   - latency → 지연 시간`
+// 각 줄에 들여쓰기와 화살표 기호를 넣은 불릿 목록 대신 쉼표로 이어진 한 줄
+// 인라인 목록으로 압축했다 — 같은 용어 매핑 정보를 담으면서도 서식 문자에
+// 드는 토큰을 줄인다(뉴스 브리핑/번역 프롬프트가 공유하는 부분이라, 여기서
+// 아낀 토큰은 두 호출 경로 모두에 그대로 반영된다).
+const itTermGlossary = `IT/AI 전문 용어는 자연스러운 한국어 관용 표현으로 번역하되, 업계에서 이미 굳어진 표현이 있으면 그대로 사용하세요. 자주 쓰는 용어: frontier model=최상위 모델, fine-tune=파인튜닝, RL=강화학습, open model/open source=오픈소스 모델, open-weights=오픈 웨이트, benchmark=벤치마크, inference=추론, training=학습, dataset=데이터셋, parameter=파라미터, prompt=프롬프트, agent=에이전트, context window=컨텍스트 윈도우, token=토큰, latency=지연 시간.`
 
 const newsTranslationSystemPrompt = `당신은 기술/IT 뉴스 헤드라인을 한국어로 번역하는 전문 번역가입니다.
 1. 원문의 의미를 정확히 유지하면서 자연스러운 한국어 뉴스 제목체로 번역하세요 (예: "~ 발표", "~ 공개", "~ 논란" 같은 뉴스 제목 어투).
@@ -165,10 +154,13 @@ func fetchNewsTranslation(ctx context.Context, items []NewsItem) ([]newsTranslat
 	model := frequentGroqModel()
 
 	for attempt := 1; attempt <= maxNewsTranslationRetries+1; attempt++ {
+		// maxTokens=700은 헤드라인 최대 5개를 배치 번역할 때의 JSON 배열
+		// 출력(각 항목의 번역된 제목 하나씩)에 넉넉한 여유이면서도, 모델이
+		// 반복 생성 루프에 빠졌을 때 무한정 토큰을 소비하지 않도록 막는다.
 		content, callErr := callGroqChat(ctx, apiKey, model, []groqChatMessage{
 			{Role: "system", Content: newsTranslationSystemPrompt},
 			{Role: "user", Content: userContent},
-		}, 0.2, true)
+		}, 0.2, 700, true)
 		if callErr != nil {
 			return nil, callErr
 		}
@@ -182,8 +174,14 @@ func fetchNewsTranslation(ctx context.Context, items []NewsItem) ([]newsTranslat
 		if allNewsTranslationsValid(translations) {
 			return translations, nil
 		}
+
+		if groqEscalationCountToday() >= maxDailyGroqEscalations {
+			log.Printf("뉴스 번역: 한자/영어 혼입 감지되었으나 오늘 70B 승격 횟수가 안전 한도(%d회)에 도달해 승격 없이 마지막 결과를 사용합니다", maxDailyGroqEscalations)
+			break
+		}
 		escalated := escalationGroqModel()
-		log.Printf("뉴스 번역: 한자/영어 혼입 감지, 모델 승격 후 배치 재시도 %d/%d (%s -> %s)", attempt, maxNewsTranslationRetries+1, model, escalated)
+		log.Printf("뉴스 번역: 한자/영어 혼입 감지, 모델 승격 후 배치 재시도 %d/%d (%s -> %s, 오늘 승격 %d/%d회째)",
+			attempt, maxNewsTranslationRetries+1, model, escalated, groqEscalationCountToday()+1, maxDailyGroqEscalations)
 		model = escalated
 	}
 
