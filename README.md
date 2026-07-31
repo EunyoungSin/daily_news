@@ -1,14 +1,18 @@
 # 브리핑 관제실 — 실시간 멀티API 대시보드 + AI 브리핑 + 로또
 
-Go 백엔드가 날씨(국내 도시는 기상청 API, 해외 도시 및 폴백은 Open-Meteo) / 환율(Frankfurter) / 뉴스(NewsData.io)를 오픈 API로 병렬로 수집하고, 그 결과를 Groq LLM에 넘겨 한국어 한 줄 브리핑을 생성합니다.<br>
-로또 섹션은 동행복권 공개 API로 회차 데이터를 DB(Turso/libSQL)에 영구 저장하고, 그 통계를 Groq AI API로 요약합니다.<br>
+Go 백엔드가 날씨(국내 도시는 기상청 API, 해외 도시 및 폴백은 Open-Meteo) / 환율(Frankfurter) / 뉴스(NewsData.io)를 오픈 API로 병렬 수집하고, 결과를 DB(Turso/libSQL)에 캐싱합니다. 이 데이터를 바탕으로 Groq LLM이 날씨·환율·뉴스 각 섹션별 한국어 브리핑을 생성하며, 원본 데이터가 바뀌지 않으면 이전 브리핑을 그대로 재사용해 불필요한 AI 호출을 줄입니다.<br>
+
+로또 섹션은 초기 50회차 데이터를 정적 시드로 확보한 뒤, 이후로는 동행복권 공개 API를 통해 매주 최신 회차만 최소한으로 수집해 DB(Turso/libSQL)에 저장합니다(API 접근이 제한될 경우를 대비한 관리자 수동 입력 기능도 갖추고 있습니다).<br>
+이 누적 데이터를 통계로 집계해 Groq AI API로 요약 인사이트를 제공합니다.<br>
+
 프론트엔드는 React + TypeScript(Vite)로 구성되어 있습니다.<br>
-https://daily-news-o9mf.onrender.com/ 에서 확인 해 보실 수 있습니다.
+
+https://daily-news-o9mf.onrender.com/ 에서 확인해 보실 수 있습니다.
 
 ## 프로젝트 구조
 
 ```
-backend/    Go, 표준 라이브러리 위주 (net/http, sync, context) + Turso/libSQL(database/sql, SQLite 호환) + 오픈API 4종(기상청, Open-Meteo, Frankfuter, NewsData.io) + Groq API
+backend/    Go, 표준 라이브러리 위주 (net/http, sync, context) + Turso/libSQL(database/sql, SQLite 호환) + 오픈API 4종(기상청, Open-Meteo, Frankfuter, NewsData.io) + Groq API + 동행복권 API
 frontend/   React + TypeScript (Vite)
 ```
 
