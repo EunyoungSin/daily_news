@@ -131,8 +131,14 @@ Render 무료 티어처럼 슬립 후 재시작되는 환경에서도 캐시가 
 | 데이터 | 캐시 키 형식 | TTL |
 |---|---|---|
 | 날씨 | `weather:{도시}` | 10분 |
-| 환율 | `exchange:{from}:{to}` | 30분 |
+| 환율(현재값) | `exchange:{from}:{to}` | 30분 |
+| 환율(7일 추이) | `exchange:weekly:{from}:{to}` | 30분 |
 | 뉴스 | `news:{region}:{category}` | 30분 |
+
+환율은 현재값과 7일 추이를 서로 다른 캐시 키에 독립적으로 저장합니다 — 하나로 묶어
+저장했다면, 현재값 조회는 성공하고 7일 추이 조회만 실패한 순간의 결과가 "성공"으로
+통째로 캐싱되어 그 TTL 내내 차트가 빈 채로 굳어버릴 수 있기 때문입니다. 키를
+분리하면 7일 추이만 독립적으로 재시도할 수 있습니다.
 
 ```sql
 CREATE TABLE raw_data_cache (
@@ -150,6 +156,44 @@ CREATE TABLE raw_data_cache (
 뉴스 헤드라인 번역(해외 모드)도 같은 방식으로 `news_translation_cache` 테이블에
 `article_id` 기준으로 캐싱되어, 서버가 재시작돼도 같은 기사를 다시 Groq로 번역하지
 않습니다.
+
+## 날씨 예보 슬롯 캐시 (지난 시각도 예보값으로 복구)
+
+날씨 카드의 오전 8시/오후 2시 슬롯은 `weather_slot_cache` 테이블에 (도시, 날짜, 시각)
+단위로 영속 저장됩니다.
+
+```sql
+CREATE TABLE weather_slot_cache (
+  city TEXT NOT NULL,
+  slot_date TEXT NOT NULL,
+  slot_time TEXT NOT NULL,
+  temperature REAL NOT NULL,
+  weather_code INTEGER NOT NULL,
+  precipitation_probability INTEGER NOT NULL,
+  source TEXT NOT NULL DEFAULT 'observed' CHECK (source IN ('observed', 'forecast')),
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (city, slot_date, slot_time)
+);
+```
+
+기상청 단기예보(`getVilageFcst`)는 발표 시각(base_time) 이후 시점만 예보하므로, 그 발표
+시각이 이미 지난 슬롯(예: 지금이 14시인데 08시 슬롯을 다시 조회)은 응답에서 아예 빠집니다.
+이를 두 단계로 처리합니다.
+
+1. 슬롯 시각이 아직 지나지 않았는데 값이 없으면 `not_yet_available`("곧 발표될 예정입니다") —
+   정상 상황입니다.
+2. 슬롯 시각이 이미 지났는데 캐시에도 없으면, "지금 기준 최신 발표"가 아니라 그 슬롯
+   시각보다 **이전에 발표된** 단기예보 회차로 소급 조회합니다(예: 08시 슬롯이면 05시
+   발표분) — 그 발표 시점 기준으로는 08시가 여전히 "미래"라서, 몇 시간 뒤에 다시 조회해도
+   항상 값이 나옵니다. 그마저도 실패하면 `past_missing`("일시적으로 가져오지 못했습니다")
+   으로 표시됩니다.
+
+이렇게 복구된 값은 `source` 컬럼에 `forecast`로 표시되어(제때 확보된 값은 `observed`)
+DB에 저장되고, 프론트엔드 날씨 카드에 "예보치" 배지 + 툴팁("실시간 관측 시점을 놓쳐
+예보값으로 대체되었습니다")으로 안내됩니다. 다만 AI 브리핑 문장을 생성할 때는 이 구분을
+쓰지 않고 값을 그대로 활용합니다 — 신뢰도 자체는 실측과 다르지 않기 때문입니다. 해외
+도시는 이 문제 자체가 없습니다 — Open-Meteo는 당일 00:00부터의 시간별 데이터를 항상
+통째로 돌려주므로, 지난 시각도 처음부터 채워져 있습니다.
 
 ## 로또 섹션
 
@@ -308,7 +352,7 @@ AI 브리핑 카드만 스켈레톤 상태로 대기시킵니다.
 - `data.items`: 최대 5건, 각 항목은 `id`, `title`, `link`, `sourceName`, `pubDate`, `description`을
   가지며, `region=international`인 경우에만 `translatedTitle`(번역 실패 시 빈 문자열)이 채워집니다.
 - 카테고리와 지역을 모두 캐시 키에 포함하므로, 조합이 다르면 서로 캐시를 공유하지 않습니다
-  (`getCachedOrFetchNews`, 5분 TTL). AI 브리핑의 뉴스 문단도 같은 카테고리/지역 조합별로
+  (`getCachedOrFetchNews`, 30분 TTL). AI 브리핑의 뉴스 문단도 같은 카테고리/지역 조합별로
   독립적으로 캐싱됩니다(`briefing_section_cache`의 `section` 값이 `news:{region}:{category}` 형태).
 
 `GET /api/lotto`도 `/api/dashboard`와 별도의 단발성 JSON 응답입니다(NDJSON 아님).
@@ -337,6 +381,10 @@ AI 브리핑 카드만 스켈레톤 상태로 대기시킵니다.
   요청해도 무료 티어 크레딧을 두 번 쓰지 않습니다. `region=international`일 때만 Groq로
   헤드라인 5개를 한 번의 JSON 모드 호출로 배치 번역하며, 번역 결과는 기사 id 기준으로
   별도 캐싱되어 같은 기사가 남아있는 동안 재번역하지 않습니다(`news_translation_cache`).
+  캐시가 막 만료된 직후 두 요청(브리핑 내부 조회 + 뉴스 카드)이 거의 동시에 도착하면
+  각자 "캐시 없음"을 보고 NewsData.io를 중복 호출하는 순간(cache stampede)이 있었는데,
+  `coalesceNewsFetch`가 같은 category+region 조합의 동시 호출을 하나로 합쳐서(뒤에 온
+  요청은 새로 조회하는 대신 먼저 온 요청의 결과를 기다렸다가 공유) 이를 막습니다.
 - AI 브리핑: 날씨/환율/뉴스 결과가 모두 필요하므로 병렬이 아니라 순차 단계로 이어집니다
   (`backend/handler.go` 참고). 뉴스 문단의 캐시 키는 카테고리와 지역을 함께 포함하므로
   (`news:{region}:{category}`), 조합이 바뀌면 브리핑도 새로 생성됩니다.
