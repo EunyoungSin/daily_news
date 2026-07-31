@@ -70,6 +70,14 @@ AI 인사이트도 같은 키를 사용하며, 키가 없거나 호출에 실패
 뉴스 섹션은 해외(International) 모드에서만 헤드라인 번역에 이 키를 사용하며, 키가 없거나
 호출에 실패해도 해당 헤드라인만 "번역 실패, 원문 표시"로 대체될 뿐 섹션 전체가 죽지는 않습니다.
 
+호출량이 많은 곳(브리핑 3섹션, 뉴스 번역)은 기본적으로 소형 모델
+(`GROQ_MODEL`, 기본값 `llama-3.1-8b-instant`, 일 14,400회 쿼터)을 쓰고,
+그 출력이 콘텐츠 검증에 실패했을 때 딱 한 번만 더 정확한 모델
+(`GROQ_ESCALATION_MODEL`, 기본값 `llama-3.3-70b-versatile`, 일 1,000회
+쿼터)로 재시도합니다 — 로또 AI 인사이트(주 1회만 생성)는 처음부터 이
+큰 모델을 씁니다. 오늘 실제 호출 횟수(모델별)와 캐시 히트 수는
+`GET /api/debug/groq-usage`에서 확인할 수 있습니다.
+
 ## NewsData.io API 키 발급 (무료)
 
 뉴스 섹션은 [NewsData.io](https://newsdata.io)의 공개 API(`/api/1/latest`)를 사용합니다.
@@ -216,10 +224,10 @@ DB에 저장되고, 프론트엔드 날씨 카드에 "예보치" 배지 + 툴팁
 ```
 
 이 파일은 개발자가 신뢰할 수 있는 출처에서 직접 채워 넣는 정적 데이터로
-취급합니다 — 저장소에는 빈 배열(`[]`)로 커밋되어 있습니다(지어낸 값을 넣어두면
-실제 당첨번호인 것처럼 화면에 노출될 위험이 있기 때문입니다). 초기 데이터는
-아래 "관리자 API"로 직접 채우거나, 이 파일을 실제 데이터로 편집한 뒤 DB를
-비우고 재시작하면 됩니다.
+취급합니다 — 지어낸 값을 넣어두면 실제 당첨번호인 것처럼 화면에 노출될
+위험이 있으므로, 절대 임의로 생성한 번호를 커밋하지 않습니다. 이후 회차는
+아래 "관리자 API"로 채우거나, 이 파일 자체를 편집한 뒤 DB를 비우고
+재시작하면 됩니다.
 
 ### 2. 자동 수집 — 주 1회, 최신 회차 1개만
 
@@ -277,6 +285,16 @@ DB에 저장된 최신 회차의 다음 번호가, 2002-12-07(1회차)부터 매
   `UNION ALL` + `GROUP BY`로 집계합니다.
 - AI 인사이트는 `ai_insight_cache` 테이블에 `latest_drw_no` 기준으로 캐싱되어,
   새 회차가 추가되기 전까지는 Groq를 다시 호출하지 않습니다.
+- 번호 추천(🔥 최근 출현 많음 / ⚖️ 중간 빈도 / ❄️ 최근 출현 적음)은 최근
+  50회 출현 빈도로 1~45를 15개씩 세 구간으로 나눈 뒤, 각 구간에서 무작위로
+  2개씩 뽑아 총 6개를 보여줍니다 — 어느 구간이 통계적으로 더 유리하다는
+  뜻이 아니라 매번 다른 조합을 보여주기 위한 장치일 뿐입니다(로또 추첨은
+  매번 독립적인 사건이라 과거 출현 횟수가 다음 회차 확률에 영향을 주지
+  않습니다). 이번 회차 판매가 마감되는 토요일 20:00 KST부터 다음 회차 번호가
+  공개되는 일요일 06:00 KST까지는 추천을 아예 숨기고(`isBlackout: true`)
+  `nextAvailableAt`으로 다음 공개 시각만 안내합니다. 같은 주기(cycle) 안에서는
+  누가 먼저 요청하든 `lotto_recommendation` 테이블에 `cycle_start_date`
+  (해당 일요일 날짜) 기준으로 캐싱된 동일한 번호를 보여줍니다.
 
 ### DB 스키마
 
@@ -293,6 +311,22 @@ CREATE TABLE lotto_draws (
 CREATE TABLE ai_insight_cache (
   latest_drw_no INTEGER PRIMARY KEY,
   insight_text TEXT,
+  generated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE lotto_recommendation (
+  cycle_start_date TEXT PRIMARY KEY,
+  numbers TEXT NOT NULL,
+  number_groups TEXT NOT NULL,
+  generated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 날씨/환율/뉴스 AI 브리핑 문단 캐시. section 값은 "weather", "exchange",
+-- "news:{region}:{category}" 형태다.
+CREATE TABLE briefing_section_cache (
+  section TEXT PRIMARY KEY,
+  data_hash TEXT NOT NULL,
+  detailed_text TEXT NOT NULL,
   generated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 ```
@@ -446,6 +480,15 @@ AI 브리핑 카드만 스켈레톤 상태로 대기시킵니다.
 - `recentAppeared`: 최근 10회 동안 출현한 번호(중복 제거)
 - `aiInsight`: `{ available, text, cached, generatedAt? }` — `available`이 `false`면
   `text`는 안내 메시지이고 나머지 필드는 무시하면 됩니다.
+- `recommendation`: `{ isBlackout, numbers?, cycleStartDate?, generatedAt?, nextAvailableAt? }` —
+  `isBlackout`이 `true`면 판매 마감~신규 회차 공개 사이라 번호 추천이
+  숨겨진 상태이고, `nextAvailableAt`에 다음 공개 시각이 담깁니다(위 "로또
+  섹션" 참고).
+
+`GET /healthz`는 DB/외부 API를 전혀 건드리지 않고 프로세스가 요청을 받을 수
+있으면 즉시 200을 반환합니다 — Render 등 플랫폼 헬스체크 전용이며(위
+`render.yaml`의 `healthCheckPath` 참고), dhlottery/Groq/NewsData.io 장애가
+헬스체크 실패로 오인되어 불필요한 재시작이 도는 것을 막습니다.
 
 ## 동시성 설계
 
