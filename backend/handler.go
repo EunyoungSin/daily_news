@@ -17,7 +17,17 @@ const sectionTimeout = 8 * time.Second
 // sectionTimeout(8초)을 그대로 썼다가는 KMA가 실제로 응답하고 있는
 // 도중에 잘려나가 버린다. 날씨만 별도 상수로 분리해서, 이 값을 늘려도
 // 환율/뉴스/브리핑 섹션의 타임아웃에는 영향을 주지 않는다.
-const weatherSectionTimeout = 12 * time.Second
+//
+// 이미 지난 시각 슬롯(예: 오후 2시가 지난 뒤의 08:00/14:00 슬롯)이 API
+// 응답과 DB 캐시 어디에도 없으면, weather_slot_cache.go가 최대 두 단계로
+// 복구를 시도한다(각각 최대 backfillFetchTimeout=9초) — 메인 조회가 이미
+// 예산을 다 쓴 뒤라도 최소 한 단계는 온전히 시도할 여유가 남도록, 기존
+// 12초에 9초를 더했다. 그래도 메인 조회가 최악의 경우(9초)를 다 쓰고
+// 게다가 두 복구 단계가 모두 게이트웨이 지연을 겪는, 여러 악조건이 겹치는
+// 드문 경우에는 여전히 past_missing으로 남을 수 있다 — 그 정도까지 완전히
+// 방지하려면 지연이 훨씬 길어질 수 있는데, 사용자가 느끼는 응답 지연이
+// 더 크게 늘어나는 손해가 더 크다고 판단했다.
+const weatherSectionTimeout = 21 * time.Second
 
 func withTiming(fn func() error) (int64, error) {
 	start := time.Now()

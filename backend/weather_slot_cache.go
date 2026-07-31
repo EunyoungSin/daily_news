@@ -213,14 +213,22 @@ func backfillPastSlotFromEarlierVilageFcstRun(ctx context.Context, city, dateStr
 	return slot, true
 }
 
-// backfillFetchTimeout은 backfillMissingSlot 전용 타임아웃이다.
-// context.Background()에서 독립적으로 파생시킨다 — 호출자의 요청 스코프
-// ctx를 그대로 쓰면, 이미 메인 조회(KMA 최대 kmaSubTimeout=9초 + 실패 시
-// Open-Meteo 폴백)로 예산을 거의 다 써버린 뒤에 이 재시도까지 더해져
-// weatherSectionTimeout(12초)을 넘겨 섹션 전체가 실패할 수 있다 —
-// raw_data_cache.go의 rawCacheUpsertTimeout과 같은 이유다. past_missing은
-// 정의상 드문 예외 상황이므로, 이 정도의 짧은 추가 지연은 감수할 만하다.
-const backfillFetchTimeout = 4 * time.Second
+// backfillFetchTimeout은 backfillMissingSlot과
+// backfillPastSlotFromEarlierVilageFcstRun이 공유하는, 슬롯 하나를 복구하기
+// 위한 시도 하나의 타임아웃이다. 호출자의 요청 스코프 ctx를 그대로 부모로
+// 쓰므로(context.Background()에서 독립적으로 파생시키지 않는다), 실제
+// 한도는 이 값과 weatherSectionTimeout에 남아있는 예산 중 더 작은 쪽이다 —
+// 그래야 슬롯 복구 시도가 아무리 오래 걸려도 섹션 전체가
+// weatherSectionTimeout을 넘겨 무한정 지연되는 일이 없다.
+//
+// kmaSubTimeout과 동일하게 9초로 잡는다 — 두 백필 함수 모두 결국
+// kmaRequestWithRetry(최대 2회 시도 × kmaHTTPTimeout=4초 = 8초)를 거치는
+// getVilageFcst 호출로 이어지는데, 예전에는 이 값이 4초였다. kmaHTTPTimeout
+// 한 번의 시도보다 살짝 긴 정도라 재시도 두 번째 시도가 시작되기도 전에
+// (또는 첫 시도가 절반쯤 진행된 채로) 이 타임아웃에 잘려나가, 재시도
+// 로직이 사실상 무력화됐다 — data.go.kr 게이트웨이가 일시적으로 느려진
+// 것뿐인 상황에서도 복구를 포기하고 past_missing으로 남기는 원인이었다.
+const backfillFetchTimeout = kmaSubTimeout
 
 // resolveForecastSlot은 (도시, 날짜, 시간) 예보 슬롯 하나에 대한 영속화
 // 계층이다. apiValue는 방금 가져온 KMA/Open-Meteo 응답 결과인데,
