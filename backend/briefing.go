@@ -63,25 +63,47 @@ type briefingCurrentWeather struct {
 	ObservedAt   string  `json:"observedAt"`
 }
 
+// briefingPeriodForecast는 PeriodForecast에서 문장 생성에 실제로 필요한
+// 값만 남깁니다 — 특히 Source(models.go 참고: 그 슬롯이 제때 확보된
+// 값인지, 이미 지난 뒤 소급 복구한 값인지)는 일부러 제외했습니다. 값의
+// 신뢰도 자체는 실측과 다르지 않으므로 문장에서 "예보값으로 대체됨"을
+// 언급할 필요가 없고(프론트엔드 배지로만 안내), 여기 그대로 포함시키면
+// 같은 기온이라도 Source가 나중에 바뀔 때마다(예: 정각 직후엔 apiValue가
+// 그대로 available이었다가, 다시 조회할 즈음엔 소급 복구를 거치는 경우)
+// hashJSON 캐시 키가 실질적으로 아무 의미 없는 이유로 무효화됩니다.
+type briefingPeriodForecast struct {
+	TemperatureC      float64 `json:"temperatureC"`
+	WeatherCode       int     `json:"weatherCode"`
+	Description       string  `json:"description"`
+	PrecipProbability int     `json:"precipProbability"`
+}
+
 // briefingDayForecast는 DayForecast와 구조는 같지만 포인터 필드를 사용해서,
 // 해당 시간대가 Available하지 않으면 Groq로 보내는 JSON에서 그 필드 자체를
 // 아예 생략합니다 — DayForecast의 제로값 PeriodForecast를 그대로 쓰면 실제
 // 데이터가 없는 시간대에도 모델에게 "temperatureC": 0이라는 값을 그대로
 // 넘겨주게 되기 때문입니다(PeriodForecast의 문서 주석 참고).
 type briefingDayForecast struct {
-	Morning   *PeriodForecast `json:"morning,omitempty"`
-	Afternoon *PeriodForecast `json:"afternoon,omitempty"`
+	Morning   *briefingPeriodForecast `json:"morning,omitempty"`
+	Afternoon *briefingPeriodForecast `json:"afternoon,omitempty"`
+}
+
+func toBriefingPeriodForecast(p PeriodForecast) *briefingPeriodForecast {
+	return &briefingPeriodForecast{
+		TemperatureC:      p.TemperatureC,
+		WeatherCode:       p.WeatherCode,
+		Description:       p.Description,
+		PrecipProbability: p.PrecipProbability,
+	}
 }
 
 func toBriefingDayForecast(day DayForecast) briefingDayForecast {
 	var out briefingDayForecast
 	if day.Morning.Available {
-		m := day.Morning
-		out.Morning = &m
+		out.Morning = toBriefingPeriodForecast(day.Morning)
 	}
 	if day.Afternoon.Available {
-		a := day.Afternoon
-		out.Afternoon = &a
+		out.Afternoon = toBriefingPeriodForecast(day.Afternoon)
 	}
 	return out
 }

@@ -99,6 +99,51 @@ func TestVilageFcstBaseDateTime(t *testing.T) {
 	}
 }
 
+// TestVilageFcstBaseDateTimeBeforeSlot은 vilageFcstBaseDateTime과의
+// 핵심적인 차이를 검증한다: "지금 기준 최신 발표"가 아니라 "그 슬롯이 아직
+// 미래였을 때의 발표 중 가장 최근 것"을 골라야 하고, 이 대답은 now가
+// 슬롯보다 한참 뒤여도(즉 슬롯이 이미 지난 뒤 나중에 다시 물어봐도)
+// 바뀌지 않아야 한다.
+func TestVilageFcstBaseDateTimeBeforeSlot(t *testing.T) {
+	cases := []struct {
+		name         string
+		hourMinute   string
+		nowHour      int
+		nowMinute    int
+		wantBaseTime string
+		wantOK       bool
+	}{
+		{"08:00 slot, asked right after it passes -> latest earlier issue 05:00", "08:00", 8, 30, "0500", true},
+		{"08:00 slot, asked much later same day -> still 05:00 (doesn't drift with now)", "08:00", 20, 0, "0500", true},
+		{"14:00 slot, asked right after it passes -> latest earlier issue 11:00", "14:00", 14, 30, "1100", true},
+	}
+
+	for _, c := range cases {
+		now := time.Date(2026, 7, 29, c.nowHour, c.nowMinute, 0, 0, kst)
+		baseDate, baseTime, ok := vilageFcstBaseDateTimeBeforeSlot("2026-07-29", c.hourMinute, now)
+		if ok != c.wantOK {
+			t.Errorf("%s: ok = %v, want %v", c.name, ok, c.wantOK)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if baseTime != c.wantBaseTime || baseDate != "20260729" {
+			t.Errorf("%s: vilageFcstBaseDateTimeBeforeSlot = (%s, %s), want (20260729, %s)",
+				c.name, baseDate, baseTime, c.wantBaseTime)
+		}
+	}
+}
+
+// TestVilageFcstBaseDateTimeBeforeSlotRejectsUnparseableInput은 slotIsPast와
+// 동일한 안전한 실패 방식을 검증한다 — 있어서는 안 되는 입력이라도 panic
+// 대신 ok=false를 반환해야 한다.
+func TestVilageFcstBaseDateTimeBeforeSlotRejectsUnparseableInput(t *testing.T) {
+	if _, _, ok := vilageFcstBaseDateTimeBeforeSlot("not-a-date", "08:00", time.Now()); ok {
+		t.Error("expected an unparseable slot to fail safely with ok=false")
+	}
+}
+
 func TestKmaWeatherCode(t *testing.T) {
 	cases := []struct {
 		pty, sky string

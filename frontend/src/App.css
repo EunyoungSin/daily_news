@@ -622,11 +622,33 @@
 }
 
 .weather__period-label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
   color: var(--text-faint);
   text-transform: uppercase;
+}
+
+/* 이미 지난 시각인데 실시간 관측을 놓쳐 단기예보로 소급 복구된 슬롯에만
+   붙는 배지 — .weather__source-badge(도시 라벨 옆의 "잠정치" 배지)와
+   시각적으로는 같은 계열이지만, 카드 전체가 아니라 오전/오후 슬롯 하나
+   단위로 붙으므로 별도 클래스로 둔다(backend/models.go의
+   PeriodForecast.Source 참고). */
+.weather__period-badge {
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  background: var(--panel-alt);
+  border: 1px solid var(--panel-border);
+  color: var(--text-faint);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
 }
 
 /* 백엔드가 값을 가져오지 못했거나(또는 신뢰할 수 없어서) 표시하지

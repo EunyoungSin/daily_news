@@ -24,6 +24,7 @@ function PeriodCell({
   precipProbability,
   available = true,
   unavailableReason,
+  source,
 }: {
   label: string
   tempC: number
@@ -39,6 +40,10 @@ function PeriodCell({
   // available이 false일 때 어떤 안내 문구를 보여줄지 결정한다 —
   // types.ts의 PeriodForecast.unavailableReason 참고.
   unavailableReason?: 'not_yet_available' | 'past_missing'
+  // 'forecast'면 이 시간대가 이미 지난 뒤 단기예보로 소급 복구된 값이라는
+  // 뜻이다 — types.ts의 PeriodForecast.source 참고. "현재"는 이 개념이
+  // 없으므로 넘기지 않는다.
+  source?: 'observed' | 'forecast'
 }) {
   const highPrecip = precipProbability !== undefined && precipProbability >= HIGH_PRECIP_THRESHOLD
 
@@ -60,7 +65,17 @@ function PeriodCell({
 
   return (
     <div className="weather__period">
-      <div className="weather__period-label">{label}</div>
+      <div className="weather__period-label">
+        {label}
+        {source === 'forecast' && (
+          <span
+            className="weather__period-badge"
+            title="실시간 관측 시점을 놓쳐 예보값으로 대체되었습니다"
+          >
+            예보치
+          </span>
+        )}
+      </div>
       <div className="weather__period-glyph" aria-hidden="true">
         {weatherGlyph(code)}
       </div>
@@ -157,6 +172,7 @@ export default function WeatherCard({ section, onRetry }: Props) {
                 precipProbability={section.data.forecast.today.morning.precipProbability}
                 available={section.data.forecast.today.morning.available}
                 unavailableReason={section.data.forecast.today.morning.unavailableReason}
+                source={section.data.forecast.today.morning.source}
               />
               <PeriodCell
                 label="오후 2시"
@@ -166,6 +182,7 @@ export default function WeatherCard({ section, onRetry }: Props) {
                 precipProbability={section.data.forecast.today.afternoon.precipProbability}
                 available={section.data.forecast.today.afternoon.available}
                 unavailableReason={section.data.forecast.today.afternoon.unavailableReason}
+                source={section.data.forecast.today.afternoon.source}
               />
             </div>
           ) : (
@@ -178,6 +195,7 @@ export default function WeatherCard({ section, onRetry }: Props) {
                 precipProbability={section.data.forecast.tomorrow.morning.precipProbability}
                 available={section.data.forecast.tomorrow.morning.available}
                 unavailableReason={section.data.forecast.tomorrow.morning.unavailableReason}
+                source={section.data.forecast.tomorrow.morning.source}
               />
               <PeriodCell
                 label="오후 2시"
@@ -187,6 +205,7 @@ export default function WeatherCard({ section, onRetry }: Props) {
                 precipProbability={section.data.forecast.tomorrow.afternoon.precipProbability}
                 available={section.data.forecast.tomorrow.afternoon.available}
                 unavailableReason={section.data.forecast.tomorrow.afternoon.unavailableReason}
+                source={section.data.forecast.tomorrow.afternoon.source}
               />
             </div>
           )}

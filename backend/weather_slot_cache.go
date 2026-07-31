@@ -15,6 +15,7 @@ type weatherSlotCacheRow struct {
 	Temperature              float64
 	WeatherCode              int
 	PrecipitationProbability int
+	Source                   string
 }
 
 func (r weatherSlotCacheRow) toPeriodForecast() PeriodForecast {
@@ -24,6 +25,7 @@ func (r weatherSlotCacheRow) toPeriodForecast() PeriodForecast {
 		Description:       weathercodeDescription(r.WeatherCode),
 		PrecipProbability: r.PrecipitationProbability,
 		Available:         true,
+		Source:            r.Source,
 	}
 }
 
@@ -33,30 +35,39 @@ func lookupWeatherSlot(ctx context.Context, conn *sql.DB, city, slotDate, slotTi
 	}
 	var row weatherSlotCacheRow
 	err := conn.QueryRowContext(ctx,
-		`SELECT temperature, weather_code, precipitation_probability FROM weather_slot_cache WHERE city = ? AND slot_date = ? AND slot_time = ?`,
+		`SELECT temperature, weather_code, precipitation_probability, source FROM weather_slot_cache WHERE city = ? AND slot_date = ? AND slot_time = ?`,
 		city, slotDate, slotTime,
-	).Scan(&row.Temperature, &row.WeatherCode, &row.PrecipitationProbability)
+	).Scan(&row.Temperature, &row.WeatherCode, &row.PrecipitationProbability, &row.Source)
 	if err != nil {
 		return weatherSlotCacheRow{}, false
 	}
 	return row, true
 }
 
+// upsertWeatherSlot은 p.Source를 그대로 저장하되, 호출하는 쪽이 실수로
+// 비워뒀다면(예: 새 테스트나 향후 새 호출부) weatherSlotSourceObserved로
+// 기본 처리한다 — DB 컬럼이 NOT NULL이라 빈 문자열을 그대로 넣을 수 없고,
+// 이 함수에 도달하는 값은 apiValue.Available 경로든 백필 경로든 항상
+// "정상적으로 확보된" 쪽이 기본값이어야 맞기 때문이다.
 func upsertWeatherSlot(ctx context.Context, conn *sql.DB, city, slotDate, slotTime string, p PeriodForecast) {
 	if conn == nil {
 		return
 	}
+	source := p.Source
+	if source == "" {
+		source = weatherSlotSourceObserved
+	}
 	_, err := conn.ExecContext(ctx, `
-		INSERT INTO weather_slot_cache (city, slot_date, slot_time, temperature, weather_code, precipitation_probability)
-		VALUES (?, ?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE temperature = VALUES(temperature), weather_code = VALUES(weather_code), precipitation_probability = VALUES(precipitation_probability)`,
-		city, slotDate, slotTime, p.TemperatureC, p.WeatherCode, p.PrecipProbability,
+		INSERT INTO weather_slot_cache (city, slot_date, slot_time, temperature, weather_code, precipitation_probability, source)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE temperature = VALUES(temperature), weather_code = VALUES(weather_code), precipitation_probability = VALUES(precipitation_probability), source = VALUES(source)`,
+		city, slotDate, slotTime, p.TemperatureC, p.WeatherCode, p.PrecipProbability, source,
 	)
 	if err != nil {
 		log.Printf("날씨(%s): %s %s 슬롯 DB 저장 실패: %v", city, slotDate, slotTime, err)
 		return
 	}
-	log.Printf("날씨(%s): %s %s 슬롯 값(기온=%.1f) DB에 저장됨", city, slotDate, slotTime, p.TemperatureC)
+	log.Printf("날씨(%s): %s %s 슬롯 값(기온=%.1f, source=%s) DB에 저장됨", city, slotDate, slotTime, p.TemperatureC, source)
 }
 
 // slotIsPast는 (dateStr, hourMinute)로 표현된 예보 슬롯 시각이 now
@@ -74,20 +85,28 @@ func slotIsPast(dateStr, hourMinute string, now time.Time) bool {
 }
 
 // backfillMissingSlot은 이미 지난 시각인데 API 응답에도 DB 캐시에도 값이
-// 없는 슬롯 하나를 즉시 한 번 더 살아있는 API로 조회해본다 — 원래는
-// 발표됐어야 하는데(base_time 자체는 지났으니) 어쩌다 한 번도 저장되지
-// 못한 예외 상황(예: 서버가 그 시각이 지나기 전엔 한 번도 요청을 받지
-// 못한 경우)에 대한 자동 복구 시도다. 국내 도시는 기상청을, 해외 도시는
-// Open-Meteo를 그대로 다시 부른다 — fetchWeather 전체를 다시 타지 않고
-// 이 두 저수준 함수를 직접 호출하는 이유는, fetchWeather는
+// 없는 슬롯 하나를 "지금 기준 최신" 조회로 즉시 한 번 더 시도해본다 —
+// 원래는 발표됐어야 하는데(base_time 자체는 지났으니) 어쩌다 한 번도
+// 저장되지 못한 예외 상황(예: 서버가 그 시각이 지나기 전엔 한 번도 요청을
+// 받지 못한 경우)에 대한 자동 복구 시도다. 국내 도시는 기상청을, 해외
+// 도시는 Open-Meteo를 그대로 다시 부른다 — fetchWeather 전체를 다시 타지
+// 않고 이 두 저수준 함수를 직접 호출하는 이유는, fetchWeather는
 // finalizeWeatherForecast를 거쳐 다시 이 함수(resolveForecastSlot)를
 // 호출하므로 그대로 재사용하면 무한 재귀에 빠지기 때문이다.
 //
-// 이미 지나간 KMA 슬롯은 구조적으로 getVilageFcst 응답에 다시는 나타나지
-// 않으므로(그 API는 항상 base_time 이후만 예보한다), 이 재시도가 실제로
-// 값을 복구하는 경우는 주로 원래 시도가 타임아웃 등으로 일시적으로
-// 실패했던 경우다 — 그래도 실패하면 그대로 unavailablePastMissing으로
-// 남긴다.
+// 해외(Open-Meteo) 도시에서는 이게 여전히 유일하고도 충분한 복구 경로다 —
+// Open-Meteo는 당일 00:00부터의 hourly 데이터를 통째로 돌려주므로, 재시도가
+// 실패하는 경우는 진짜 일시적 장애뿐이다. 반면 국내(KMA) 도시에서는
+// resolveForecastSlot이 이 함수를 부르기 전에 이미
+// backfillPastSlotFromEarlierVilageFcstRun을 먼저 시도한다 — 그쪽이
+// "슬롯보다 이전 발표"를 명시적으로 골라 구조적으로 이 문제를 해결하는
+// 반면, 이 함수는 (fetchWeatherKMA를 통해) 결국 vilageFcstBaseDateTime(now)로
+// "지금 기준 최신 발표"를 다시 가져올 뿐이라 이미 그 발표에서도 슬롯이
+// 지나가버린 상태(애초에 이 함수가 호출된 이유)에서는 구조적으로 절대
+// 복구되지 않기 때문이다(그 API는 항상 base_time 이후만 예보한다). 그래서
+// 국내 도시에 한해서는 이 함수가 실질적으로 순수한 재시도(원래 시도가
+// 타임아웃 등으로 일시적으로 실패했던 경우) 역할만 하며, 그래도 실패하면
+// 그대로 unavailablePastMissing으로 남긴다.
 func backfillMissingSlot(ctx context.Context, city, dateStr, hourMinute string) (PeriodForecast, bool) {
 	cityKey := normalizeCity(city)
 	coord := cityCoords[cityKey]
@@ -141,6 +160,54 @@ func pickForecastSlot(forecast WeatherForecast, dateStr, hourMinute string, now 
 	return day.Afternoon
 }
 
+// backfillPastSlotFromEarlierVilageFcstRun은 이미 지난 시각인 국내(KMA)
+// 슬롯을, "지금 기준 최신 발표"가 아니라 그 슬롯 시각보다 먼저 발표된
+// getVilageFcst 회차로 소급 조회해서 복구한다. backfillMissingSlot(바로
+// 아래)과 달리 시도 자체가 구조적으로 의미 있는 경로다 — backfillMissingSlot은
+// fetchWeatherKMA를 통해 결국 vilageFcstBaseDateTime(now)를 다시 부르므로
+// "지금 기준 최신 발표"를 또 가져올 뿐이라, 이미 그 발표에서도 슬롯이
+// 지나가버린 상태(바로 이 함수가 호출되는 이유)라면 똑같이 실패할 수밖에
+// 없다. 반면 이 함수가 쓰는 vilageFcstBaseDateTimeBeforeSlot은 슬롯보다
+// 이전 회차를 고르므로, 그 회차의 응답에서는 슬롯이 언제나 "미래" 구간에
+// 있어 몇 시간이 지난 뒤에 다시 조회해도 그대로 나온다.
+//
+// 해외 도시는 애초에 이 문제가 없다 — Open-Meteo의 hourly 응답은 요청
+// 시각과 무관하게 당일 00:00부터를 통째로 돌려주므로, 오늘 이미 지난
+// 시각도 처음부터 buildForecast에서 정상적으로 채워진다. 그래서 이 함수는
+// domesticGrid에 없는 도시에 대해서는 바로 실패를 반환하고,
+// backfillMissingSlot(Open-Meteo 경로 포함)만 계속 그 역할을 한다.
+func backfillPastSlotFromEarlierVilageFcstRun(ctx context.Context, city, dateStr, hourMinute string, now time.Time) (PeriodForecast, bool) {
+	cityKey := normalizeCity(city)
+	grid, ok := domesticGrid[cityKey]
+	if !ok {
+		return PeriodForecast{}, false
+	}
+
+	baseDate, baseTime, ok := vilageFcstBaseDateTimeBeforeSlot(dateStr, hourMinute, now)
+	if !ok {
+		log.Printf("날씨(%s): %s %s 슬롯보다 이전에 발표된 단기예보 회차를 찾지 못함 — 소급 조회 생략", city, dateStr, hourMinute)
+		return PeriodForecast{}, false
+	}
+
+	fcstCtx, cancel := context.WithTimeout(ctx, backfillFetchTimeout)
+	defer cancel()
+	forecast, err := fetchKMAForecastAt(fcstCtx, grid[0], grid[1], baseDate, baseTime)
+	if err != nil {
+		log.Printf("날씨(%s): %s %s 슬롯을 %s %s 발표 단기예보로 소급 조회 실패: %v", city, dateStr, hourMinute, baseDate, baseTime, err)
+		return PeriodForecast{}, false
+	}
+
+	slot := pickForecastSlot(*forecast, dateStr, hourMinute, now)
+	if !slot.Available {
+		log.Printf("날씨(%s): %s %s 슬롯이 %s %s 발표 단기예보 응답에도 없음", city, dateStr, hourMinute, baseDate, baseTime)
+		return PeriodForecast{}, false
+	}
+
+	slot.Source = weatherSlotSourceForecast
+	log.Printf("날씨(%s): %s %s 슬롯을 %s %s 발표 단기예보로 소급 복구함(기온=%.1f)", city, dateStr, hourMinute, baseDate, baseTime, slot.TemperatureC)
+	return slot, true
+}
+
 // backfillFetchTimeout은 backfillMissingSlot 전용 타임아웃이다.
 // context.Background()에서 독립적으로 파생시킨다 — 호출자의 요청 스코프
 // ctx를 그대로 쓰면, 이미 메인 조회(KMA 최대 kmaSubTimeout=9초 + 실패 시
@@ -158,26 +225,34 @@ const backfillFetchTimeout = 4 * time.Second
 // 슬롯 중 이미 지나간 시각은 응답에서 아예 빠진다).
 //
 //   - apiValue.Available인 경우: 가장 최신 값이므로 무조건 우선 사용하고
-//     DB에도 (다시) 저장해서, API가 계속 값을 내려주는 한 DB 값을 최신
-//     상태로 유지한다.
+//     (Source를 weatherSlotSourceObserved로 표시해서) DB에도 (다시)
+//     저장해서, API가 계속 값을 내려주는 한 DB 값을 최신 상태로 유지한다.
 //   - 그렇지 않으면 이 슬롯에 대해 이전에 저장된 값이 있으면 그 값을
 //     쓴다 — 이 덕분에 해당 시각의 슬롯이 KMA 응답에서 빠져나간 뒤에도
 //     오늘 08:00이 "데이터 없음" 대신 실제 값을 계속 보여줄 수 있다.
+//     Source도 이때 저장된 그대로(observed 또는 forecast) 함께 돌아온다.
 //   - 그것도 없고 슬롯 시각이 아직 지나지 않았으면, 정말로 아직 발표 전인
 //     정상 상황이다(unavailableNotYetAvailable).
-//   - 그것도 없는데 슬롯 시각이 이미 지났다면, 원래는 발표됐어야 하는데
-//     하루 중 그 시각이 API 응답에 있는 동안 단 한 번도 저장되지 못한
-//     예외 상황이다. DB가 있을 때만(단위 테스트처럼 DB가 없으면 복구해도
-//     저장할 곳이 없다) backfillMissingSlot으로 즉시 한 번 더 조회를
-//     시도하고, 그래도 실패하면 unavailablePastMissing으로 남긴다.
+//   - 그것도 없는데 슬롯 시각이 이미 지났다면, DB가 있을 때만(단위
+//     테스트처럼 DB가 없으면 복구해도 저장할 곳이 없다) 두 단계로
+//     복구를 시도한다: 먼저
+//     backfillPastSlotFromEarlierVilageFcstRun으로 그 슬롯 시각 이전에
+//     발표된 단기예보 회차를 소급 조회하고(국내 도시에서 실제로 값을
+//     복구하는 경로는 사실상 이쪽이다 — Source는
+//     weatherSlotSourceForecast), 그게 안 되면 기존처럼
+//     backfillMissingSlot으로 "지금 기준 최신" 조회를 한 번 더 시도한다
+//     (이번 값도 정상적으로 확보된 것이니 Source는
+//     weatherSlotSourceObserved). 둘 다 실패하면 unavailablePastMissing으로
+//     남긴다.
 func resolveForecastSlot(ctx context.Context, city, dateStr, hourMinute string, apiValue PeriodForecast, now time.Time) PeriodForecast {
 	if apiValue.Available {
+		apiValue.Source = weatherSlotSourceObserved
 		upsertWeatherSlot(ctx, db, city, dateStr, hourMinute, apiValue)
 		return apiValue
 	}
 
 	if cached, ok := lookupWeatherSlot(ctx, db, city, dateStr, hourMinute); ok {
-		log.Printf("날씨(%s): %s %s 슬롯이 API 응답에 없어 DB 캐시 값(기온=%.1f) 사용", city, dateStr, hourMinute, cached.Temperature)
+		log.Printf("날씨(%s): %s %s 슬롯이 API 응답에 없어 DB 캐시 값(기온=%.1f, source=%s) 사용", city, dateStr, hourMinute, cached.Temperature, cached.Source)
 		return cached.toPeriodForecast()
 	}
 
@@ -186,7 +261,12 @@ func resolveForecastSlot(ctx context.Context, city, dateStr, hourMinute string, 
 	}
 
 	if db != nil {
+		if recovered, ok := backfillPastSlotFromEarlierVilageFcstRun(ctx, city, dateStr, hourMinute, now); ok {
+			upsertWeatherSlot(ctx, db, city, dateStr, hourMinute, recovered)
+			return recovered
+		}
 		if recovered, ok := backfillMissingSlot(ctx, city, dateStr, hourMinute); ok {
+			recovered.Source = weatherSlotSourceObserved
 			upsertWeatherSlot(ctx, db, city, dateStr, hourMinute, recovered)
 			return recovered
 		}

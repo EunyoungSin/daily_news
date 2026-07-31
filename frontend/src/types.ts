@@ -41,6 +41,12 @@ export interface PeriodForecast {
   // 시각이 이미 지났는데도 값이 없는(즉시 재조회 시도까지 실패한) 예외
   // 상황이다 — 이 둘은 서로 다른 안내 문구를 써야 한다.
   unavailableReason?: 'not_yet_available' | 'past_missing'
+  // available이 true일 때만 의미가 있다. 'forecast'는 그 시각이 이미 지난
+  // 뒤 기상청 단기예보를 그 시각 이전 발표분으로 소급 조회해서 복구한
+  // 값이라는 뜻이다(backend/models.go의 PeriodForecast.Source 참고) —
+  // WeatherCard가 이 값일 때만 "예보치" 배지를 띄운다. 'observed'이거나
+  // 필드 자체가 없으면(구버전 서버 응답) 배지 없이 기존처럼 보여준다.
+  source?: 'observed' | 'forecast'
 }
 
 export interface DayForecast {

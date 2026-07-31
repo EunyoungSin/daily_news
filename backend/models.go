@@ -53,11 +53,24 @@ type PeriodForecast struct {
 	//     재조회를 한 번 시도한 뒤에도 실패한 상태라, "곧 발표"라는 뉘앙스는
 	//     맞지 않고 "일시적으로 가져오지 못했다"는 안내가 맞다.
 	UnavailableReason string `json:"unavailableReason,omitempty"`
+	// Source는 Available이 true일 때만 의미가 있으며, 이 값이 제때(그
+	// 시각이 지나기 전에) 확보되었는지(weatherSlotSourceObserved) 아니면
+	// 이미 지난 뒤 기상청 단기예보(getVilageFcst)를 그 시각 이전 발표분으로
+	// 소급 조회해서 복구한 것인지(weatherSlotSourceForecast)를 구분한다
+	// (weather_slot_cache.go의 backfillPastSlotFromEarlierVilageFcstRun
+	// 참고). "observed"라는 이름과 달리 이 08:00/14:00 슬롯 자체는 어느
+	// 쪽이든 원래 기상청/Open-Meteo의 예보값이다(진짜 실측값은
+	// CurrentWeather 쪽이다) — 여기서 구분하려는 것은 "관측이냐 예보냐"가
+	// 아니라 "제때 받아온 값이냐, 놓친 뒤 소급 복구한 값이냐"다.
+	Source string `json:"source,omitempty"`
 }
 
 const (
 	unavailableNotYetAvailable = "not_yet_available"
 	unavailablePastMissing     = "past_missing"
+
+	weatherSlotSourceObserved = "observed"
+	weatherSlotSourceForecast = "forecast"
 )
 
 type DayForecast struct {

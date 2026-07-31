@@ -122,6 +122,36 @@ func vilageFcstBaseDateTime(now time.Time) (baseDate, baseTime string) {
 	return yesterday.Format("20060102"), "2300"
 }
 
+// vilageFcstBaseDateTimeBeforeSlot은 vilageFcstBaseDateTime과 반대되는
+// 질문에 답한다: "지금 기준으로 가장 최근 발표는 무엇인가"가 아니라,
+// "(dateStr, hourMinute) 슬롯이 아직 미래였을 때의 발표 중 가장 최근 것은
+// 무엇인가"이다. getVilageFcst의 발표 하나하나는 "그 발표 시각 기준으로
+// 그날 남은 시간에 대한 예보 스냅샷"이므로, 슬롯 시각보다 먼저 발표된
+// 회차를 골라두면 그 슬롯은 그 회차의 응답 안에서는 언제나(발표 시각이
+// 아무리 지난 뒤에 다시 조회하더라도) 여전히 "미래" 시각으로 남아있다 —
+// vilageFcstBaseDateTime처럼 "지금" 기준으로 최신 회차를 고르면, 그
+// 회차의 기준 발표 시각이 슬롯을 지나쳐버린 순간부터는 그 슬롯이 응답에서
+// 영구히 사라진다. vilageFcstIssueHours는 내림차순이므로, 슬롯 시각보다
+// 이르면서(그래야 슬롯이 그 회차의 미래 구간에 들어간다) 이미 발표된
+// (issuedAt에 now가 아니라 slotTime을 기준으로 10분을 더한다 — 이 함수는
+// 항상 이미 지난 슬롯에 대해서만 호출되므로 그 발표 자체도 당연히 이미
+// 끝난 상태다) 것 중 가장 늦은(=슬롯에 가장 가까운, 그래서 가장 최신인)
+// 회차를 첫 매치로 찾는다.
+func vilageFcstBaseDateTimeBeforeSlot(dateStr, hourMinute string, now time.Time) (baseDate, baseTime string, ok bool) {
+	slotTime, err := time.ParseInLocation("2006-01-02 15:04", dateStr+" "+hourMinute, kst)
+	if err != nil {
+		return "", "", false
+	}
+
+	for _, h := range vilageFcstIssueHours {
+		issuedAt := time.Date(slotTime.Year(), slotTime.Month(), slotTime.Day(), h, 10, 0, 0, kst)
+		if issuedAt.Before(slotTime) && !now.Before(issuedAt) {
+			return slotTime.Format("20060102"), fmt.Sprintf("%02d00", h), true
+		}
+	}
+	return "", "", false
+}
+
 // ---------- 기상청 날씨 코드 -> WMO 유사 코드 변환(Open-Meteo와 공용) ----------
 
 // kmaWeatherCode는 기상청의 PTY(강수형태) / SKY(하늘상태) 카테고리 값을
@@ -324,7 +354,17 @@ func fetchKMACurrent(ctx context.Context, nx, ny int) (*CurrentWeather, error) {
 
 func fetchKMAForecast(ctx context.Context, nx, ny int) (*WeatherForecast, error) {
 	baseDate, baseTime := vilageFcstBaseDateTime(time.Now())
+	return fetchKMAForecastAt(ctx, nx, ny, baseDate, baseTime)
+}
 
+// fetchKMAForecastAt은 "가장 최근 발표"를 스스로 계산하지 않고, 명시적인
+// base_date/base_time으로 getVilageFcst를 호출한다. fetchKMAForecast(위)는
+// 이 함수를 감싸서 항상 최신 발표를 쓰는 정상 실시간 경로이고,
+// weather_slot_cache.go의 backfillPastSlotFromEarlierVilageFcstRun이 이
+// 함수의 또 다른 호출부다 — 그쪽은 일부러 "최신"보다 이전에 발표된
+// 회차를 요청하는데, 최신 발표는 이미 지나가버린 슬롯을 더 이상 포함하지
+// 않기 때문이다.
+func fetchKMAForecastAt(ctx context.Context, nx, ny int, baseDate, baseTime string) (*WeatherForecast, error) {
 	params := url.Values{}
 	params.Set("pageNo", "1")
 	params.Set("numOfRows", "1000")

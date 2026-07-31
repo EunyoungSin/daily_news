@@ -506,8 +506,8 @@ func TestAllowedWeatherNumbersIncludesFixedHourLabels(t *testing.T) {
 	input := &briefingWeatherInput{
 		Current: briefingCurrentWeather{TemperatureC: 33.2},
 		Today: briefingDayForecast{
-			Morning:   &PeriodForecast{TemperatureC: 26.8, Available: true},
-			Afternoon: &PeriodForecast{TemperatureC: 32.4, Available: true},
+			Morning:   &briefingPeriodForecast{TemperatureC: 26.8},
+			Afternoon: &briefingPeriodForecast{TemperatureC: 32.4},
 		},
 	}
 

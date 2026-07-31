@@ -7,7 +7,7 @@ import (
 )
 
 func TestWeatherSlotCacheRowToPeriodForecast(t *testing.T) {
-	row := weatherSlotCacheRow{Temperature: 26.4, WeatherCode: 3, PrecipitationProbability: 20}
+	row := weatherSlotCacheRow{Temperature: 26.4, WeatherCode: 3, PrecipitationProbability: 20, Source: weatherSlotSourceForecast}
 	got := row.toPeriodForecast()
 
 	want := PeriodForecast{
@@ -16,6 +16,7 @@ func TestWeatherSlotCacheRowToPeriodForecast(t *testing.T) {
 		Description:       weathercodeDescription(3),
 		PrecipProbability: 20,
 		Available:         true,
+		Source:            weatherSlotSourceForecast,
 	}
 	if got != want {
 		t.Errorf("toPeriodForecast() = %+v, want %+v", got, want)
@@ -33,8 +34,10 @@ func TestResolveForecastSlotNilDB(t *testing.T) {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, kst)
 
 	available := PeriodForecast{TemperatureC: 26.4, Available: true}
-	if got := resolveForecastSlot(context.Background(), "daegu", "2026-07-29", "08:00", available, now); got != available {
-		t.Errorf("expected an Available apiValue to pass through unchanged, got %+v", got)
+	want := available
+	want.Source = weatherSlotSourceObserved
+	if got := resolveForecastSlot(context.Background(), "daegu", "2026-07-29", "08:00", available, now); got != want {
+		t.Errorf("expected an Available apiValue to pass through with Source stamped %q, got %+v", weatherSlotSourceObserved, got)
 	}
 
 	// 슬롯 시각(08:00)이 now(12:00)보다 이전이므로 "이미 지난 시각"이다 —
@@ -56,6 +59,18 @@ func TestResolveForecastSlotNilDB(t *testing.T) {
 	}
 	if got.UnavailableReason != unavailableNotYetAvailable {
 		t.Errorf("expected UnavailableReason %q for a not-yet-elapsed slot, got %q", unavailableNotYetAvailable, got.UnavailableReason)
+	}
+}
+
+// TestBackfillPastSlotFromEarlierVilageFcstRunSkipsInternationalCities는
+// 네트워크 호출 없이 확인 가능한 유일한 부분(도시 판별 자체)을 검증한다 —
+// 해외 도시는 domesticGrid에 없으므로 즉시 ok=false로 빠져야 하며,
+// getVilageFcst를 호출하려는 시도조차 하지 않아야 한다(그랬다가는 KMA_
+// SERVICE_KEY 관련 에러나 네트워크 접근이 뒤따르게 된다).
+func TestBackfillPastSlotFromEarlierVilageFcstRunSkipsInternationalCities(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, kst)
+	if _, ok := backfillPastSlotFromEarlierVilageFcstRun(context.Background(), "tokyo", "2026-07-29", "08:00", now); ok {
+		t.Error("expected international cities to be skipped without any KMA call")
 	}
 }
 
