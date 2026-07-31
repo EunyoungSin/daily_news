@@ -12,12 +12,13 @@ const ExchangeChart = lazy(() => import('./ExchangeChart'))
 interface Props {
   section: ExchangeSection
   onRetry: () => Promise<void>
-  // 대시보드 새로고침이 진행 중인 동안 true. 새로고침 중에도 카드의
-  // 나머지 부분은 마지막으로 알려진 값을 그대로 보여주지만(새 응답이
-  // 도착하기 전까지 데이터를 지우지 않으므로), 차트만은 스켈레톤으로
-  // 바뀐다 — 오래된 추세선은 오래된 단일 수치보다 더 오해를 주기
-  // 때문이다.
-  loading: boolean
+  // 이 섹션이 다시 요청되는 동안(전체 새로고침이든, "조회"로 통화만
+  // 바꿔 이 섹션만 선택적으로 다시 가져오는 경우든) true. 진행 중에도
+  // 카드의 나머지 부분은 마지막으로 알려진 값을 그대로 보여주지만(새
+  // 응답이 도착하기 전까지 데이터를 지우지 않으므로), 차트만은
+  // 스켈레톤으로 바뀐다 — 오래된 추세선은 오래된 단일 수치보다 더
+  // 오해를 주기 때문이다.
+  pending: boolean
 }
 
 function ExchangeChartSkeleton() {
@@ -28,7 +29,7 @@ function ExchangeChartSkeleton() {
   )
 }
 
-export default function ExchangeCard({ section, onRetry, loading }: Props) {
+export default function ExchangeCard({ section, onRetry, pending }: Props) {
   const [retrying, setRetrying] = useState(false)
   const pulsing = usePulseOnChange(section.durationMs)
 
@@ -90,7 +91,7 @@ export default function ExchangeCard({ section, onRetry, loading }: Props) {
             )}
           </div>
 
-          {loading || retrying ? (
+          {pending || retrying ? (
             <ExchangeChartSkeleton />
           ) : section.data.weekly && section.data.weekly.length > 0 ? (
             <Suspense fallback={<ExchangeChartSkeleton />}>

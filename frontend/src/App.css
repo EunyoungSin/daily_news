@@ -1237,6 +1237,15 @@
   padding-top: var(--space-2);
 }
 
+/* "조회"로 city/currency 중 하나만 바뀌었을 때, 그 문단 자리에만
+   보여주는 작은 스켈레톤 — 카드 전체를 덮는 .briefing__skeleton과
+   달리 옆 문단들은 그대로 유지된다. */
+.briefing__section--pending {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
 .briefing__skeleton-line {
   display: block;
   height: 14px;

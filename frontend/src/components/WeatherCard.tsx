@@ -94,11 +94,35 @@ function PeriodCell({
 interface Props {
   section: WeatherSection
   onRetry: () => Promise<void>
+  // "조회" 버튼으로 도시를 바꿔 이 섹션을 다시 가져오는 동안 true —
+  // 그 사이 헤더(제목)는 그대로 두고 본문만 스켈레톤으로 바뀐다. 이전
+  // 도시의 날씨를 그대로 보여준 채 있으면 어느 도시 값인지 헷갈리기
+  // 때문이다. 환율/뉴스 섹션과 브리핑의 환율/뉴스 문단은 이 플래그와
+  // 무관하게 그대로 유지된다(App.tsx의 useDashboard 사용부 참고).
+  pending: boolean
 }
 
 type Tab = 'today' | 'tomorrow'
 
-export default function WeatherCard({ section, onRetry }: Props) {
+// card--skeleton 클래스가 있어야 아래 skeleton-weather-row 등 하위
+// 클래스들의 크기 규칙이 적용된다(App.css) — App.tsx가 최초 로드 전에
+// 보여주는 전체 카드 스켈레톤과 동일한 마크업을 재사용한다.
+function WeatherBodySkeleton() {
+  return (
+    <div className="card__body weather__body card--skeleton" aria-label="날씨 정보 갱신 중">
+      <div className="skeleton-weather-row">
+        <span className="skeleton-circle" />
+        <div className="skeleton-weather-col">
+          <span className="skeleton-line skeleton-line--number" />
+          <span className="skeleton-line skeleton-line--sm" />
+        </div>
+      </div>
+      <span className="skeleton-line skeleton-line--row" />
+    </div>
+  )
+}
+
+export default function WeatherCard({ section, onRetry, pending }: Props) {
   const [retrying, setRetrying] = useState(false)
   const [tab, setTab] = useState<Tab>('today')
   const pulsing = usePulseOnChange(section.durationMs)
@@ -144,7 +168,9 @@ export default function WeatherCard({ section, onRetry }: Props) {
         </span>
       </header>
 
-      {section.success && section.data ? (
+      {pending ? (
+        <WeatherBodySkeleton />
+      ) : section.success && section.data ? (
         <div className="card__body weather__body">
           <div className="weather__content">
           <div className="weather__city-label">

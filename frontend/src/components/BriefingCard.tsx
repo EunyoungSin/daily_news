@@ -4,7 +4,18 @@ import { usePulseOnChange } from '../hooks/usePulseOnChange'
 
 interface Props {
   section: BriefingSection
+  // 브리핑 전체가 아직 성공한 적이 없거나(카드가 처음 마운트될 때는
+  // 이미 data가 있는 상태이므로 사실상 완전 실패 후 재시도, 또는 뉴스
+  // 카테고리/지역 변경 시에만 true) 카드 전체를 스켈레톤으로 덮는다.
+  // "조회"로 city/currency만 바뀐 경우에는 이 플래그 대신 아래
+  // weatherPending/exchangePending이 문단 단위로만 스켈레톤을 켠다.
   pending: boolean
+  // "조회"로 도시가 바뀌어 날씨 문단만 다시 합성되는 동안 true —
+  // 환율/뉴스 문단은 그대로 유지된 채 보여진다.
+  weatherPending: boolean
+  // "조회"로 통화가 바뀌어 환율 문단만 다시 합성되는 동안 true —
+  // 날씨/뉴스 문단은 그대로 유지된 채 보여진다.
+  exchangePending: boolean
   onRetry: () => Promise<void>
 }
 
@@ -54,8 +65,30 @@ const STALE_FALLBACK_MESSAGE_MULTI =
 // showStaleBadge는 이 섹션만 단독으로 stale_fallback일 때만 true다 —
 // 여러 섹션이 동시에 그렇다면 카드 상단의 통합 배너가 대신 표시되므로
 // 개별 배지는 생략한다(BriefingCard의 showUnifiedStaleBanner 참고).
-function BriefingSectionBlock({ meta, text, showStaleBadge }: { meta: BriefingSectionMeta; text: string; showStaleBadge: boolean }) {
+// pending은 "조회"로 이 섹션에 해당하는 값(도시 또는 통화)이 바뀌어 이
+// 문단만 다시 합성되는 동안 true다 — 이때는 옆 문단들의 text/showStaleBadge와
+// 무관하게 이 문단 자리에만 작은 스켈레톤을 보여준다.
+function BriefingSectionBlock({
+  meta,
+  text,
+  pending,
+  showStaleBadge,
+}: {
+  meta: BriefingSectionMeta
+  text: string
+  pending: boolean
+  showStaleBadge: boolean
+}) {
   const justUpdated = usePulseOnChange(meta.generatedAt, 2500)
+
+  if (pending) {
+    return (
+      <div className="briefing__section briefing__section--pending" aria-label="문단 갱신 중">
+        <span className="briefing__skeleton-line" />
+        <span className="briefing__skeleton-line briefing__skeleton-line--short" />
+      </div>
+    )
+  }
 
   if (!text.trim()) return null
 
@@ -73,7 +106,7 @@ function BriefingSectionBlock({ meta, text, showStaleBadge }: { meta: BriefingSe
   )
 }
 
-export default function BriefingCard({ section, pending, onRetry }: Props) {
+export default function BriefingCard({ section, pending, weatherPending, exchangePending, onRetry }: Props) {
   const [retrying, setRetrying] = useState(false)
   const pulsing = usePulseOnChange(section.data?.generatedAt)
 
@@ -123,16 +156,19 @@ export default function BriefingCard({ section, pending, onRetry }: Props) {
             <BriefingSectionBlock
               meta={section.data.briefingMeta.weather}
               text={section.data.briefingMeta.weather.detailed}
+              pending={weatherPending}
               showStaleBadge={showPerSectionStaleBadge && section.data.briefingMeta.weather.status === 'stale_fallback'}
             />
             <BriefingSectionBlock
               meta={section.data.briefingMeta.exchange}
               text={section.data.briefingMeta.exchange.detailed}
+              pending={exchangePending}
               showStaleBadge={showPerSectionStaleBadge && section.data.briefingMeta.exchange.status === 'stale_fallback'}
             />
             <BriefingSectionBlock
               meta={section.data.briefingMeta.news}
               text={section.data.briefingMeta.news.detailed}
+              pending={false}
               showStaleBadge={showPerSectionStaleBadge && section.data.briefingMeta.news.status === 'stale_fallback'}
             />
           </div>

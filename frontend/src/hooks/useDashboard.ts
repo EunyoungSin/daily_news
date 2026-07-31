@@ -72,11 +72,37 @@ async function readStream(
   }
 }
 
+// 브리핑 카드 안에서 날씨/환율 문단 각각을 개별적으로 로딩 표시할 때
+// 쓰인다 — applyParams가 city만 바꿨는지, from/to만 바꿨는지에 따라
+// 둘 중 하나(또는 둘 다)만 true가 된다. news 문단은 이 세분화 대상이
+// 아니다(뉴스 카테고리/지역 변경은 지금처럼 retrySection('briefing')이
+// 카드 전체를 브리핑 합성 중 스켈레톤으로 덮는 기존 동작을 그대로 유지한다).
+export interface BriefingSectionPending {
+  weather: boolean
+  exchange: boolean
+}
+
 export function useDashboard(initialParams: DashboardParams, newsContext: NewsContext) {
   const [params, setParams] = useState<DashboardParams>(initialParams)
   const [data, setData] = useState<DashboardResponse | null>(null)
   const [loading, setLoading] = useState(false)
+  // weatherPending/exchangePending: 각 카드(WeatherCard/ExchangeCard) 자체의
+  // 본문 스켈레톤을 켜고 끈다 — partial 줄이 도착하는 즉시(그 섹션의 실제
+  // 데이터가 준비된 시점) false로 돌아온다.
+  const [weatherPending, setWeatherPending] = useState(false)
+  const [exchangePending, setExchangePending] = useState(false)
+  // briefingPending: 브리핑 전체가 아직 한 번도 성공한 적이 없거나(첫 로드),
+  // 완전히 실패한 뒤 재시도 중이거나, 뉴스 카테고리/지역이 바뀌어 다시
+  // 합성하는 동안 카드 전체를 스켈레톤으로 덮는다 — final 줄에서 false.
   const [briefingPending, setBriefingPending] = useState(false)
+  // briefingSectionPending: applyParams가 city/currency 변경으로 브리핑의
+  // 날씨/환율 문단만 부분적으로 다시 합성하는 동안 쓰는, 문단 단위 로딩
+  // 상태다. briefingPending과 달리 나머지 문단(그리고 카드 전체)은 그대로
+  // 유지된 채 이 두 문단만 개별적으로 스켈레톤 처리된다. final 줄에서 false.
+  const [briefingSectionPending, setBriefingSectionPending] = useState<BriefingSectionPending>({
+    weather: false,
+    exchange: false,
+  })
   const [error, setError] = useState<string | null>(null)
   const [autoRefresh, setAutoRefresh] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
@@ -88,13 +114,32 @@ export function useDashboard(initialParams: DashboardParams, newsContext: NewsCo
   const newsContextRef = useRef(newsContext)
   newsContextRef.current = newsContext
 
+  // retrySection이 호출 시점의 최신 params를 읽는 데 쓴다 — params
+  // state를 직접 클로저로 잡으면 params가 바뀔 때마다 retrySection의
+  // 함수 참조 자체가 바뀌어서, App.tsx의 뉴스 category/region effect처럼
+  // retrySection을 의존성 배열에 넣은 곳들이 "뉴스가 안 바뀌었는데도"
+  // 재실행되어 버린다(applyParams가 params를 바꿀 때마다 브리핑 전체
+  // 스켈레톤이 불필요하게 다시 뜨는 문제로 나타났다). ref로 최신 값만
+  // 읽게 하면 retrySection은 항상 같은 함수 참조를 유지한다.
+  const paramsRef = useRef(params)
+  paramsRef.current = params
+
+  // load는 대시보드 전체(날씨+환율+브리핑 3개 문단 모두)를 처음부터 다시
+  // 가져온다 — 최초 마운트, "지금 새로고침", 자동 새로고침 타이머가
+  // 쓴다. 이 셋은 전부 "모든 게 다시 로드된다"는 것을 사용자에게 그대로
+  // 보여주는 게 맞으므로, 관련된 pending 플래그를 전부 한꺼번에 켠다 —
+  // city/currency 중 하나만 바뀐 부분 새로고침(applyParams 참고)과 달리
+  // 여기서는 일부만 켜야 할 이유가 없다.
   const load = useCallback(async (p: DashboardParams) => {
     abortRef.current?.abort()
     const controller = new AbortController()
     abortRef.current = controller
 
     setLoading(true)
+    setWeatherPending(true)
+    setExchangePending(true)
     setBriefingPending(true)
+    setBriefingSectionPending({ weather: false, exchange: false })
     setError(null)
 
     try {
@@ -106,6 +151,8 @@ export function useDashboard(initialParams: DashboardParams, newsContext: NewsCo
         (line) => {
           setData(line)
           setLoading(false)
+          setWeatherPending(false)
+          setExchangePending(false)
           if (line.stage === 'final') setBriefingPending(false)
         },
         controller.signal,
@@ -114,14 +161,22 @@ export function useDashboard(initialParams: DashboardParams, newsContext: NewsCo
       if (err instanceof DOMException && err.name === 'AbortError') return
       setError(err instanceof Error ? err.message : '알 수 없는 오류가 발생했습니다')
       setLoading(false)
+      setWeatherPending(false)
+      setExchangePending(false)
       setBriefingPending(false)
     }
   }, [])
 
+  // 최초 마운트 시 한 번만 전체 로드한다. 이후 city/from/to가 바뀌는
+  // 경로는 이 effect가 아니라 applyParams가 전담한다 — applyParams는
+  // 값이 실제로 바뀐 섹션만 선택적으로 다시 가져오므로, params가 바뀔
+  // 때마다 이 effect가 또 전체를 다시 로드해버리면 applyParams의 선택적
+  // 갱신과 완전히 같은 요청이 중복으로 나간다.
   useEffect(() => {
-    load(params)
+    load(initialParams)
     return () => abortRef.current?.abort()
-  }, [params, load])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [load])
 
   useEffect(() => {
     if (!autoRefresh) return
@@ -144,7 +199,7 @@ export function useDashboard(initialParams: DashboardParams, newsContext: NewsCo
     // 순간 "지금 브리핑이 다시 생성되고 있다"는 것이 확실히 드러난다.
     if (section === 'briefing') setBriefingPending(true)
     try {
-      const res = await fetch(buildURL(params, newsContextRef.current))
+      const res = await fetch(buildURL(paramsRef.current, newsContextRef.current))
       if (!res.ok) throw new Error(`서버 오류 (status ${res.status})`)
 
       await readStream(
@@ -158,15 +213,117 @@ export function useDashboard(initialParams: DashboardParams, newsContext: NewsCo
     } finally {
       if (section === 'briefing') setBriefingPending(false)
     }
-  }, [params])
+  }, [])
+
+  // "조회" 버튼이 호출하는, city/currency 변경 전용 선택적 재요청이다.
+  // newParams를 현재 적용된 params와 값 단위로 비교해 city가 바뀌었는지
+  // (cityChanged), from/to가 바뀌었는지(currencyChanged)를 먼저 판단하고,
+  // 바뀐 쪽에 해당하는 pending 플래그만 켠다 — 예를 들어 도시만 바꿨다면
+  // exchangePending/briefingSectionPending.exchange는 건드리지 않으므로
+  // ExchangeCard와 브리핑의 환율 문단은 그대로 유지된 채 보여진다.
+  //
+  // 백엔드는 요청 하나에 날씨+환율+브리핑을 함께 스트리밍하므로(스코프를
+  // 좁혀 일부만 계산하게 하는 파라미터가 없다), 네트워크 요청 자체는
+  // 항상 전체를 다시 계산해 돌려준다 — 다만 city/currency가 그대로인
+  // 섹션은 원본 데이터 캐시(raw_data_cache)와 브리핑 문단 캐시
+  // (briefing_section_cache)에 그대로 걸려 사실상 동일한 값을 그대로
+  // 돌려받을 뿐이다. 이 함수는 그 응답에서 실제로 바뀐 필드만 state에
+  // 반영하고 나머지는 이전 값을 그대로 유지해, 화면상으로는 바뀐 섹션만
+  // 정확히 로딩되는 것처럼 보이게 한다.
+  const applyParams = useCallback(async (newParams: DashboardParams) => {
+    const current = paramsRef.current
+    const cityChanged = newParams.city !== current.city
+    const currencyChanged = newParams.from !== current.from || newParams.to !== current.to
+    if (!cityChanged && !currencyChanged) return
+
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+
+    setParams(newParams)
+    setError(null)
+    setLoading(true)
+    if (cityChanged) {
+      setWeatherPending(true)
+      setBriefingSectionPending((prev) => ({ ...prev, weather: true }))
+    }
+    if (currencyChanged) {
+      setExchangePending(true)
+      setBriefingSectionPending((prev) => ({ ...prev, exchange: true }))
+    }
+
+    try {
+      const res = await fetch(buildURL(newParams, newsContextRef.current), { signal: controller.signal })
+      if (!res.ok) throw new Error(`서버 오류 (status ${res.status})`)
+
+      await readStream(
+        res,
+        (line) => {
+          setData((prev) => {
+            if (!prev) return line
+            const next: DashboardResponse = { ...prev, totalMs: line.totalMs }
+            if (cityChanged) next.weather = line.weather
+            if (currencyChanged) next.exchange = line.exchange
+
+            if (line.stage === 'final') {
+              const prevData = prev.briefing.data
+              const lineData = line.briefing.data
+              next.briefing = {
+                ...line.briefing,
+                data:
+                  prevData && lineData
+                    ? {
+                        ...lineData,
+                        briefingMeta: {
+                          weather: cityChanged ? lineData.briefingMeta.weather : prevData.briefingMeta.weather,
+                          exchange: currencyChanged ? lineData.briefingMeta.exchange : prevData.briefingMeta.exchange,
+                          news: prevData.briefingMeta.news,
+                        },
+                      }
+                    : lineData,
+              }
+            }
+
+            return next
+          })
+
+          setLoading(false)
+          if (cityChanged) setWeatherPending(false)
+          if (currencyChanged) setExchangePending(false)
+          if (line.stage === 'final') {
+            setBriefingSectionPending((prev) => ({
+              weather: cityChanged ? false : prev.weather,
+              exchange: currencyChanged ? false : prev.exchange,
+            }))
+          }
+        },
+        controller.signal,
+      )
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return
+      setError(err instanceof Error ? err.message : '알 수 없는 오류가 발생했습니다')
+      setLoading(false)
+      if (cityChanged) {
+        setWeatherPending(false)
+        setBriefingSectionPending((prev) => ({ ...prev, weather: false }))
+      }
+      if (currencyChanged) {
+        setExchangePending(false)
+        setBriefingSectionPending((prev) => ({ ...prev, exchange: false }))
+      }
+    }
+  }, [])
 
   return {
     data,
     loading,
+    weatherPending,
+    exchangePending,
     briefingPending,
+    briefingSectionPending,
     error,
     params,
-    setParams,
+    applyParams,
     refresh: () => load(params),
     retrySection,
     autoRefresh,

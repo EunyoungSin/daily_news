@@ -29,10 +29,13 @@ export default function App() {
   const {
     data,
     loading,
+    weatherPending,
+    exchangePending,
     briefingPending,
+    briefingSectionPending,
     error,
     params,
-    setParams,
+    applyParams,
     refresh,
     retrySection,
     autoRefresh,
@@ -56,8 +59,8 @@ export default function App() {
   const isSameCurrency = pendingFrom === pendingTo
 
   const applyPendingParams = useCallback(() => {
-    setParams({ city: pendingCity, from: pendingFrom, to: pendingTo })
-  }, [pendingCity, pendingFrom, pendingTo, setParams])
+    applyParams({ city: pendingCity, from: pendingFrom, to: pendingTo })
+  }, [pendingCity, pendingFrom, pendingTo, applyParams])
 
   // 각 드롭다운은 상대방의 현재 선택값을 비활성화하므로(아래 `disabled`
   // props 참고) 정상적인 사용으로는 pendingFrom === pendingTo에 도달할
@@ -197,7 +200,7 @@ export default function App() {
       <div className="dashboard-grid">
         <div className="dashboard-grid__row1">
           {data ? (
-            <WeatherCard section={data.weather} onRetry={retryWeather} />
+            <WeatherCard section={data.weather} onRetry={retryWeather} pending={weatherPending} />
           ) : (
             <div className="card card--skeleton">
               <span className="skeleton-line skeleton-header" />
@@ -213,7 +216,7 @@ export default function App() {
           )}
 
           {data ? (
-            <ExchangeCard section={data.exchange} onRetry={retryExchange} loading={loading} />
+            <ExchangeCard section={data.exchange} onRetry={retryExchange} pending={exchangePending} />
           ) : (
             <div className="card card--skeleton">
               <span className="skeleton-line skeleton-header" />
@@ -236,7 +239,13 @@ export default function App() {
         </div>
 
         {data ? (
-          <BriefingCard section={data.briefing} pending={briefingPending} onRetry={retryBriefing} />
+          <BriefingCard
+            section={data.briefing}
+            pending={briefingPending}
+            weatherPending={briefingSectionPending.weather}
+            exchangePending={briefingSectionPending.exchange}
+            onRetry={retryBriefing}
+          />
         ) : (
           <div className="card card--skeleton card--briefing">
             <span className="skeleton-line skeleton-header" />
