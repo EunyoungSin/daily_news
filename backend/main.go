@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"database/sql"
 	"embed"
 	"io/fs"
@@ -98,6 +99,9 @@ func main() {
 		// 로또 수집은 더 이상 서버 시작 시 자동으로 걸리지 않는다 — 화면의
 		// ON/OFF 토글이 POST /api/lotto/collection/start를 통해 명시적으로
 		// 시작해야 한다(기본값은 꺼짐).
+		if err := seedLottoDrawsIfEmpty(context.Background(), db); err != nil {
+			log.Printf("경고: 로또 시드 데이터 삽입 실패: %v", err)
+		}
 	}
 
 	mux := http.NewServeMux()

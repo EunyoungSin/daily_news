@@ -3,7 +3,8 @@ backend/.env
 backend/static/*
 !backend/static/index.html
 backend/dashboard-backend
-backend/data/
+backend/data/*
+!backend/data/lotto_seed.json
 
 # frontend
 frontend/node_modules/
