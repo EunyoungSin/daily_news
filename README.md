@@ -252,6 +252,13 @@ UTF-8이라, 한글 텍스트 INSERT가 charset 불일치로 실패하는 문제
 **둘 다 비워두면** 서버가 자동으로 로컬 파일(`backend/data/dashboard.db`, `LOCAL_DB_PATH`로
 경로 변경 가능)로 폴백합니다 — 로컬 개발 시 기본 동작입니다.
 
+로컬에서 파일 대신 배포용과 같은 원격 Turso DB로 테스트해보고 싶다면, `backend/.env`에
+배포 환경과 동일한 `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` 값을 넣으면 됩니다. 다만 이 경우
+**로컬과 배포 서버가 완전히 같은 데이터를 공유**합니다 — 로컬에서 로또 데이터 수집을 켜거나
+캐시를 채우면 그대로 배포 서버에도 반영됩니다. 이 둘을 분리하고 싶다면 로컬 전용 Turso
+DB를 하나 더 만들거나(`turso db create dashboard-db-dev`), `.env`에서 두 값을 비워 로컬
+파일 DB로 되돌리면 됩니다.
+
 원격(Turso) 연결은 `SetMaxOpenConns(10)` / `SetMaxIdleConns(5)` / `SetConnMaxLifetime(3분)`으로
 설정되어 있습니다 — 클라우드 제공자가 유휴 연결을 끊어버리는 경우, 그보다 먼저 커넥션을
 재활용해서 "connection reset" 에러를 피하기 위함입니다. 로컬 파일 연결은 반대로
@@ -300,6 +307,20 @@ recharts와 그 의존성을 `recharts` 청크로 따로 묶어 초기 로딩에
    turso auth signup    # 이미 가입했다면: turso auth login
    turso db create dashboard-db
    ```
+
+   > **브라우저를 띄울 수 없는 환경(서버, CI, 샌드박스 등)이라면**: `turso auth login`/
+   > `signup`은 로컬 브라우저를 열어야 완료되는데, `--headless` 옵션을 줘도 이런 환경에서는
+   > 세션이 제대로 이어지지 않아 로그인이 끝나지 않을 수 있습니다. 이 경우 Platform API
+   > Token을 대신 씁니다: [app.turso.tech](https://app.turso.tech) 대시보드(다른 기기의
+   > 브라우저에서 직접 로그인)의 **Account Settings → API Tokens**에서 토큰을 발급받은 뒤
+   >
+   > ```bash
+   > export TURSO_API_TOKEN=발급받은_토큰
+   > turso db create dashboard-db   # turso auth login 없이 바로 동작
+   > ```
+   >
+   > 이렇게 하면 `turso auth login` 단계 자체를 건너뛰고 모든 `turso` 명령을 바로 쓸 수
+   > 있습니다.
 4. 접속 정보를 확인합니다.
 
    ```bash
