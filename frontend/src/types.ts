@@ -267,13 +267,17 @@ export interface LottoSection extends SectionMeta {
   data?: LottoData
 }
 
-// GET /api/lotto/collection/status의 응답 — 로또 카드의 ON/OFF 토글이
-// 진행 상황("42/50 회차 수집됨")을 보여주는 데 쓴다.
+// GET /api/lotto/collection/status의 응답 — 로또 카드의 "매주 자동
+// 업데이트" 토글이 상태를 보여주는 데 쓴다. 예전에는 초기 50회를 한꺼번에
+// 채우는 배치 진행률("42/50 회차 수집됨")이었지만, 이제 자동 수집은 매주
+// 최대 1개 회차만 확인하므로 목표치라는 개념이 없다 — 대신 다음 정기
+// 점검이 언제고 마지막으로 언제 성공했는지를 보여준다.
 export interface LottoCollectionStatus {
   running: boolean
   lastCollectedAt?: string
+  lastCheckedAt?: string
+  nextCheckAt?: string
   savedCount: number
-  windowSize: number
 }
 
 export type SectionKey = 'weather' | 'exchange' | 'briefing'
