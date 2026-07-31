@@ -217,6 +217,41 @@ DB에 저장되고, 프론트엔드 날씨 카드에 "예보치" 배지 + 툴팁
 - AI 인사이트는 `ai_insight_cache` 테이블에 `latest_drw_no` 기준으로 캐싱되어,
   새 회차가 추가되기 전까지는 Groq를 다시 호출하지 않습니다.
 
+### 관리자 API — dhlottery가 막혔을 때의 수동 대체 수단
+
+자동 수집이 계속 실패한다면(예: dhlottery가 이 서버의 IP를 아예 차단), 회차를
+수동으로 채워 넣을 수 있는 관리자 전용 API가 있습니다. **프론트엔드 화면
+어디에도 이 기능으로 연결되는 버튼이나 메뉴가 없습니다** — 순수하게 API로만
+사용합니다.
+
+`backend/.env`에 `ADMIN_SECRET_KEY`를 설정하면 활성화됩니다(비어있으면 두
+엔드포인트 모두 503을 반환합니다).
+
+- `POST /api/admin/lotto/manual-entry` — 회차 하나를 저장/정정합니다.
+  ```bash
+  curl -X POST https://your-app.onrender.com/api/admin/lotto/manual-entry \
+    -H "X-Admin-Key: {ADMIN_SECRET_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"drwNo":1187,"drwDate":"2025-08-16","numbers":[3,12,19,27,33,41],"bonus":7}'
+  ```
+  `numbers`는 정확히 6개, 1~45 범위이며 중복이 없어야 하고, `bonus`도 1~45
+  범위이면서 `numbers`와 겹치지 않아야 합니다 — 하나라도 어긋나면 400과 함께
+  구체적인 사유를 반환합니다. 이미 저장된 회차 번호로 다시 요청하면(오타 정정
+  등) 기존 값을 덮어씁니다.
+- `GET /api/admin/lotto/status` — 현재 저장된 회차의 최소/최대 번호와, 그
+  범위 안에서 비어있는(아직 못 채운) 회차 목록을 보여줍니다. 어느 회차부터
+  `manual-entry`로 채워야 하는지 알아내는 용도입니다.
+  ```bash
+  curl https://your-app.onrender.com/api/admin/lotto/status -H "X-Admin-Key: {ADMIN_SECRET_KEY}"
+  ```
+
+여러 회차를 한 번에 채워 넣으려면 `scripts/manual_lotto_entry.sh`를 참고하세요
+— 파일 안의 배열에 회차를 여러 개 적어두고 한 번 실행하면 하나씩 순차적으로
+제출합니다.
+
+`X-Admin-Key`가 없거나 틀리면 401을, `ADMIN_SECRET_KEY` 자체가 설정되지 않았으면
+503을 반환합니다 — 두 경우 모두 DB에는 전혀 접근하지 않습니다.
+
 ### DB 스키마
 
 ```sql

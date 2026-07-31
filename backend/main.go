@@ -114,6 +114,11 @@ func main() {
 	mux.HandleFunc("/api/lotto/collection/stop", withCORS(lottoCollectionStopHandler))
 	mux.HandleFunc("/api/lotto/collection/status", withCORS(lottoCollectionStatusHandler))
 	mux.HandleFunc("/api/debug/groq-usage", withCORS(groqUsageHandler))
+	// 관리자 전용 엔드포인트는 의도적으로 withCORS로 감싸지 않는다 —
+	// 프론트엔드 어디에도 이 엔드포인트를 호출하는 코드가 없고(curl/스크립트
+	// 전용), 브라우저에서 호출할 일이 없으니 CORS 헤더 자체가 필요 없다.
+	mux.HandleFunc("/api/admin/lotto/manual-entry", lottoManualEntryHandler)
+	mux.HandleFunc("/api/admin/lotto/status", lottoAdminStatusHandler)
 	mux.Handle("/", newStaticHandler())
 
 	port := os.Getenv("PORT")
@@ -129,6 +134,9 @@ func main() {
 	}
 	if os.Getenv("KMA_SERVICE_KEY") == "" {
 		log.Println("정보: KMA_SERVICE_KEY 환경변수가 설정되지 않았습니다. 국내 도시 날씨도 Open-Meteo로 조회합니다.")
+	}
+	if os.Getenv("ADMIN_SECRET_KEY") == "" {
+		log.Println("정보: ADMIN_SECRET_KEY 환경변수가 설정되지 않았습니다. 로또 관리자 수동 입력 API가 비활성화됩니다.")
 	}
 
 	log.Printf("서버 시작: http://localhost:%s", port)
