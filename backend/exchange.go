@@ -70,6 +70,8 @@ type frankfurterRangeResponse struct {
 }
 
 func fetchFrankfurterRange(ctx context.Context, startDate, endDate, from, to string) (frankfurterRangeResponse, error) {
+	log.Printf("환율(%s->%s): 7일 추이 조회 시작 (%s..%s)", from, to, startDate, endDate)
+
 	endpoint := fmt.Sprintf(
 		"https://api.frankfurter.app/%s..%s?from=%s&to=%s",
 		startDate, endDate, url.QueryEscape(from), url.QueryEscape(to),
@@ -82,18 +84,22 @@ func fetchFrankfurterRange(ctx context.Context, startDate, endDate, from, to str
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		log.Printf("환율(%s->%s): 7일 추이 조회 실패(요청 자체가 실패): %v", from, to, err)
 		return frankfurterRangeResponse{}, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		log.Printf("환율(%s->%s): 7일 추이 조회 실패, http %d", from, to, resp.StatusCode)
 		return frankfurterRangeResponse{}, fmt.Errorf("frankfurter range returned status %d for %s..%s", resp.StatusCode, startDate, endDate)
 	}
 
 	var parsed frankfurterRangeResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		log.Printf("환율(%s->%s): 7일 추이 응답 파싱 실패: %v", from, to, err)
 		return frankfurterRangeResponse{}, err
 	}
+	log.Printf("환율(%s->%s): 7일 추이 응답 파싱 완료: %d개 날짜", from, to, len(parsed.Rates))
 	return parsed, nil
 }
 
@@ -294,23 +300,108 @@ func findYesterdayRate(weekly []ExchangeRatePoint, currentDate string) *Exchange
 	return best
 }
 
-// exchangeRawCacheTTL은 raw_data_cache에 저장된 fetchExchange 결과를
-// 한동안 재사용할 수 있게 한다 — 실제 환율은 하루에 몇 번밖에 갱신되지
-// 않으므로, 이 기간 안에 대시보드를 새로고침/재시도할 때마다
+// exchangeRawCacheTTL은 raw_data_cache에 저장된, 현재값 중심의 exchange
+// 결과("weekly"/"yesterday"는 빠진 상태 — 아래 exchangeWeeklyRawCacheTTL
+// 참고)를 한동안 재사용할 수 있게 한다 — 실제 환율은 하루에 몇 번밖에
+// 갱신되지 않으므로, 이 기간 안에 대시보드를 새로고침/재시도할 때마다
 // Frankfurter를 다시 호출하는 건 순전한 낭비다. 환율은 날씨보다 훨씬
 // 드물게 변하므로 weatherRawCacheTTL보다 길게 잡았다. 예전에는 프로세스
 // 메모리에만 있었지만, 이제는 raw_data_cache 테이블(raw_data_cache.go)에
 // 저장되어 서버가 재시작돼도 그대로 남아있다.
 const exchangeRawCacheTTL = 30 * time.Minute
 
+// exchangeWeeklyRawCacheTTL은 "현재값"과 별개의 TTL/캐시 키
+// (exchangeWeeklyFetchCacheKey)로 7일 추이(Weekly)만 저장한다. 원래는
+// fetchExchange가 반환하는 ExchangeData 전체(현재값+weekly)를 통째로 하나의
+// 캐시 항목으로 저장했는데, 그 결과 현재값 조회(Frankfurter "latest")는
+// 성공하고 7일 추이 조회(Frankfurter range)만 실패한 순간이 있으면, weekly가
+// 빈 채로 "성공한" 응답 전체가 30분 동안 그대로 캐시에 박제되어 — 그 30분
+// 내내 fetchExchange 자체가 다시 호출되지 않으니 range 조회를 재시도할
+// 기회조차 없이 차트가 계속 비어 있었다. 캐시 키를 분리하면 weekly만 독립적으로
+// 다시 시도할 수 있고, 이번 조회에서 range가 실패해도(빈 결과라서) 기존에
+// 저장해 둔 weekly 캐시를 덮어쓰지 않는다(persistExchangeCache 참고).
+const exchangeWeeklyRawCacheTTL = 30 * time.Minute
+
 func exchangeFetchCacheKey(from, to string) string {
 	return "exchange:" + from + ":" + to
+}
+
+func exchangeWeeklyFetchCacheKey(from, to string) string {
+	return "exchange:weekly:" + from + ":" + to
+}
+
+// combineExchangeCache는 별도로 캐싱된 현재값(row)과 7일 추이(weeklyRow)를
+// 합쳐 하나의 ExchangeData로 복원한다. Yesterday는 저장해두지 않고 항상
+// 여기서 weekly+current로부터 다시 계산한다 — fetchExchange가 하는 계산과
+// 정확히 같은 함수(findYesterdayRate/computeChangePercent)를 쓰므로, 캐시를
+// 거쳐도 두 값이 어긋나지 않는다.
+func combineExchangeCache(row, weeklyRow rawDataCacheRow) (*ExchangeData, bool) {
+	var data ExchangeData
+	if err := json.Unmarshal([]byte(row.dataJSON), &data); err != nil {
+		return nil, false
+	}
+	var weekly []ExchangeRatePoint
+	if err := json.Unmarshal([]byte(weeklyRow.dataJSON), &weekly); err != nil {
+		return nil, false
+	}
+	data.Weekly = weekly
+	if yesterday := findYesterdayRate(weekly, data.Current.Date); yesterday != nil {
+		data.Yesterday = &ExchangeYesterday{
+			Rate:          yesterday.Rate,
+			DisplayRate:   yesterday.DisplayRate,
+			Date:          yesterday.Date,
+			ChangePercent: computeChangePercent(yesterday.Rate, data.Current.Rate),
+		}
+	}
+	return &data, true
+}
+
+// persistExchangeCache는 방금 가져온 fetched를 두 개의 독립된 캐시 항목에
+// 나눠 저장한다: 현재값(weekly/yesterday를 뺀 core)은 항상 key에 저장하고,
+// weekly는 이번 조회에서 실제로 값을 얻었을 때만(len > 0) weeklyKey에
+// 저장한다 — range 조회가 이번에 실패해서 비어 있다면, 이전에 저장해 둔
+// (아직 만료 전일 수도 있는) weekly 캐시를 빈 값으로 덮어써서 잃어버리지
+// 않기 위함이다.
+func persistExchangeCache(key, weeklyKey string, fetched *ExchangeData, now time.Time) {
+	// rawCacheUpsertTimeout 문서 주석 참고 — 호출자의 요청 스코프 ctx가
+	// 아니라 독립적인 컨텍스트를 써야, Frankfurter 호출이 요청 타임아웃
+	// 예산을 거의 다 쓰고 나서야 성공한 경우에도 저장 자체가 취소되지 않는다.
+	insertCtx, cancel := context.WithTimeout(context.Background(), rawCacheUpsertTimeout)
+	defer cancel()
+
+	core := *fetched
+	core.Weekly = nil
+	core.Yesterday = nil
+	if encoded, err := json.Marshal(core); err != nil {
+		log.Printf("환율(%s): 직렬화 실패, 캐시 저장 생략: %v", key, err)
+	} else if err := upsertRawDataCache(insertCtx, db, key, string(encoded), now, now.Add(exchangeRawCacheTTL)); err != nil {
+		log.Printf("환율(%s): DB 저장 실패: %v", key, err)
+	}
+
+	if len(fetched.Weekly) == 0 {
+		log.Printf("환율(%s): 이번 조회에 7일 추이가 없어(위 로그 참고) 기존 캐시를 그대로 유지하고 저장은 생략합니다", weeklyKey)
+		return
+	}
+	if encoded, err := json.Marshal(fetched.Weekly); err != nil {
+		log.Printf("환율(%s): 직렬화 실패, 캐시 저장 생략: %v", weeklyKey, err)
+	} else if err := upsertRawDataCache(insertCtx, db, weeklyKey, string(encoded), now, now.Add(exchangeWeeklyRawCacheTTL)); err != nil {
+		log.Printf("환율(%s): DB 저장 실패: %v", weeklyKey, err)
+	}
 }
 
 // getCachedOrFetchExchange는 dashboardHandler가 사용하는 진입점이다 —
 // Frankfurter를 다시 호출하는 대신 최근 fetchExchange 결과를 재사용한다.
 // 여기서 from/to를 정규화해두면(fetchExchange 자체의 기본값 처리와
 // 동일하게) 캐시 키와 실제로 조회한 통화 쌍이 서로 어긋나는 일이 없다.
+//
+// 현재값과 weekly는 서로 다른 raw_data_cache 항목(key/weeklyKey)에
+// 독립적으로 저장된다 — exchangeWeeklyRawCacheTTL 문서 주석 참고. 그래서
+// 캐시를 그대로 쓰려면 둘 다 신선해야 한다: 하나라도 만료됐으면
+// fetchExchange를 다시 호출한다(current/range를 병렬로 함께 조회하는 게
+// 원래 더 저렴하기도 하고, 두 캐시를 완전히 독립적으로 갱신하려면 훨씬
+// 복잡해지는 데 비해 이득이 적다) — 다만 그 결과를 저장할 때는 여전히
+// 두 캐시를 독립적으로 갱신하므로, weekly만 실패하는 순간이 있어도 그
+// 실패가 현재값 캐시에 30분간 함께 박제되지 않는다.
 func getCachedOrFetchExchange(ctx context.Context, from, to string) (*ExchangeData, error) {
 	if from == "" {
 		from = defaultFromCurrency
@@ -319,10 +410,62 @@ func getCachedOrFetchExchange(ctx context.Context, from, to string) (*ExchangeDa
 		to = defaultToCurrency
 	}
 	key := exchangeFetchCacheKey(from, to)
+	weeklyKey := exchangeWeeklyFetchCacheKey(from, to)
+	now := time.Now()
 
-	return fetchWithRawCache(ctx, db, key, exchangeRawCacheTTL, func(ctx context.Context) (*ExchangeData, error) {
-		return fetchExchange(ctx, from, to)
-	})
+	row, found := lookupRawDataCache(ctx, db, key)
+	weeklyRow, weeklyFound := lookupRawDataCache(ctx, db, weeklyKey)
+
+	if found && isRawCacheFresh(row, now) && weeklyFound && isRawCacheFresh(weeklyRow, now) {
+		if combined, ok := combineExchangeCache(row, weeklyRow); ok {
+			log.Printf("환율(%s->%s): 현재값(%s까지)+7일추이(%s까지) 모두 유효 (Frankfurter 미호출)",
+				from, to, row.expiresAt.Format("15:04:05"), weeklyRow.expiresAt.Format("15:04:05"))
+			return combined, nil
+		}
+		log.Printf("환율(%s): 캐시 파싱 실패, 무시하고 새로 가져옵니다", key)
+	}
+
+	fetched, fetchErr := fetchExchange(ctx, from, to)
+	if fetchErr != nil {
+		if found {
+			if stale, ok := combineExchangeStale(row, weeklyRow, weeklyFound); ok {
+				log.Printf("환율(%s->%s): Frankfurter 호출 실패(%v) — 만료된 캐시를 잠정치로 사용", from, to, fetchErr)
+				return stale, nil
+			}
+		}
+		return nil, fetchErr
+	}
+
+	persistExchangeCache(key, weeklyKey, fetched, now)
+
+	return fetched, nil
+}
+
+// combineExchangeStale은 fetchExchange 자체가 실패했을 때(Frankfurter
+// "latest" 호출 실패 등)의 잠정치 폴백이다 — 현재값 캐시는 반드시 있어야
+// 하고(row), weekly 캐시는 있으면 붙이고 없으면 weekly 없이(빈 채로)
+// 반환한다 — 완전히 실패하는 것보다는 낫기 때문이다.
+func combineExchangeStale(row, weeklyRow rawDataCacheRow, weeklyFound bool) (*ExchangeData, bool) {
+	var stale ExchangeData
+	if err := json.Unmarshal([]byte(row.dataJSON), &stale); err != nil {
+		return nil, false
+	}
+	if !weeklyFound {
+		return &stale, true
+	}
+	var weekly []ExchangeRatePoint
+	if err := json.Unmarshal([]byte(weeklyRow.dataJSON), &weekly); err == nil {
+		stale.Weekly = weekly
+		if yesterday := findYesterdayRate(weekly, stale.Current.Date); yesterday != nil {
+			stale.Yesterday = &ExchangeYesterday{
+				Rate:          yesterday.Rate,
+				DisplayRate:   yesterday.DisplayRate,
+				Date:          yesterday.Date,
+				ChangePercent: computeChangePercent(yesterday.Rate, stale.Current.Rate),
+			}
+		}
+	}
+	return &stale, true
 }
 
 func fetchExchange(ctx context.Context, from, to string) (*ExchangeData, error) {
@@ -410,6 +553,7 @@ func fetchExchange(ctx context.Context, from, to string) (*ExchangeData, error) 
 		}
 		sort.Slice(weekly, func(i, j int) bool { return weekly[i].Date < weekly[j].Date })
 		data.Weekly = weekly
+		log.Printf("환율(%s->%s): 7일 추이 %d개 포인트 준비 완료", from, to, len(weekly))
 
 		if yesterday := findYesterdayRate(weekly, data.Current.Date); yesterday != nil {
 			data.Yesterday = &ExchangeYesterday{
@@ -419,6 +563,8 @@ func fetchExchange(ctx context.Context, from, to string) (*ExchangeData, error) 
 				ChangePercent: computeChangePercent(yesterday.Rate, rate),
 			}
 		}
+	} else {
+		log.Printf("환율(%s->%s): 7일 추이 조회 실패로 이번 응답에는 weekly 없이 진행: %v", from, to, rangeErr)
 	}
 
 	return data, nil

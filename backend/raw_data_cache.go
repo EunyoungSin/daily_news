@@ -68,10 +68,13 @@ func isRawCacheFresh(row rawDataCacheRow, now time.Time) bool {
 // 정확히 같은 문제이자 같은 해법이다.
 const rawCacheUpsertTimeout = 5 * time.Second
 
-// fetchWithRawCache는 날씨/환율이 공유하는 "DB 기반 원본 응답 캐시" 패턴을
-// 구현한다 — 뉴스는 일일 크레딧 할당량에 근접했을 때 만료된 캐시라도
-// 미리 서빙하는 로직이 추가로 필요해 news.go의 getCachedOrFetchNews에
-// 별도로 구현되어 있다(이 함수는 재사용하지 않는다).
+// fetchWithRawCache는 날씨가 쓰는 "DB 기반 원본 응답 캐시" 패턴을 구현한다.
+// 뉴스와 환율은 이 함수를 재사용하지 않고 각자 별도로 구현되어 있다:
+// 뉴스(news.go의 getCachedOrFetchNews)는 일일 크레딧 할당량에 근접했을 때
+// 만료된 캐시라도 미리 서빙하는 세 번째 분기가 필요하고, 환율(exchange.go의
+// getCachedOrFetchExchange)은 현재값과 7일 추이(weekly)를 서로 다른 TTL로
+// 독립적으로 캐싱해야 해서(하나가 실패해도 다른 하나의 캐시를 30분씩
+// 덮어쓰지 않도록) 캐시 항목이 두 개다.
 //
 //  1. 유효한(expires_at 이전) 캐시가 있으면 그대로 반환한다(외부 API 미호출).
 //  2. 없거나 만료됐으면 fetchFn으로 실제 API를 호출한다.

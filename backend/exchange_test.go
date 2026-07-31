@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestComputeChangePercent(t *testing.T) {
@@ -361,5 +363,97 @@ func TestToBriefingExchangeInputTrendMatchesWeeklyArray(t *testing.T) {
 func TestExchangeCacheKeyIncludesPrefix(t *testing.T) {
 	if got, want := exchangeFetchCacheKey("USD", "KRW"), "exchange:USD:KRW"; got != want {
 		t.Errorf("exchangeFetchCacheKey(USD, KRW) = %q, want %q", got, want)
+	}
+}
+
+// TestExchangeWeeklyCacheKeyIsDistinctFromCurrent은 weekly가 현재값과
+// 별도의 raw_data_cache 항목을 쓰는지 확인한다 — 이번에 고친 버그(range
+// 조회가 한 번 실패하면 성공한 현재값과 함께 빈 weekly가 30분간 캐시에
+// 박제됨)의 핵심 수정 사항이다. 두 키가 우연히라도 같아지면 독립적인
+// 캐싱/재시도가 의미 없어진다.
+func TestExchangeWeeklyCacheKeyIsDistinctFromCurrent(t *testing.T) {
+	current := exchangeFetchCacheKey("USD", "KRW")
+	weekly := exchangeWeeklyFetchCacheKey("USD", "KRW")
+	if current == weekly {
+		t.Fatalf("expected distinct cache keys, both were %q", current)
+	}
+	if want := "exchange:weekly:USD:KRW"; weekly != want {
+		t.Errorf("exchangeWeeklyFetchCacheKey(USD, KRW) = %q, want %q", weekly, want)
+	}
+}
+
+func rawRow(t *testing.T, v interface{}, expiresAt time.Time) rawDataCacheRow {
+	t.Helper()
+	encoded, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("failed to marshal fixture: %v", err)
+	}
+	return rawDataCacheRow{dataJSON: string(encoded), expiresAt: expiresAt}
+}
+
+// TestCombineExchangeCacheRecomputesYesterdayFromWeekly는 캐시된
+// 현재값(weekly/yesterday가 빠진 core)과 별도로 캐시된 weekly를 합쳤을 때,
+// Yesterday가 캐시에서 그대로 읽히는 게 아니라 findYesterdayRate/
+// computeChangePercent로 다시 계산되는지 확인한다 — 그래야 weekly가
+// 독립적으로 갱신되어도 Yesterday가 낡은 상태로 남지 않는다.
+func TestCombineExchangeCacheRecomputesYesterdayFromWeekly(t *testing.T) {
+	core := ExchangeData{
+		From: "USD", To: "KRW",
+		Current: ExchangeRatePoint{Date: "2026-07-30", Rate: 1470.11, DisplayRate: 1470.11},
+	}
+	weekly := []ExchangeRatePoint{
+		{Date: "2026-07-23", Rate: 1478.4, DisplayRate: 1478.4},
+		{Date: "2026-07-29", Rate: 1465.0, DisplayRate: 1465.0},
+	}
+
+	row := rawRow(t, core, time.Now().Add(time.Hour))
+	weeklyRow := rawRow(t, weekly, time.Now().Add(time.Hour))
+
+	combined, ok := combineExchangeCache(row, weeklyRow)
+	if !ok {
+		t.Fatal("expected combineExchangeCache to succeed")
+	}
+	if len(combined.Weekly) != 2 {
+		t.Fatalf("expected weekly to be attached, got %+v", combined.Weekly)
+	}
+	if combined.Yesterday == nil {
+		t.Fatal("expected Yesterday to be recomputed from weekly")
+	}
+	wantChange := computeChangePercent(1465.0, 1470.11)
+	if combined.Yesterday.Date != "2026-07-29" || combined.Yesterday.ChangePercent != wantChange {
+		t.Errorf("Yesterday = %+v, want Date=2026-07-29 ChangePercent=%v", combined.Yesterday, wantChange)
+	}
+}
+
+func TestCombineExchangeCacheFailsOnUnparseableRow(t *testing.T) {
+	badRow := rawDataCacheRow{dataJSON: "not json"}
+	goodWeeklyRow := rawRow(t, []ExchangeRatePoint{}, time.Now().Add(time.Hour))
+	if _, ok := combineExchangeCache(badRow, goodWeeklyRow); ok {
+		t.Error("expected combineExchangeCache to fail when the current-value row isn't valid JSON")
+	}
+
+	goodRow := rawRow(t, ExchangeData{}, time.Now().Add(time.Hour))
+	badWeeklyRow := rawDataCacheRow{dataJSON: "not json"}
+	if _, ok := combineExchangeCache(goodRow, badWeeklyRow); ok {
+		t.Error("expected combineExchangeCache to fail when the weekly row isn't valid JSON")
+	}
+}
+
+// TestCombineExchangeStaleWorksWithoutWeeklyCache는 Frankfurter 호출
+// 자체가 실패했을 때의 잠정치 폴백을 다룬다 — 현재값 캐시만 있고 weekly
+// 캐시는 아직 없거나 만료된 경우에도(weeklyFound=false) 완전히 실패하는
+// 대신 weekly 없이(빈 채로) 잠정치를 반환해야 한다.
+func TestCombineExchangeStaleWorksWithoutWeeklyCache(t *testing.T) {
+	row := rawRow(t, ExchangeData{From: "USD", To: "KRW", Current: ExchangeRatePoint{Date: "2026-07-30", Rate: 1470.11}}, time.Now().Add(-time.Hour))
+
+	stale, ok := combineExchangeStale(row, rawDataCacheRow{}, false)
+	if !ok {
+		t.Fatal("expected a stale fallback to be built from the current-value cache alone")
+	}
+	if stale.From != "USD" || stale.Current.Rate != 1470.11 {
+		t.Errorf("stale = %+v, want the cached current value preserved", stale)
+	}
+	if stale.Weekly != nil {
+		t.Errorf("expected no weekly data when weeklyFound is false, got %+v", stale.Weekly)
 	}
 }

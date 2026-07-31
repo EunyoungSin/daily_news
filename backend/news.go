@@ -258,6 +258,59 @@ func newsShouldServeStaleForQuota(found bool, todayCount int) bool {
 	return found && todayCount >= newsDataIOQuotaThreshold
 }
 
+// newsFetchCall은 coalesceNewsFetch가 key(category+region)별로 관리하는
+// 진행 중인 조회 하나를 나타낸다 — done이 닫히면 result가 확정된 것이다.
+type newsFetchCall struct {
+	done   chan struct{}
+	result struct {
+		data   *NewsData
+		notice string
+		err    error
+	}
+}
+
+// newsFetchCoordinator는 key별로 진행 중인 getCachedOrFetchNews 호출을
+// 추적한다 — coalesceNewsFetch의 문서 주석 참고.
+var newsFetchCoordinator = struct {
+	mu       sync.Mutex
+	inFlight map[string]*newsFetchCall
+}{inFlight: make(map[string]*newsFetchCall)}
+
+// coalesceNewsFetch는 같은 key(category+region)에 대한 동시 호출들을
+// 하나로 합친다. /api/news(news_handler.go)와 대시보드의 브리핑용 내부
+// 조회(handler.go)는 서로 완전히 독립된 HTTP 요청이라서, 프론트엔드가
+// 페이지를 열 때 둘 다 거의 동시에 들어온다 — raw_data_cache에 아직
+// 신선한 값이 없는 순간(예: 캐시가 막 만료된 직후)에 둘 다 도착하면,
+// 각자 독립적으로 lookupRawDataCache에서 "없음"을 보고 NewsData.io를
+// 중복 호출해버리는 경쟁 상태(cache stampede)가 실제로 있었다 — 같은
+// category+region 조합이 30분 TTL 안인데도 20초 사이에 두 번 호출되는
+// 형태로 관측됨. 같은 key로 먼저 들어온 호출이 아직 진행 중이면, 뒤이어
+// 들어온 호출은 새로 조회를 시작하는 대신 그 결과를 기다렸다가 그대로
+// 공유한다.
+func coalesceNewsFetch(key string, fn func() (*NewsData, string, error)) (*NewsData, string, error) {
+	newsFetchCoordinator.mu.Lock()
+	if call, ok := newsFetchCoordinator.inFlight[key]; ok {
+		newsFetchCoordinator.mu.Unlock()
+		log.Printf("뉴스(%s): 동시에 들어온 다른 요청이 이미 조회 중 — 그 결과를 기다립니다 (중복 호출 방지)", key)
+		<-call.done
+		return call.result.data, call.result.notice, call.result.err
+	}
+
+	call := &newsFetchCall{done: make(chan struct{})}
+	newsFetchCoordinator.inFlight[key] = call
+	newsFetchCoordinator.mu.Unlock()
+
+	defer func() {
+		newsFetchCoordinator.mu.Lock()
+		delete(newsFetchCoordinator.inFlight, key)
+		newsFetchCoordinator.mu.Unlock()
+		close(call.done)
+	}()
+
+	call.result.data, call.result.notice, call.result.err = fn()
+	return call.result.data, call.result.notice, call.result.err
+}
+
 // getCachedOrFetchNews는 /api/news와 브리핑이 공통으로 호출해야 하는
 // 단일 진입점이다 — 최근에 가져온 결과를 투명하게 재사용해서 NewsData.io를
 // 다시 호출하지 않도록 한다. 오늘 사용량이 무료 요금제의 credit 한도에
@@ -273,7 +326,12 @@ func newsShouldServeStaleForQuota(found bool, todayCount int) bool {
 // 흐름에 깔끔하게 들어맞지 않는다.
 func getCachedOrFetchNews(ctx context.Context, category, region string) (data *NewsData, notice string, err error) {
 	key := newsFetchCacheKey(category, region)
+	return coalesceNewsFetch(key, func() (*NewsData, string, error) {
+		return fetchNewsWithCache(ctx, key, category, region)
+	})
+}
 
+func fetchNewsWithCache(ctx context.Context, key, category, region string) (data *NewsData, notice string, err error) {
 	row, found := lookupRawDataCache(ctx, db, key)
 	now := time.Now()
 
