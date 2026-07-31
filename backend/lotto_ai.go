@@ -56,7 +56,7 @@ func getLottoAIInsight(ctx context.Context, conn *sql.DB, latestDrwNo int, frequ
 	_, execErr := conn.ExecContext(ctx, `
 		INSERT INTO ai_insight_cache (latest_drw_no, insight_text, generated_at)
 		VALUES (?, ?, ?)
-		ON DUPLICATE KEY UPDATE insight_text = VALUES(insight_text), generated_at = VALUES(generated_at)`,
+		ON CONFLICT(latest_drw_no) DO UPDATE SET insight_text = excluded.insight_text, generated_at = excluded.generated_at`,
 		latestDrwNo, content, generatedAt,
 	)
 	if execErr != nil {

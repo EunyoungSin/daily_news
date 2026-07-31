@@ -8,8 +8,9 @@ import (
 	"time"
 )
 
-// raw_data_cache는 날씨/환율/뉴스 원본 API 응답을 JSON 그대로 MySQL에
-// 저장한다 — 예전에는 프로세스 메모리(sync.RWMutex + map) TTL 캐시였는데,
+// raw_data_cache는 날씨/환율/뉴스 원본 API 응답을 JSON 그대로 DB(Turso/
+// libSQL, 로컬 개발 시에는 파일 기반 libSQL)에 저장한다 — 예전에는
+// 프로세스 메모리(sync.RWMutex + map) TTL 캐시였는데,
 // Render 같은 플랫폼에서 무료 티어 인스턴스가 잠들었다 깨어나면(또는 그냥
 // 재배포되면) 메모리가 통째로 초기화되어 캐시도 함께 사라지고, 재시작
 // 직후 사용자 요청들이 한꺼번에 외부 API를 다시 두들기는 문제가 있었다.
@@ -41,7 +42,7 @@ func upsertRawDataCache(ctx context.Context, conn *sql.DB, key, dataJSON string,
 	_, err := conn.ExecContext(ctx, `
 		INSERT INTO raw_data_cache (cache_key, data_json, fetched_at, expires_at)
 		VALUES (?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE data_json = VALUES(data_json), fetched_at = VALUES(fetched_at), expires_at = VALUES(expires_at)`,
+		ON CONFLICT(cache_key) DO UPDATE SET data_json = excluded.data_json, fetched_at = excluded.fetched_at, expires_at = excluded.expires_at`,
 		key, dataJSON, fetchedAt, expiresAt,
 	)
 	return err

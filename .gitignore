@@ -3,6 +3,7 @@ backend/.env
 backend/static/*
 !backend/static/index.html
 backend/dashboard-backend
+backend/data/
 
 # frontend
 frontend/node_modules/

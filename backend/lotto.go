@@ -457,17 +457,27 @@ func collectLottoRounds(ctx context.Context, conn *sql.DB, toFetch []int) (inser
 	return int(insertedCount.Load()), int(failedCount.Load())
 }
 
+// insertLottoDraw는 drwNoDate를 time.Parse로 한 번 검증만 하고(형식이
+// 잘못된 응답을 조용히 저장하지 않기 위해), 실제 바인딩에는 재파싱한
+// time.Time이 아니라 원본 문자열을 그대로 쓴다 — go-libsql은 bind
+// 파라미터가 time.Time이면 RFC3339Nano로 재포맷해서 저장하므로(예:
+// "2002-12-07"이 "2002-12-07T00:00:00Z"가 됨), 원본 문자열을 그대로
+// 바인딩해야 drw_date가 깔끔한 "YYYY-MM-DD" 형태로 저장된다.
+//
+// ON CONFLICT는 DO NOTHING이다(MySQL 시절의 `ON DUPLICATE KEY UPDATE
+// drw_date = drw_date`도 사실상 아무것도 갱신하지 않는 no-op이었다) —
+// 한 번 저장된 회차의 당첨 번호는 절대 바뀌지 않으므로, 이미 있는
+// drw_no로 다시 들어오면 그냥 무시한다.
 func insertLottoDraw(ctx context.Context, conn *sql.DB, d *dhlotteryResponse) error {
-	drawDate, err := time.Parse("2006-01-02", d.DrwNoDate)
-	if err != nil {
+	if _, err := time.Parse("2006-01-02", d.DrwNoDate); err != nil {
 		return fmt.Errorf("parse drwNoDate %q: %w", d.DrwNoDate, err)
 	}
 
-	_, err = conn.ExecContext(ctx, `
+	_, err := conn.ExecContext(ctx, `
 		INSERT INTO lotto_draws (drw_no, drw_date, num1, num2, num3, num4, num5, num6, bonus_no)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE drw_date = drw_date`,
-		d.DrwNo, drawDate, d.DrwtNo1, d.DrwtNo2, d.DrwtNo3, d.DrwtNo4, d.DrwtNo5, d.DrwtNo6, d.BnusNo,
+		ON CONFLICT(drw_no) DO NOTHING`,
+		d.DrwNo, d.DrwNoDate, d.DrwtNo1, d.DrwtNo2, d.DrwtNo3, d.DrwtNo4, d.DrwtNo5, d.DrwtNo6, d.BnusNo,
 	)
 	return err
 }
@@ -500,8 +510,9 @@ func queryLottoHistory(ctx context.Context, conn *sql.DB, limit int) ([]LottoDra
 }
 
 // queryFrequency는 최근 `window`개 회차의 num1..num6 중 1~45 각 번호가 몇 번
-// 나왔는지 센다. UNION ALL + GROUP BY를 써서 카운팅 자체를 Go가 아니라
-// MySQL이 하도록 한다. 한 번도 나오지 않은 번호도 count 0으로 맵에 그대로
+// 나왔는지 센다. WITH(CTE) + UNION ALL + GROUP BY를 써서 카운팅 자체를 Go가
+// 아니라 DB가 하도록 한다 — 이 문법은 표준 SQL이라 SQLite/libSQL에서도 MySQL과
+// 완전히 동일하게 동작한다. 한 번도 나오지 않은 번호도 count 0으로 맵에 그대로
 // 남겨서, 프론트엔드가 45개 슬롯을 전부 그릴 수 있게 한다.
 func queryFrequency(ctx context.Context, conn *sql.DB, window int) (map[int]int, error) {
 	freq := make(map[int]int, 45)

@@ -167,16 +167,17 @@ func lookupLottoRecommendation(ctx context.Context, conn *sql.DB, cycleStartDate
 	return numbers, generatedAt, true
 }
 
-// insertLottoRecommendationIfAbsent는 INSERT IGNORE를 사용한다
-// (cycle_start_date가 primary key다). 같은 새 사이클에 대해 동시에 생성
-// 요청이 들어와도 둘 다 쓰기에 성공하는 일이 없도록 하기 위해서다 — 경쟁에서
-// 진 쪽의 insert는 조용히 무시되고, getLottoRecommendation이 이후에 다시
-// 읽어서 실제로 이긴 쪽의 row를 가져온다. 한 사이클 안의 모든 요청이 동일한
-// 번호를 보게 되는 것은 이 insert가 아니라 그 재조회(re-read) 덕분이다.
+// insertLottoRecommendationIfAbsent는 `INSERT OR IGNORE`를 사용한다
+// (cycle_start_date가 primary key다) — MySQL의 `INSERT IGNORE`에 해당하는
+// SQLite/libSQL 문법이다. 같은 새 사이클에 대해 동시에 생성 요청이 들어와도
+// 둘 다 쓰기에 성공하는 일이 없도록 하기 위해서다 — 경쟁에서 진 쪽의
+// insert는 조용히 무시되고, getLottoRecommendation이 이후에 다시 읽어서
+// 실제로 이긴 쪽의 row를 가져온다. 한 사이클 안의 모든 요청이 동일한 번호를
+// 보게 되는 것은 이 insert가 아니라 그 재조회(re-read) 덕분이다.
 func insertLottoRecommendationIfAbsent(ctx context.Context, conn *sql.DB, cycleStartDate string, numbers []LottoRecommendationNumber, generatedAt time.Time) error {
 	numbersCSV, groupsCSV := encodeRecommendationNumbers(numbers)
 	_, err := conn.ExecContext(ctx, `
-		INSERT IGNORE INTO lotto_recommendation (cycle_start_date, numbers, number_groups, generated_at)
+		INSERT OR IGNORE INTO lotto_recommendation (cycle_start_date, numbers, number_groups, generated_at)
 		VALUES (?, ?, ?, ?)`,
 		cycleStartDate, numbersCSV, groupsCSV, generatedAt,
 	)

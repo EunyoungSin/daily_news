@@ -14,10 +14,12 @@ import (
 //go:embed static
 var embeddedStatic embed.FS
 
-// db는 로또 섹션에서 사용하는, 프로세스 전체에서 공유하는 MySQL 커넥션
-// 풀이다. 시작 시 DB에 연결할 수 없으면 nil로 남겨두어 나머지 대시보드
-// (날씨/환율/뉴스/브리핑)는 그와 상관없이 계속 동작하도록 한다 —
-// lottoHandler는 nil 여부를 확인해서 로또 섹션만 실패로 보고한다.
+// db는 로또/캐시 테이블에서 사용하는, 프로세스 전체에서 공유하는 DB(Turso/
+// libSQL, 로컬 개발 시에는 파일 기반 libSQL) 커넥션 풀이다. 시작 시 DB에
+// 연결할 수 없으면 nil로 남겨두어 나머지 대시보드(날씨/환율/뉴스/브리핑)는
+// 그와 상관없이 계속 동작하도록 한다 — lottoHandler는 nil 여부를 확인해서
+// 로또 섹션만 실패로 보고하고, 원본 데이터/브리핑/뉴스 번역 캐시들은 db가
+// nil이면 그냥 캐싱 없이(매번 다시 계산/호출하며) 동작한다.
 var db *sql.DB
 
 func withCORS(next http.HandlerFunc) http.HandlerFunc {
@@ -86,13 +88,13 @@ func main() {
 	loadDotEnv(".env")
 
 	if conn, err := connectDB(); err != nil {
-		log.Printf("경고: MySQL 연결 실패, 로또 섹션은 비활성화됩니다: %v", err)
+		log.Printf("경고: 데이터베이스 연결 실패, 로또 섹션은 비활성화됩니다: %v", err)
 	} else if err := migrate(conn); err != nil {
-		log.Printf("경고: 로또 테이블 마이그레이션 실패, 로또 섹션은 비활성화됩니다: %v", err)
+		log.Printf("경고: 테이블 마이그레이션 실패, 로또 섹션은 비활성화됩니다: %v", err)
 		conn.Close()
 	} else {
 		db = conn
-		log.Println("MySQL 연결 및 마이그레이션 완료")
+		log.Println("데이터베이스 연결 및 마이그레이션 완료")
 		// 로또 수집은 더 이상 서버 시작 시 자동으로 걸리지 않는다 — 화면의
 		// ON/OFF 토글이 POST /api/lotto/collection/start를 통해 명시적으로
 		// 시작해야 한다(기본값은 꺼짐).

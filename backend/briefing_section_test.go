@@ -63,7 +63,7 @@ func TestWeatherExchangeBriefingCacheKeysAreCityAndPairSpecific(t *testing.T) {
 	}
 }
 
-// TestBriefingSectionCacheNilDB는 MySQL이 설정되지 않은 상태로 앱이 실행될 때
+// TestBriefingSectionCacheNilDB는 DB가 설정되지 않은 상태로 앱이 실행될 때
 // 캐시 헬퍼가 네트워크를 건드리거나 패닉을 일으키지 않아야 함을 문서화한다
 // — 이 경우 브리핑은 캐싱 없이 매 요청마다 그냥 다시 생성된다.
 func TestBriefingSectionCacheNilDB(t *testing.T) {

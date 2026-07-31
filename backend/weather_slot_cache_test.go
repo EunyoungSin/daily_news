@@ -24,7 +24,7 @@ func TestWeatherSlotCacheRowToPeriodForecast(t *testing.T) {
 }
 
 // TestResolveForecastSlotNilDB는 TestBriefingSectionCacheNilDB와 동일한
-// nil-DB 안전성 보장을 검증한다 — MySQL 설정 없이 실행해도 panic이 나거나
+// nil-DB 안전성 보장을 검증한다 — DB 설정 없이 실행해도 panic이 나거나
 // 네트워크에 접근해서는 안 되며, 다만 그 경우 슬롯이 저장된 값으로
 // 폴백할 수 없으므로 실제로 값이 없는 API 응답은 그대로 unavailable
 // 상태로 남는다. db가 nil이면 백필 재시도도 시도하지 않으므로(그럴 경우

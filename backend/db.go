@@ -1,153 +1,156 @@
 package main
 
 import (
-	"crypto/tls"
-	"crypto/x509"
 	"database/sql"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
+	"path/filepath"
 	"time"
 
-	"github.com/go-sql-driver/mysql"
+	_ "github.com/tursodatabase/go-libsql"
 )
 
 const (
-	dbMaxOpenConns    = 10
-	dbMaxIdleConns    = 5
-	dbConnMaxLifetime = 3 * time.Minute
+	// Turso(원격)에 연결할 때 쓰는 커넥션 풀 설정이다. Turso 연결은 로컬
+	// 파일이 아니라 HTTP 기반 클라이언트/서버 접속이라, 예전 Aiven MySQL과
+	// 마찬가지로 여러 커넥션을 동시에 열어도 안전하다 — 유휴 연결을
+	// 끊어버리는 클라우드 프로바이더 앞에서 "connection reset"을 피하려고
+	// 짧은 ConnMaxLifetime을 두는 이유도 그대로 유지한다.
+	remoteDBMaxOpenConns    = 10
+	remoteDBMaxIdleConns    = 5
+	remoteDBConnMaxLifetime = 3 * time.Minute
+
+	// 로컬 파일 모드(libSQL == SQLite 호환 파일 포맷)는 사정이 다르다 —
+	// 동시에 여러 쓰기 연결이 열리면 SQLite/libSQL 특유의 단일 writer
+	// 제약 때문에 "database is locked" 에러가 나기 쉽다. 커넥션 풀
+	// 자체를 1개로 강제해 모든 쿼리(읽기 포함)를 자연히 직렬화하면 이
+	// 문제가 원천적으로 사라진다 — 이 프로젝트는 개인용 대시보드
+	// 수준의 트래픽이라 그 정도 직렬화로 인한 성능 손해는 무시할 만하다.
+	localDBMaxOpenConns = 1
+
+	defaultLocalDBPath = "data/dashboard.db"
 )
 
-// connectDB는 DB_* 환경변수로부터 MySQL 커넥션 풀을 연다. DB_USE_TLS는
-// 연결 자체를 암호화할지 여부를 제어하는데, 이는 중요하다. 클라우드 MySQL
-// 제공업체(Aiven 등)는 대개 평문 연결을 아예 거부하는 반면, 로컬 Docker
-// MySQL은 검증할 인증서가 없기 때문이다.
+// connectDB는 TURSO_DATABASE_URL 환경변수가 설정되어 있으면 원격
+// Turso(libSQL) 데이터베이스에, 없으면 로컬 파일(기본값
+// backend/data/dashboard.db)에 연결한다 — 이 분기 하나로 로컬 개발과
+// 프로덕션 배포를 모두 커버한다. 로컬 개발자는 Turso 계정이나 별도 서버
+// 없이 `go run .`만으로 바로 로또/캐시 테이블이 있는 환경을 얻고, 배포
+// 시에는 환경변수 하나만 채우면 그대로 원격 DB로 전환된다.
+//
+// 두 브랜치 모두 등록된 "libsql" 드라이버(github.com/tursodatabase/go-libsql,
+// 위 blank import가 init()에서 등록한다)를 사용한다 — libSQL은 SQLite와
+// 완전히 호환되는 파일 포맷이자 SQL 문법이므로, 로컬 파일과 원격 Turso가
+// 정확히 같은 쿼리로 동작한다(로컬에서만 통하고 배포하면 깨지는 방언
+// 차이가 없다).
 func connectDB() (*sql.DB, error) {
-	host := envOrDefault("DB_HOST", "127.0.0.1")
-	port := envOrDefault("DB_PORT", "3306")
-	user := envOrDefault("DB_USER", "root")
-	password := os.Getenv("DB_PASSWORD")
-	name := envOrDefault("DB_NAME", "dashboard")
+	dbURL := os.Getenv("TURSO_DATABASE_URL")
+	if dbURL == "" {
+		return connectLocalDB()
+	}
+	return connectRemoteDB(dbURL, os.Getenv("TURSO_AUTH_TOKEN"))
+}
 
-	cfg := mysql.NewConfig()
-	cfg.Net = "tcp"
-	cfg.Addr = fmt.Sprintf("%s:%s", host, port)
-	cfg.User = user
-	cfg.Passwd = password
-	cfg.DBName = name
-	cfg.ParseTime = true
-	cfg.Loc = time.Local
-	cfg.Collation = "utf8mb4_general_ci"
-
-	if os.Getenv("DB_USE_TLS") == "true" {
-		const tlsConfigName = "dashboard"
-		tlsConfig := &tls.Config{ServerName: host}
-
-		if caPath := os.Getenv("DB_CA_CERT_PATH"); caPath != "" {
-			caCert, err := os.ReadFile(caPath)
-			if err != nil {
-				return nil, fmt.Errorf("failed to read DB_CA_CERT_PATH: %w", err)
-			}
-			pool := x509.NewCertPool()
-			if !pool.AppendCertsFromPEM(caCert) {
-				return nil, fmt.Errorf("failed to parse CA certificate at %s", caPath)
-			}
-			tlsConfig.RootCAs = pool
-		} else {
-			// CA 인증서가 제공되지 않은 경우: 연결은 암호화하되 서버 인증서 검증은
-			// 건너뛴다. 이 프로젝트 규모에서는 이 정도로 충분하다; 완전히 검증된
-			// 연결을 원한다면 DB_CA_CERT_PATH를 설정할 것(Aiven 콘솔에서 내려받을 수
-			// 있는 CA 인증서).
-			log.Println("경고: DB_USE_TLS=true 이지만 DB_CA_CERT_PATH가 없어 서버 인증서 검증 없이 암호화만 적용합니다")
-			tlsConfig.InsecureSkipVerify = true
+// connectLocalDB는 로컬 파일에 연결한다. "file:" 접두사는 SQLite/libSQL이
+// 공통으로 인식하는 URI 형태다(예전 파일 경로를 그대로 이어붙인 것과
+// 결과적으로 같은 파일을 열지만, 향후 "?mode=ro" 같은 URI 쿼리 옵션을
+// 붙일 여지를 남겨둔다). LOCAL_DB_PATH로 경로를 바꿀 수 있게 해둔 것은
+// 주로 테스트/디버깅 편의를 위함이다.
+func connectLocalDB() (*sql.DB, error) {
+	path := envOrDefault("LOCAL_DB_PATH", defaultLocalDBPath)
+	if dir := filepath.Dir(path); dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("failed to create local db directory %s: %w", dir, err)
 		}
-
-		if err := mysql.RegisterTLSConfig(tlsConfigName, tlsConfig); err != nil {
-			return nil, fmt.Errorf("failed to register TLS config: %w", err)
-		}
-		cfg.TLSConfig = tlsConfigName
 	}
 
-	conn, err := sql.Open("mysql", cfg.FormatDSN())
+	conn, err := sql.Open("libsql", "file:"+path)
 	if err != nil {
 		return nil, err
 	}
-
-	// 클라우드 MySQL 제공업체는 유휴 연결을 몇 분 후에 끊어버리는 경우가 많아,
-	// 다음 쿼리에서 broken-pipe 에러가 발생하기 전에 미리 커넥션 풀이 연결을
-	// 재활용하도록 한다.
-	conn.SetMaxOpenConns(dbMaxOpenConns)
-	conn.SetMaxIdleConns(dbMaxIdleConns)
-	conn.SetConnMaxLifetime(dbConnMaxLifetime)
+	conn.SetMaxOpenConns(localDBMaxOpenConns)
 
 	if err := conn.Ping(); err != nil {
 		conn.Close()
 		return nil, err
 	}
+	log.Printf("로컬 DB 파일에 연결됨: %s (TURSO_DATABASE_URL이 설정되지 않아 자동으로 폴백)", path)
+	return conn, nil
+}
 
+// connectRemoteDB는 원격 Turso 데이터베이스에 연결한다. authToken은 DSN에
+// 쿼리 파라미터로 실어 보낸다 — go-libsql의 libsql:// 스킴 처리가 바로 이
+// 쿼리 파라미터에서 인증 토큰을 읽기 때문이다. url.Values를 통해 붙이는
+// 이유는 dbURL에 혹시 이미 쿼리스트링이 있는 경우에도(정상적인 Turso
+// URL은 없지만) "?"가 중복되어 잘못된 DSN이 되는 사고를 피하기 위함이다.
+func connectRemoteDB(dbURL, authToken string) (*sql.DB, error) {
+	dsn := dbURL
+	if authToken != "" {
+		u, err := url.Parse(dbURL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid TURSO_DATABASE_URL: %w", err)
+		}
+		q := u.Query()
+		q.Set("authToken", authToken)
+		u.RawQuery = q.Encode()
+		dsn = u.String()
+	}
+
+	conn, err := sql.Open("libsql", dsn)
+	if err != nil {
+		return nil, err
+	}
+	conn.SetMaxOpenConns(remoteDBMaxOpenConns)
+	conn.SetMaxIdleConns(remoteDBMaxIdleConns)
+	conn.SetConnMaxLifetime(remoteDBConnMaxLifetime)
+
+	if err := conn.Ping(); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	log.Println("Turso(원격 libSQL) 데이터베이스에 연결됨")
 	return conn, nil
 }
 
 const createLottoDrawsTable = `
 CREATE TABLE IF NOT EXISTS lotto_draws (
-	drw_no INT PRIMARY KEY,
-	drw_date DATE NOT NULL,
-	num1 TINYINT NOT NULL,
-	num2 TINYINT NOT NULL,
-	num3 TINYINT NOT NULL,
-	num4 TINYINT NOT NULL,
-	num5 TINYINT NOT NULL,
-	num6 TINYINT NOT NULL,
-	bonus_no TINYINT NOT NULL,
-	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+	drw_no INTEGER PRIMARY KEY,
+	drw_date TEXT NOT NULL,
+	num1 INTEGER NOT NULL,
+	num2 INTEGER NOT NULL,
+	num3 INTEGER NOT NULL,
+	num4 INTEGER NOT NULL,
+	num5 INTEGER NOT NULL,
+	num6 INTEGER NOT NULL,
+	bonus_no INTEGER NOT NULL,
+	created_at TEXT DEFAULT CURRENT_TIMESTAMP
+)`
 
-// insight_text가 utf8mb4인 이유는 AI 인사이트가 한글 텍스트이기 때문이다 —
-// 일부 MySQL 환경은 서버/데이터베이스 기본 charset이 latin1이라, 멀티바이트
-// insert를 값이 깨지는 정도가 아니라 아예 거부해버린다.
 const createAIInsightCacheTable = `
 CREATE TABLE IF NOT EXISTS ai_insight_cache (
-	latest_drw_no INT PRIMARY KEY,
+	latest_drw_no INTEGER PRIMARY KEY,
 	insight_text TEXT NOT NULL,
-	generated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+	generated_at TEXT DEFAULT CURRENT_TIMESTAMP
+)`
 
 // section은 'weather'/'exchange'/'news:{region}:{category}' 값을 가지며
 // 기본키이므로, 섹션마다 정확히 한 행만 유지된다 — 가장 최근에 생성된
-// 텍스트와, 그 생성에 쓰인 입력값의 해시를 함께 담는다. news는 weather/
-// exchange처럼 단순히 "news"가 아니라 카테고리와 지역에 따라 달라지므로
-// (briefing.go의 newsBriefingCacheKey 참고), 고정된 섹션명보다 더 넉넉한
-// 길이가 필요해서 VARCHAR(20)이 아니라 VARCHAR(50)을 쓴다. text가 utf8mb4인
-// 이유는 ai_insight_cache와 동일하다: latin1을 기본값으로 쓰는 서버에서는
-// 한글 텍스트를 위해 명시적으로 지정해야 한다.
-// simple_text는 더 이상 쓰이지 않는다 — 브리핑이 simple(1문장)/detailed
-// (1~2문장) 두 버전 대신 detailed 하나만 생성하도록 단순화됐다(Groq 출력
-// 토큰 절감 목적). 컬럼 자체는 기존 배포와의 호환을 위해 남겨두되(굳이
-// DROP COLUMN까지 할 필요는 없다), NOT NULL이면 새로 값을 안 채워도 되게
-// nullable로 둔다 — makeSimpleTextNullable 참고.
+// 텍스트와, 그 생성에 쓰인 입력값의 해시를 함께 담는다. simple_text
+// 컬럼(브리핑이 simple/detailed 두 버전을 생성하던 시절의 흔적)은 이제
+// Turso로 새로 만드는 스키마에는 아예 포함하지 않는다 — MySQL 시절에는
+// 이미 배포된 테이블을 건드리지 않으려고 nullable 컬럼으로 남겨뒀지만
+// (widenBriefingSectionCacheColumn/makeSimpleTextNullable 참고), 이번
+// 마이그레이션은 완전히 새 데이터베이스에 처음부터 스키마를 만드는
+// 것이므로 더 이상 쓰이지 않는 컬럼을 굳이 다시 만들 이유가 없다.
 const createBriefingSectionCacheTable = `
 CREATE TABLE IF NOT EXISTS briefing_section_cache (
-	section VARCHAR(50) PRIMARY KEY,
-	data_hash VARCHAR(64) NOT NULL,
-	simple_text TEXT NULL,
+	section TEXT PRIMARY KEY,
+	data_hash TEXT NOT NULL,
 	detailed_text TEXT NOT NULL,
-	generated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
-
-// widenBriefingSectionCacheColumn은 news 캐시 키가 복합 형태로 커지기
-// 전에(section VARCHAR(20)로는 "news:international:entertainment"를 담을
-// 수 없었음) briefing_section_cache를 생성한 설치본을 위한 일회성 ALTER다.
-// MODIFY COLUMN은 매 시작마다 실행해도 안전하다 — 컬럼이 이미 VARCHAR(50)이면
-// 아무 일도 하지 않는다.
-const widenBriefingSectionCacheColumn = `
-ALTER TABLE briefing_section_cache MODIFY COLUMN section VARCHAR(50) NOT NULL`
-
-// makeSimpleTextNullable은 simple_text가 아직 NOT NULL이던 시절(브리핑이
-// simple/detailed 두 버전을 함께 생성하던 때) briefing_section_cache를
-// 생성한 기존 설치본을 위한 일회성 ALTER다. MODIFY COLUMN은 매 시작마다
-// 실행해도 안전하다 — 컬럼이 이미 NULL 허용이면 아무 일도 하지 않는다.
-const makeSimpleTextNullable = `
-ALTER TABLE briefing_section_cache MODIFY COLUMN simple_text TEXT NULL`
+	generated_at TEXT DEFAULT CURRENT_TIMESTAMP
+)`
 
 // cycle_start_date는 "이번 주" 추천을 식별하는 일요일 06:00 KST 값이며
 // (lotto_recommendation.go 참고) 기본키다 — 사이클마다 정확히 한 행만
@@ -161,11 +164,11 @@ ALTER TABLE briefing_section_cache MODIFY COLUMN simple_text TEXT NULL`
 // 생성되었을 때 실제로 보여준 내용과 달라질 수 있다.
 const createLottoRecommendationTable = `
 CREATE TABLE IF NOT EXISTS lotto_recommendation (
-	cycle_start_date DATE PRIMARY KEY,
-	numbers VARCHAR(20) NOT NULL,
-	number_groups VARCHAR(30) NOT NULL,
-	generated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+	cycle_start_date TEXT PRIMARY KEY,
+	numbers TEXT NOT NULL,
+	number_groups TEXT NOT NULL,
+	generated_at TEXT DEFAULT CURRENT_TIMESTAMP
+)`
 
 // weather_slot_cache는 기상청 getVilageFcst가 당일 이미 지난 시각에 대해
 // 더 이상 값을 반환하지 않게 된 후에도 예보 슬롯(08:00/14:00)을 보존한다
@@ -173,23 +176,35 @@ CREATE TABLE IF NOT EXISTS lotto_recommendation (
 // 도시/날짜가 겹치는 일이 없도록 한다. description은 weather_code로부터
 // 결정되는 순수한 함수 값이므로(weathercodeDescription이 이를 도출함)
 // 따로 저장하지 않으며, 그래서 서로 어긋날 여지도 없다.
+// source는 이 슬롯 값이 제때(그 시각이 지나기 전에) 확보된 것인지
+// ('observed') 아니면 이미 지난 뒤 단기예보(getVilageFcst)를 그 시각
+// 이전 발표분으로 소급 조회해서 복구한 것인지('forecast')를 구분한다 —
+// models.go의 PeriodForecast.Source 문서 주석 참고. MySQL의 ENUM은
+// SQLite/libSQL에 없으므로 TEXT + CHECK 제약으로 옮긴다.
+// updated_at의 "ON UPDATE CURRENT_TIMESTAMP"도 SQLite 문법에는 없다 —
+// 대신 upsertWeatherSlot의 ON CONFLICT ... DO UPDATE SET 절에서
+// updated_at = CURRENT_TIMESTAMP를 명시적으로 지정해 같은 효과를 낸다.
 const createWeatherSlotCacheTable = `
 CREATE TABLE IF NOT EXISTS weather_slot_cache (
-	city VARCHAR(20) NOT NULL,
-	slot_date DATE NOT NULL,
-	slot_time VARCHAR(5) NOT NULL,
-	temperature FLOAT NOT NULL,
-	weather_code INT NOT NULL,
-	precipitation_probability INT NOT NULL,
-	updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+	city TEXT NOT NULL,
+	slot_date TEXT NOT NULL,
+	slot_time TEXT NOT NULL,
+	temperature REAL NOT NULL,
+	weather_code INTEGER NOT NULL,
+	precipitation_probability INTEGER NOT NULL,
+	source TEXT NOT NULL DEFAULT 'observed' CHECK (source IN ('observed', 'forecast')),
+	updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (city, slot_date, slot_time)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+)`
 
 // deleteOldWeatherSlotCache는 매 요청이 아니라 시작 시 한 번만 실행된다 —
 // 일주일치 (도시 × 하루 4슬롯) 행 수는 매우 적으므로, 이는 정확성이나
-// 성능을 위한 것이 아니라 그저 정리 차원일 뿐이다.
+// 성능을 위한 것이 아니라 그저 정리 차원일 뿐이다. slot_date는
+// "YYYY-MM-DD" ISO8601 형식의 TEXT라서 date('now', '-7 days')가 만드는
+// 같은 형식의 문자열과 사전식(lexicographic) 비교를 해도 날짜 순서와
+// 정확히 일치한다.
 const deleteOldWeatherSlotCache = `
-DELETE FROM weather_slot_cache WHERE slot_date < DATE_SUB(CURDATE(), INTERVAL 7 DAY)`
+DELETE FROM weather_slot_cache WHERE slot_date < date('now', '-7 days')`
 
 // raw_data_cache는 날씨/환율/뉴스 "원본" API 응답 전체를 JSON 문자열
 // 그대로 저장한다(raw_data_cache.go 참고) — 예전에는 프로세스 메모리
@@ -199,14 +214,41 @@ DELETE FROM weather_slot_cache WHERE slot_date < DATE_SUB(CURDATE(), INTERVAL 7 
 // 종류가 값 하나의 테이블을 공유하지만 키 접두사로 절대 섞이지 않는다.
 const createRawDataCacheTable = `
 CREATE TABLE IF NOT EXISTS raw_data_cache (
-	cache_key VARCHAR(100) PRIMARY KEY,
+	cache_key TEXT PRIMARY KEY,
 	data_json TEXT NOT NULL,
-	fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-	expires_at DATETIME NOT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+	fetched_at TEXT DEFAULT CURRENT_TIMESTAMP,
+	expires_at TEXT NOT NULL
+)`
 
-// migrate는 lotto/briefing 관련 테이블이 없으면 생성한다.
-// 매 시작마다 실행해도 안전하다.
+// news_translation_cache는 NewsData.io의 article_id를 그 한국어 번역
+// 제목에 매핑한다(news_translation.go 참고) — 예전에는 프로세스 메모리
+// map이었지만(재시작되면 사라져도 몇 시간 안에 헤드라인 자체가 바뀌니
+// 큰 문제는 아니었다), 다른 캐시들과 마찬가지로 DB에 옮겨두면 서버가
+// 재시작돼도 같은 기사에 대해 다시 Groq를 호출하지 않는다.
+const createNewsTranslationCacheTable = `
+CREATE TABLE IF NOT EXISTS news_translation_cache (
+	article_id TEXT PRIMARY KEY,
+	translated_title TEXT NOT NULL,
+	cached_at TEXT DEFAULT CURRENT_TIMESTAMP
+)`
+
+// deleteOldNewsTranslationCache는 weather_slot_cache와 같은 이유로 시작
+// 시 한 번만 실행되는 정리용 삭제다 — raw_data_cache와 달리 이 테이블은
+// 만료 시각(expires_at)이 없는 순수 append-only 캐시라서, 이 정리가
+// 없으면 기사 id가 무한히 쌓이기만 한다. 뉴스 헤드라인은 하루 이틀
+// 안에 사실상 전부 교체되므로 30일이면 재사용 가능성이 있는 기간을
+// 충분히 넉넉하게 잡은 것이다.
+const deleteOldNewsTranslationCache = `
+DELETE FROM news_translation_cache WHERE cached_at < datetime('now', '-30 days')`
+
+// migrate는 로또/브리핑/캐시 관련 테이블이 없으면 생성한다. 매 시작마다
+// 실행해도 안전하다(CREATE TABLE IF NOT EXISTS). MySQL 시절에 있던
+// widenBriefingSectionCacheColumn/makeSimpleTextNullable/
+// addWeatherSlotCacheSourceColumn 같은 ALTER 기반 일회성 마이그레이션은
+// 여기 없다 — 그 마이그레이션들은 모두 "이미 배포된 MySQL 테이블을
+// 나중에 바뀐 스키마에 맞게 조정"하기 위한 것이었는데, Turso로 넘어오며
+// 완전히 새 데이터베이스에서 시작하므로 CREATE TABLE 자체가 이미 최종
+// 형태를 담고 있어 그런 조정이 필요 없다.
 func migrate(conn *sql.DB) error {
 	if _, err := conn.Exec(createLottoDrawsTable); err != nil {
 		return fmt.Errorf("create lotto_draws: %w", err)
@@ -216,12 +258,6 @@ func migrate(conn *sql.DB) error {
 	}
 	if _, err := conn.Exec(createBriefingSectionCacheTable); err != nil {
 		return fmt.Errorf("create briefing_section_cache: %w", err)
-	}
-	if _, err := conn.Exec(widenBriefingSectionCacheColumn); err != nil {
-		return fmt.Errorf("widen briefing_section_cache.section: %w", err)
-	}
-	if _, err := conn.Exec(makeSimpleTextNullable); err != nil {
-		return fmt.Errorf("make briefing_section_cache.simple_text nullable: %w", err)
 	}
 	if _, err := conn.Exec(createLottoRecommendationTable); err != nil {
 		return fmt.Errorf("create lotto_recommendation: %w", err)
@@ -234,6 +270,12 @@ func migrate(conn *sql.DB) error {
 	}
 	if _, err := conn.Exec(createRawDataCacheTable); err != nil {
 		return fmt.Errorf("create raw_data_cache: %w", err)
+	}
+	if _, err := conn.Exec(createNewsTranslationCacheTable); err != nil {
+		return fmt.Errorf("create news_translation_cache: %w", err)
+	}
+	if _, err := conn.Exec(deleteOldNewsTranslationCache); err != nil {
+		return fmt.Errorf("clean up old news_translation_cache rows: %w", err)
 	}
 	return nil
 }

@@ -2,7 +2,7 @@
 # Render 대시보드에서 "New" -> "Blueprint"로 이 저장소를 선택하면 아래 설정을
 # 그대로 읽어 무료(Free) 웹 서비스로 배포를 준비한다. sync: false인 값들은
 # Render가 자동으로 채우지 않으므로, 배포 전에 Render 대시보드의 환경변수
-# 화면에서 직접 입력해야 한다 (Aiven MySQL 접속 정보 / Groq / NewsData.io / KMA 키).
+# 화면에서 직접 입력해야 한다 (Turso 접속 정보 / Groq / NewsData.io / KMA 키).
 services:
   - type: web
     name: daily-news-dashboard
@@ -22,15 +22,7 @@ services:
         sync: false
       - key: KMA_SERVICE_KEY
         sync: false
-      - key: DB_HOST
+      - key: TURSO_DATABASE_URL
         sync: false
-      - key: DB_PORT
+      - key: TURSO_AUTH_TOKEN
         sync: false
-      - key: DB_USER
-        sync: false
-      - key: DB_PASSWORD
-        sync: false
-      - key: DB_NAME
-        sync: false
-      - key: DB_USE_TLS
-        value: "true"

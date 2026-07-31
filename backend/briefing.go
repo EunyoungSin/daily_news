@@ -1121,10 +1121,6 @@ func lookupBriefingSectionCache(ctx context.Context, conn *sql.DB, section strin
 	return row, true
 }
 
-// simple_text 컬럼은 더 이상 쓰이지 않는다(브리핑이 simple/detailed 두
-// 버전 대신 텍스트 하나만 생성하도록 단순화됐다) — INSERT에서 아예
-// 빼버려서 NULL로 남긴다(db.go의 makeSimpleTextNullable 마이그레이션이
-// 이 컬럼의 NOT NULL 제약을 미리 풀어둔다).
 func upsertBriefingSectionCache(ctx context.Context, conn *sql.DB, section, dataHash, text string, generatedAt time.Time) error {
 	if conn == nil {
 		return nil
@@ -1132,7 +1128,7 @@ func upsertBriefingSectionCache(ctx context.Context, conn *sql.DB, section, data
 	_, err := conn.ExecContext(ctx, `
 		INSERT INTO briefing_section_cache (section, data_hash, detailed_text, generated_at)
 		VALUES (?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE data_hash = VALUES(data_hash), detailed_text = VALUES(detailed_text), generated_at = VALUES(generated_at)`,
+		ON CONFLICT(section) DO UPDATE SET data_hash = excluded.data_hash, detailed_text = excluded.detailed_text, generated_at = excluded.generated_at`,
 		section, dataHash, text, generatedAt,
 	)
 	return err

@@ -109,7 +109,7 @@ type openMeteoResponse struct {
 // 반복하거나(또는 같은 도시를 여러 브라우저 탭에서 열어놓는 경우) 매번
 // 기상청/Open-Meteo를 다시 호출하지 않도록 한다. 이는
 // weatherSlotCache(weather_slot_cache.go)와는 별개다. weatherSlotCache는
-// 개별 예보 슬롯을 하루 종일 MySQL에 영속 저장하여 재시작 후에도 남아
+// 개별 예보 슬롯을 하루 종일 DB에 영속 저장하여 재시작 후에도 남아
 // 있고 특정 시각의 누락 데이터를 채워 넣는 반면, 이 캐시는 fetchWeather의
 // 반환값 전체(현재 날씨 + 오늘/내일 예보)를 그대로 JSON으로 캐싱한다 —
 // 예전에는 프로세스 메모리에만 있어서 서버가 재시작되면(Render 무료

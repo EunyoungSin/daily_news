@@ -60,7 +60,12 @@ func upsertWeatherSlot(ctx context.Context, conn *sql.DB, city, slotDate, slotTi
 	_, err := conn.ExecContext(ctx, `
 		INSERT INTO weather_slot_cache (city, slot_date, slot_time, temperature, weather_code, precipitation_probability, source)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE temperature = VALUES(temperature), weather_code = VALUES(weather_code), precipitation_probability = VALUES(precipitation_probability), source = VALUES(source)`,
+		ON CONFLICT(city, slot_date, slot_time) DO UPDATE SET
+			temperature = excluded.temperature,
+			weather_code = excluded.weather_code,
+			precipitation_probability = excluded.precipitation_probability,
+			source = excluded.source,
+			updated_at = CURRENT_TIMESTAMP`,
 		city, slotDate, slotTime, p.TemperatureC, p.WeatherCode, p.PrecipProbability, source,
 	)
 	if err != nil {

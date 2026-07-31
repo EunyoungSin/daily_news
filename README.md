@@ -1,43 +1,44 @@
 # 브리핑 관제실 — 실시간 멀티API 대시보드 + AI 브리핑 + 로또
 
 Go 백엔드가 날씨(국내 도시는 기상청 API, 해외 도시 및 폴백은 Open-Meteo) / 환율(Frankfurter) / 뉴스(NewsData.io)를 오픈 API로 병렬로 수집하고, 그 결과를 Groq LLM에 넘겨 한국어 한 줄 브리핑을 생성합니다.<br>
-로또 섹션은 동행복권 공개 API로 회차 데이터를 MySQL에 영구 저장하고, 그 통계를 Groq AI API로 요약합니다.<br>
+로또 섹션은 동행복권 공개 API로 회차 데이터를 DB(Turso/libSQL)에 영구 저장하고, 그 통계를 Groq AI API로 요약합니다.<br>
 프론트엔드는 React + TypeScript(Vite)로 구성되어 있습니다.<br>
 https://daily-news-o9mf.onrender.com/ 에서 확인 해 보실 수 있습니다.
 
 ## 프로젝트 구조
 
 ```
-backend/    Go, 표준 라이브러리 위주 (net/http, sync, context) + MySQL(database/sql) + 오픈API 4종(기상청, Open-Meteo, Frankfuter, NewsData.io) + Groq API
+backend/    Go, 표준 라이브러리 위주 (net/http, sync, context) + Turso/libSQL(database/sql, SQLite 호환) + 오픈API 4종(기상청, Open-Meteo, Frankfuter, NewsData.io) + Groq API
 frontend/   React + TypeScript (Vite)
 ```
 
 ## 빠르게 시작하기
 
-### 0. 로컬 MySQL (Docker)
+### 0. 로컬 DB — 별도 설정 불필요
 
-로또 섹션은 MySQL이 있어야 동작합니다(없어도 날씨/환율/뉴스/브리핑은 정상 동작).
-
-```bash
-docker run --name lotto-mysql \
-  -e MYSQL_ROOT_PASSWORD=root_pw \
-  -e MYSQL_DATABASE=dashboard \
-  -e MYSQL_USER=dashboard \
-  -e MYSQL_PASSWORD=dashboard_pw \
-  -p 3306:3306 -d mysql:8
-```
+로또 섹션과 원본 데이터/브리핑/뉴스 번역 캐시는 DB가 있어야 동작하지만(없어도
+날씨/환율/뉴스/브리핑 자체는 정상 동작하고, 캐싱만 꺼진 채로 매번 다시 계산합니다),
+로컬 개발에서는 Docker나 계정 가입 같은 사전 준비가 전혀 필요 없습니다. `TURSO_DATABASE_URL`
+환경변수가 없으면 서버가 자동으로 `backend/data/dashboard.db` 파일(libSQL, SQLite와 완전히
+호환되는 포맷)을 만들어 그대로 사용합니다 — 아래 1번을 그대로 따라 하면 됩니다.
 
 ### 1. 백엔드 (Go)
 
 ```bash
 cd backend
-cp .env.example .env   # GROQ_API_KEY, DB_* 입력 (없어도 나머지 섹션은 정상 동작)
+cp .env.example .env   # GROQ_API_KEY 등 입력 (DB는 비워두면 로컬 파일로 자동 폴백)
 go run .
 ```
 
 기본적으로 `http://localhost:8080` 에서 실행됩니다. `GET /api/dashboard?city=daegu&from=USD&to=KRW`,
 `GET /api/lotto`, `GET /api/news?category=top&region=domestic` 로 확인할 수 있습니다. 서버 시작 시
-`lotto_draws` / `ai_insight_cache` 테이블을 `CREATE TABLE IF NOT EXISTS`로 자동 생성합니다.
+`lotto_draws` / `ai_insight_cache` 등 필요한 테이블 전부를 `CREATE TABLE IF NOT EXISTS`로 자동
+생성합니다(전체 목록은 아래 "DB 스키마" 참고).
+
+> **참고**: DB 드라이버(`go-libsql`)는 CGO로 네이티브 libSQL 라이브러리를 호출하므로,
+> 로컬에 C 컴파일러(gcc 등)가 설치되어 있어야 `go run .`/`go build`가 됩니다. Debian/Ubuntu는
+> `sudo apt-get install gcc`, macOS는 Xcode Command Line Tools(`xcode-select --install`)로
+> 설치할 수 있습니다.
 
 ### 2. 프론트엔드 (React + Vite)
 
@@ -82,7 +83,7 @@ AI 인사이트도 같은 키를 사용하며, 키가 없거나 호출에 실패
    ```
 
 무료 티어는 **일 200 크레딧**로 제한되어 있고, 요청 1회가 크레딧 1을 소비합니다. 이 프로젝트는
-카테고리(`category`) + 지역(`region`) 조합별로 30분 TTL의 캐시(`getCachedOrFetchNews`)를 MySQL의
+카테고리(`category`) + 지역(`region`) 조합별로 30분 TTL의 캐시(`getCachedOrFetchNews`)를 DB(Turso/libSQL)의
 `raw_data_cache` 테이블에 저장해두어, 같은 조합에 대한 `GET /api/news` 요청과 AI 브리핑 내부
 조회가 API를 중복 호출하지 않도록 크레딧을 절약합니다 — 서버 메모리가 아니라 DB에 저장하므로
 Render 무료 티어처럼 슬립 후 재시작되는 환경에서도 캐시가 유지됩니다(아래 "원본 데이터 캐시"
@@ -135,16 +136,20 @@ Render 무료 티어처럼 슬립 후 재시작되는 환경에서도 캐시가 
 
 ```sql
 CREATE TABLE raw_data_cache (
-  cache_key VARCHAR(100) PRIMARY KEY,
+  cache_key TEXT PRIMARY KEY,
   data_json TEXT NOT NULL,
-  fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  expires_at DATETIME NOT NULL
+  fetched_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  expires_at TEXT NOT NULL
 );
 ```
 
 세 종류 모두 캐시 키에 접두사가 붙어 있어 서로 절대 섞이지 않습니다. 외부 API 호출이
 실패했을 때 만료된 캐시라도 남아있으면, 화면을 완전히 비우는 대신 그 옛 데이터를
 "잠정치"로 대신 보여줍니다(로그에 남습니다).
+
+뉴스 헤드라인 번역(해외 모드)도 같은 방식으로 `news_translation_cache` 테이블에
+`article_id` 기준으로 캐싱되어, 서버가 재시작돼도 같은 기사를 다시 Groq로 번역하지
+않습니다.
 
 ## 로또 섹션
 
@@ -163,7 +168,7 @@ CREATE TABLE raw_data_cache (
   간격을 두며, 실패한 회차는 5초 → 15초 → 40초로 점점 늘려가며 재시도합니다. 기본
   Go 클라이언트 User-Agent 대신 일반 브라우저처럼 보이는 값을 명시적으로 지정해 차단
   가능성도 낮췄습니다.
-- 통계(번호별 출현 횟수, 최근 10회 출현 번호)는 Go가 아니라 MySQL의
+- 통계(번호별 출현 횟수, 최근 10회 출현 번호)는 Go가 아니라 DB의
   `UNION ALL` + `GROUP BY`로 집계합니다.
 - AI 인사이트는 `ai_insight_cache` 테이블에 `latest_drw_no` 기준으로 캐싱되어,
   새 회차가 추가되기 전까지는 Groq를 다시 호출하지 않습니다.
@@ -172,24 +177,24 @@ CREATE TABLE raw_data_cache (
 
 ```sql
 CREATE TABLE lotto_draws (
-  drw_no INT PRIMARY KEY,
-  drw_date DATE,
-  num1 TINYINT, num2 TINYINT, num3 TINYINT,
-  num4 TINYINT, num5 TINYINT, num6 TINYINT,
-  bonus_no TINYINT,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  drw_no INTEGER PRIMARY KEY,
+  drw_date TEXT,
+  num1 INTEGER, num2 INTEGER, num3 INTEGER,
+  num4 INTEGER, num5 INTEGER, num6 INTEGER,
+  bonus_no INTEGER,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE ai_insight_cache (
-  latest_drw_no INT PRIMARY KEY,
+  latest_drw_no INTEGER PRIMARY KEY,
   insight_text TEXT,
-  generated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  generated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 ```
 
-두 테이블 모두 `utf8mb4`로 생성됩니다 — 서버/DB 기본 charset이 `latin1`인 환경(일부
-관리형 MySQL의 기본값)에서는 한글 인사이트 텍스트 INSERT가 charset 불일치로 실패하기
-때문에, 테이블 생성 시 charset을 명시적으로 지정합니다.
+SQLite/libSQL은 MySQL과 달리 컬럼/DB 단위 charset 설정이 없습니다 — 문자열은 항상
+UTF-8이라, 한글 텍스트 INSERT가 charset 불일치로 실패하는 문제 자체가 존재하지
+않습니다(MySQL 시절에는 이 문제를 피하려고 테이블마다 `utf8mb4`를 명시했었습니다).
 
 ### DB 연결 설정
 
@@ -197,16 +202,23 @@ CREATE TABLE ai_insight_cache (
 
 | 변수 | 설명 |
 |---|---|
-| `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | 접속 정보 |
-| `DB_USE_TLS` | `true`면 TLS로 연결 (Aiven 등 클라우드 MySQL은 대부분 필수) |
-| `DB_CA_CERT_PATH` | (선택) TLS 서버 인증서를 검증할 CA 인증서 경로. 없으면 `DB_USE_TLS=true`여도 암호화만 하고 인증서 검증은 생략합니다 |
+| `TURSO_DATABASE_URL` | Turso 데이터베이스 URL (예: `libsql://your-db-name-your-username.turso.io`) |
+| `TURSO_AUTH_TOKEN` | Turso 인증 토큰 |
 
-Connection pool은 `SetMaxOpenConns(10)` / `SetMaxIdleConns(5)` / `SetConnMaxLifetime(3분)`으로
-설정되어 있습니다 — 클라우드 MySQL이 유휴 연결을 끊어버리는 경우, 그보다 먼저 커넥션을
-재활용해서 "connection reset" 에러를 피하기 위함입니다.
+**둘 다 비워두면** 서버가 자동으로 로컬 파일(`backend/data/dashboard.db`, `LOCAL_DB_PATH`로
+경로 변경 가능)로 폴백합니다 — 로컬 개발 시 기본 동작입니다.
 
-MySQL 연결에 실패해도 서버는 죽지 않습니다. 로또 섹션만 "⚠️ 데이터베이스에 연결할 수
-없습니다" 상태로 응답하고, 날씨/환율/뉴스/브리핑은 평소대로 동작합니다.
+원격(Turso) 연결은 `SetMaxOpenConns(10)` / `SetMaxIdleConns(5)` / `SetConnMaxLifetime(3분)`으로
+설정되어 있습니다 — 클라우드 제공자가 유휴 연결을 끊어버리는 경우, 그보다 먼저 커넥션을
+재활용해서 "connection reset" 에러를 피하기 위함입니다. 로컬 파일 연결은 반대로
+`SetMaxOpenConns(1)`로 강제합니다 — SQLite/libSQL은 동시 쓰기 연결이 여러 개면 "database is
+locked" 에러가 나기 쉬운데, 커넥션 풀을 1개로 좁히면 모든 쿼리가 자연히 직렬화되어 이
+문제가 원천적으로 사라집니다(개인용 대시보드 수준의 트래픽에서는 그로 인한 성능 손해가
+무시할 만합니다).
+
+DB 연결에 실패해도 서버는 죽지 않습니다. 로또 섹션만 "⚠️ 데이터베이스에 연결할 수
+없습니다" 상태로 응답하고, 날씨/환율/뉴스/브리핑은 평소대로 동작합니다(다만 원본 데이터/
+브리핑/뉴스 번역 캐싱은 꺼진 채로 매번 다시 계산·호출합니다).
 
 ## 프로덕션 빌드 (백엔드가 프론트엔드를 정적으로 서빙)
 
@@ -228,40 +240,44 @@ recharts(환율 차트가 쓰는, 용량이 큰 라이브러리)와 로또 카�
 recharts와 그 의존성을 `recharts` 청크로 따로 묶어 초기 로딩에 필요한 번들 크기를
 줄입니다.
 
-## 배포 가이드 (무료 MySQL + 백엔드 호스팅)
+## 배포 가이드 (무료 Turso + 백엔드 호스팅)
 
-### 1. Aiven 무료 MySQL
+### 1. Turso 무료 데이터베이스
 
-1. https://aiven.io 에서 가입합니다 (신용카드 불필요).
-2. 새 서비스 생성 → **MySQL** 선택 → 무료 플랜(1GB 저장공간, 이 프로젝트 규모엔 충분)으로 생성합니다.
-3. 서비스 개요(Overview) 페이지에서 **Host**, **Port**, **User**, **Password**, **Default database name**을
-   확인합니다. 이 값들을 각각 `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`에 사용합니다.
-4. Aiven MySQL은 TLS 연결을 요구합니다. 같은 페이지에서 CA 인증서(`ca.pem`)를 다운로드해
-   서버에 두고 `DB_CA_CERT_PATH`로 경로를 지정하면 인증서 검증까지 포함한 완전한 TLS
-   연결이 됩니다(권장). 다운로드하지 않고 `DB_USE_TLS=true`만 설정해도 연결은 되지만,
-   서버 인증서를 검증하지 않습니다.
+1. https://turso.tech 에서 가입합니다 (신용카드 불필요).
+2. CLI를 설치합니다.
+
+   ```bash
+   curl -sSfL https://get.tur.so/install.sh | bash
+   ```
+3. CLI로 로그인하고 데이터베이스를 만듭니다.
+
+   ```bash
+   turso auth signup    # 이미 가입했다면: turso auth login
+   turso db create dashboard-db
+   ```
+4. 접속 정보를 확인합니다.
+
+   ```bash
+   turso db show dashboard-db --url     # TURSO_DATABASE_URL 값
+   turso db tokens create dashboard-db  # TURSO_AUTH_TOKEN 값
+   ```
 
 ### 2. 백엔드 호스팅 (Render 등)
 
 환경변수에 아래 값을 등록합니다.
 
 ```
-DB_HOST=<Aiven Host>
-DB_PORT=<Aiven Port>
-DB_USER=<Aiven User>
-DB_PASSWORD=<Aiven Password>
-DB_NAME=<Aiven DB명>
-DB_USE_TLS=true
+TURSO_DATABASE_URL=<turso db show --url 결과>
+TURSO_AUTH_TOKEN=<turso db tokens create 결과>
 GROQ_API_KEY=<Groq API 키>
 ```
 
-`DB_CA_CERT_PATH`를 쓰려면 CA 인증서 파일을 배포 환경에 함께 올려야 합니다(Render의
-Secret File 기능 등). 파일을 올리기 번거로우면 `DB_USE_TLS=true`만 설정한 채 배포해도
-동작은 합니다(인증서 검증 생략).
-
 Render 무료 웹 서비스는 15분간 요청이 없으면 슬립 상태가 되고, 이후 첫 요청에서
 컨테이너를 다시 띄우는 콜드스타트가 발생합니다(수십 초 지연). 무료 티어의 알려진
-제약이니 참고하세요.
+제약이니 참고하세요. Turso 자체는 서버리스라 이 콜드스타트와 무관하게 항상 즉시
+응답합니다 — 예전 Aiven MySQL처럼 유휴 연결이 끊어지는 것을 걱정할 필요가 없습니다
+(그래도 재연결 안전망으로 `SetConnMaxLifetime(3분)`은 그대로 유지했습니다).
 
 ## API 응답 형태
 

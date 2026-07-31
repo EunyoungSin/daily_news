@@ -2,11 +2,12 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
-	"sync"
+	"time"
 )
 
 // itTermGlossary는 해외(international) 모드 헤드라인 번역에서만 쓰인다.
@@ -35,14 +36,44 @@ const newsTranslationSystemPrompt = `당신은 다양한 분야(정치, 경제, 
 6. 번역을 완료한 후, 원문에 등장한 모든 숫자(단위 포함)가 번역문에도 정확히 반영되었는지 다시 한번 확인하세요.
 7. 반드시 요청받은 개수만큼, 요청 순서와 id를 그대로 유지해서 JSON 배열로만 응답하세요. 다른 설명은 절대 추가하지 마세요.`
 
-// newsTranslationCache는 NewsData.io의 article_id를 그 한국어 제목에
-// 매핑한다. 로또 데이터와 달리 뉴스 헤드라인은 재시작 후에도 유지될 필요가
-// 없다 — 몇 시간 안에 상위 기사들이 바뀌기 때문에, 인메모리 map만으로
-// 충분하다 (MySQL 테이블 불필요).
-var newsTranslationCache = struct {
-	mu    sync.Mutex
-	items map[string]string
-}{items: make(map[string]string)}
+// newsTranslationUpsertTimeout은 캐시 저장(INSERT) 자체의 타임아웃이다.
+// context.Background()에서 독립적으로 파생시킨다 — raw_data_cache.go의
+// rawCacheUpsertTimeout과 같은 이유다: 호출자의 요청 스코프 ctx를 그대로
+// 쓰면, 느린 Groq 배치 번역 호출이 요청 타임아웃 예산을 거의 다 써버린
+// 뒤 성공하는 경우에도 방금 받아온 번역을 저장하려는 순간 컨텍스트가
+// 이미 만료돼 있어 저장 자체가 실패할 수 있다.
+const newsTranslationUpsertTimeout = 5 * time.Second
+
+func lookupNewsTranslation(ctx context.Context, conn *sql.DB, articleID string) (string, bool) {
+	if conn == nil {
+		return "", false
+	}
+	var title string
+	err := conn.QueryRowContext(ctx,
+		`SELECT translated_title FROM news_translation_cache WHERE article_id = ?`, articleID,
+	).Scan(&title)
+	if err != nil {
+		return "", false
+	}
+	return title, true
+}
+
+func upsertNewsTranslation(conn *sql.DB, articleID, translatedTitle string) {
+	if conn == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), newsTranslationUpsertTimeout)
+	defer cancel()
+	_, err := conn.ExecContext(ctx, `
+		INSERT INTO news_translation_cache (article_id, translated_title, cached_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(article_id) DO UPDATE SET translated_title = excluded.translated_title, cached_at = excluded.cached_at`,
+		articleID, translatedTitle, time.Now(),
+	)
+	if err != nil {
+		log.Printf("뉴스 번역(%s): 캐시 저장 실패: %v", articleID, err)
+	}
+}
 
 type newsTranslationRequestItem struct {
 	ID    string `json:"id"`
@@ -68,16 +99,14 @@ func translateNewsItems(ctx context.Context, items []NewsItem) {
 	toTranslate := make([]NewsItem, 0, len(items))
 	cacheHits := 0
 
-	newsTranslationCache.mu.Lock()
 	for i := range items {
-		if cached, ok := newsTranslationCache.items[items[i].ID]; ok {
+		if cached, ok := lookupNewsTranslation(ctx, db, items[i].ID); ok {
 			items[i].TranslatedTitle = cached
 			cacheHits++
 		} else {
 			toTranslate = append(toTranslate, items[i])
 		}
 	}
-	newsTranslationCache.mu.Unlock()
 
 	if cacheHits > 0 {
 		for i := 0; i < cacheHits; i++ {
@@ -101,11 +130,9 @@ func translateNewsItems(ctx context.Context, items []NewsItem) {
 		byID[t.ID] = t.TranslatedTitle
 	}
 
-	newsTranslationCache.mu.Lock()
 	for id, title := range byID {
-		newsTranslationCache.items[id] = title
+		upsertNewsTranslation(db, id, title)
 	}
-	newsTranslationCache.mu.Unlock()
 
 	for i := range items {
 		if title, ok := byID[items[i].ID]; ok {
