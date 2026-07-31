@@ -34,6 +34,44 @@ func TestHashJSONDeterministic(t *testing.T) {
 	}
 }
 
+// TestHashNewsInputIgnoresItemOrder는 뉴스 브리핑 캐시 히트 판단에 실제로
+// 쓰이는 hashNewsInput을 검증한다: NewsData.io가 같은 헤드라인 집합을 다른
+// 순서로 돌려주더라도(순서를 보장한다는 문서가 없다) 콘텐츠가 동일하면
+// 캐시가 불필요하게 무효화되지 않아야 한다. 반대로 콘텐츠 자체가 다르면
+// (id가 다른 항목이 섞이면) 여전히 다른 해시를 내야 한다.
+func TestHashNewsInputIgnoresItemOrder(t *testing.T) {
+	a := &briefingNewsInput{Items: []briefingNewsItem{
+		{ID: "aaa", Title: "제목A"},
+		{ID: "bbb", Title: "제목B"},
+		{ID: "ccc", Title: "제목C"},
+	}}
+	// 같은 항목, 순서만 다름(셔플).
+	b := &briefingNewsInput{Items: []briefingNewsItem{
+		{ID: "ccc", Title: "제목C"},
+		{ID: "aaa", Title: "제목A"},
+		{ID: "bbb", Title: "제목B"},
+	}}
+	// 실제로 내용이 다름(마지막 항목의 id가 다름).
+	c := &briefingNewsInput{Items: []briefingNewsItem{
+		{ID: "aaa", Title: "제목A"},
+		{ID: "bbb", Title: "제목B"},
+		{ID: "ddd", Title: "제목D"},
+	}}
+
+	if hashNewsInput(a) != hashNewsInput(b) {
+		t.Error("expected reordered-but-identical items to produce the same hash")
+	}
+	if hashNewsInput(a) == hashNewsInput(c) {
+		t.Error("expected genuinely different items to produce a different hash")
+	}
+
+	// 정렬은 해시 계산에만 적용되어야 한다 — 원본 Items 슬라이스의 순서
+	// (실제 Groq 프롬프트에 쓰이는 순서)는 그대로 남아있어야 한다.
+	if a.Items[0].ID != "aaa" || b.Items[0].ID != "ccc" {
+		t.Error("hashNewsInput must not mutate the caller's original item order")
+	}
+}
+
 // TestWeatherExchangeBriefingCacheKeysAreCityAndPairSpecific는 실제로 보고된
 // 버그에 대한 수정을 검증한다: 도시(또는 통화쌍)를 전환해도 브리핑에는 *이전*
 // 도시/통화쌍의 텍스트가 그대로 남아있던 문제였다. data_hash 비교로 변경 사항을

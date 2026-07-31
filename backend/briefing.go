@@ -12,6 +12,7 @@ import (
 	"math"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -381,6 +382,23 @@ func hashJSON(v interface{}) string {
 	encoded, _ := json.Marshal(v)
 	sum := sha256.Sum256(encoded)
 	return hex.EncodeToString(sum[:])
+}
+
+// hashNewsInput은 뉴스 브리핑 캐시 히트 여부를 판단하는 해시를,
+// input.Items를 article id 기준으로 정렬한 사본에서 계산한다. NewsData.io가
+// 같은 헤드라인 집합을 다른 순서로 돌려주더라도(지금까지 실제로 관측된 적은
+// 없지만, API가 순서를 명시적으로 보장하지도 않는다) 콘텐츠 자체는 그대로면
+// 해시도 그대로 나오게 하기 위해서다 — 정렬하지 않고 그대로 해시하면, 뉴스
+// 내용은 동일한데 순서만 달라져도 캐시 미스로 취급되어 불필요하게 Groq를
+// 재호출하게 된다. 실제로 모델에게 보내는 프롬프트(newsJSON/userContent)는
+// 원래 순서를 그대로 유지한다 — 정렬은 오직 이 해시 계산에만 적용된다.
+func hashNewsInput(input *briefingNewsInput) string {
+	if input == nil {
+		return hashJSON(input)
+	}
+	sorted := briefingNewsInput{Items: append([]briefingNewsItem(nil), input.Items...)}
+	sort.Slice(sorted.Items, func(i, j int) bool { return sorted.Items[i].ID < sorted.Items[j].ID })
+	return hashJSON(sorted)
 }
 
 // bannedBriefingPhrases는 두 종류의 실패를 잡아냅니다: 내용 없는 채우기
@@ -1328,7 +1346,7 @@ func getBriefing(ctx context.Context, weather *WeatherData, exchange *ExchangeDa
 		{
 			name:                  newsBriefingCacheKey(newsRegion, newsCategory),
 			model:                 briefingModel,
-			hash:                  hashJSON(newsInput),
+			hash:                  hashNewsInput(newsInput),
 			systemPrompt:          newsSectionSystemPrompt,
 			userContent:           fmt.Sprintf("[뉴스 데이터]: %s\n\n위 데이터를 바탕으로 한국어 뉴스 브리핑 문장을 작성하세요.", newsJSON),
 			allowedNumbers:        allowedNewsNumbers(newsInput),
