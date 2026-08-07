@@ -45,6 +45,46 @@ func TestFindBannedPhrase(t *testing.T) {
 	}
 }
 
+func TestFindInformalSentenceEnding(t *testing.T) {
+	// 실제 보고된 사례들 — 뉴스 원문의 기사체를 그대로 따라간 반말 종결.
+	informalCases := []string{
+		"김정관 산업장관이 이번 조치에 반대한다고 밝혔다.",
+		"이는 최근 발표된 정책과 관련이 있다.",
+		"엘프 뷰티가 실적 호조에 힘입어 목표주가를 상향 조정했다.",
+		"이 사실은 매우 중요하다",
+		"프로젝트가 예정대로 진행 중임",
+		"자료 검토가 모두 완료함",
+	}
+	for _, s := range informalCases {
+		if _, found := findInformalSentenceEnding(s); !found {
+			t.Errorf("expected informal/기사체 ending to be detected in %q", s)
+		}
+	}
+
+	// 정중한 합쇼체(존댓말) 문장은 절대 걸리지 않아야 한다 — 날씨/환율
+	// 문단에서 실제로 쓰이는 문장 형태 포함.
+	politeCases := []string{
+		"오늘 오후 2시경 비가 올 가능성이 있어 우산을 준비하세요.",
+		"서울은 오늘 대체로 맑아 우산 없이 외출하기 좋은 날씨입니다. 오전 8시엔 18도, 오후 2시엔 23도이며 맑은 하늘이 이어집니다.",
+		"환율은 1 USD당 1320.55 KRW입니다. 지난 7일간 환율은 1.3% 하락해 원화가 소폭 강세를 보이고 있습니다.",
+		"김정관 산업장관이 이번 조치에 반대한다고 밝혔습니다.",
+		"이는 최근 발표된 정책과 관련이 있습니다.",
+		"엘프 뷰티가 실적 호조에 힘입어 목표주가를 상향 조정했습니다.",
+		"※ 통계적 재미를 위한 분석입니다.",
+	}
+	for _, s := range politeCases {
+		if ending, found := findInformalSentenceEnding(s); found {
+			t.Errorf("expected polite 합쇼체 sentence not to be flagged, but got ending=%q in %q", ending, s)
+		}
+	}
+
+	// "다양한"/"다른"처럼 단어 중간에 있는 "다"는 문장 경계가 아니므로
+	// 걸리지 않아야 한다.
+	if _, found := findInformalSentenceEnding("다양한 분야에서 다른 성과를 보였습니다."); found {
+		t.Error("expected mid-word '다' (다양한/다른) not to be flagged")
+	}
+}
+
 func TestHashJSONDeterministic(t *testing.T) {
 	a := toBriefingExchangeInput(&ExchangeData{From: "USD", To: "KRW", Current: ExchangeRatePoint{Rate: 1470.11, Date: "2026-07-27"}})
 	b := toBriefingExchangeInput(&ExchangeData{From: "USD", To: "KRW", Current: ExchangeRatePoint{Rate: 1470.11, Date: "2026-07-27"}})
@@ -658,11 +698,11 @@ func TestToBriefingExchangeInputJPYUsesHundredUnitConvention(t *testing.T) {
 
 // TestValidateSectionOutputPrecedence는 generateSectionText의 단일 통합
 // 검증 단계가 의존하는 고정된 검사 순서(CJK -> 영어 유출 -> 반복 구문 ->
-// 근거 없는 숫자 -> 조작된 퍼센트 -> 근거 없는 고유명사 -> 금칙 문구)를
-// 고정해두고, 각 실패 유형에 대해 hardFailure/useFallback이 올바르게
-// 설정되는지 확인한다 — 이 플래그들은 재시도를 모두 소진했을 때 에러로
-// 처리할지, 환각 폴백 문자열로 대체할지, 아니면 조용히 "마지막 시도 결과를
-// 그대로 내보낼지"를 결정한다.
+// 근거 없는 숫자 -> 조작된 퍼센트 -> 근거 없는 고유명사 -> 반말/기사체
+// 어미 -> 금칙 문구)를 고정해두고, 각 실패 유형에 대해 hardFailure/
+// useFallback이 올바르게 설정되는지 확인한다 — 이 플래그들은 재시도를 모두
+// 소진했을 때 에러(및 stale_fallback)로 처리할지, 환각 폴백 문자열로
+// 대체할지, 아니면 조용히 "마지막 시도 결과를 그대로 내보낼지"를 결정한다.
 func TestValidateSectionOutputPrecedence(t *testing.T) {
 	cases := []struct {
 		name         string
@@ -724,6 +764,13 @@ func TestValidateSectionOutputPrecedence(t *testing.T) {
 			wantFailure:  true,
 			wantHard:     true,
 			wantFallback: true,
+		},
+		{
+			name:        "informal/기사체 sentence ending is hard",
+			text:        "김정관 산업장관이 이번 조치에 반대한다고 밝혔다.",
+			allowed:     []float64{},
+			wantFailure: true,
+			wantHard:    true,
 		},
 		{
 			name:        "banned phrase is soft",

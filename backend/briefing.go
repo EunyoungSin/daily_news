@@ -401,6 +401,39 @@ func hashNewsInput(input *briefingNewsInput) string {
 	return hashJSON(sorted)
 }
 
+// informalSentenceEndingPattern은 문장 경계("다"/"함"/"임" 뒤에 문장부호나
+// 공백, 문자열 끝이 옴)를 찾되, 그 어미 바로 앞 글자도 캡처 그룹으로 함께
+// 잡는다 — Go regexp(RE2)는 lookbehind를 지원하지 않으므로, "다"로 끝나는
+// 어미가 정중한 합쇼체("~니다")인지는 매칭 이후 findInformalSentenceEnding이
+// Go 코드에서 직접 비교해서 판단한다. "다"/"함"/"임" 뒤에 경계가 와야만
+// 매칭되므로 "다양한", "다른"처럼 단어 중간에 있는 "다"는 걸리지 않는다.
+var informalSentenceEndingPattern = regexp.MustCompile(`([가-힣])(다|함|임)[.!?]?(\s|$)`)
+
+// findInformalSentenceEnding은 문장이 존댓말(합쇼체 — "~습니다/~합니다/
+// ~입니다"처럼 예외 없이 "니다"로 끝나는 어미)이 아니라 반말/기사체 어미
+// ("~했다", "~있다", "~이다" 같은 문어체, 또는 "~함"/"~임" 같은 명사형
+// 종결)로 끝나는지 검사한다. 뉴스 원문(NewsData.io의 title/description)이
+// 이미 "~했다", "~밝혔다" 같은 기사체이다 보니, 모델이 요약하면서 원문의
+// 문체를 그대로 따라가 존댓말 지침을 어기는 사례가 실제로 있었다 —
+// newsSectionSystemPrompt의 절대 규칙 5번이 이를 프롬프트로 막으려
+// 하지만, 이 함수가 마지막 방어선이다.
+//
+// 한국어 합쇼체 종결어미는 예외 없이 "니다"로 끝나므로("갑니다", "합니다",
+// "있습니다", "됐습니다" 등), 문장 경계에서 "다"로 끝나는데 그 앞 글자가
+// "니"가 아니면 반말/기사체로 판정한다. "함"/"임"으로 끝나는 명사형
+// 종결에는 이런 정중한 대응형이 없으므로 앞 글자와 무관하게 항상 반말로
+// 판정한다.
+func findInformalSentenceEnding(text string) (string, bool) {
+	for _, m := range informalSentenceEndingPattern.FindAllStringSubmatch(text, -1) {
+		precedingChar, ending := m[1], m[2]
+		if ending == "다" && precedingChar == "니" {
+			continue // "~니다" — 정중한 합쇼체, 정상
+		}
+		return precedingChar + ending, true
+	}
+	return "", false
+}
+
 // bannedBriefingPhrases는 두 종류의 실패를 잡아냅니다: 내용 없는 채우기
 // 문장(섹션별 재작성 기능이 애초에 존재하는 이유가 되는 바로 그 문제 —
 // "다양한 논의가 진행 중입니다"는 독자에게 아무 정보도 주지 않습니다)과,
@@ -980,6 +1013,8 @@ const newsSectionSystemPrompt = briefingCommonRules + `
 2. 숫자 단위/의미 바꿔치기 금지 — 숫자는 원래 의미(가격/금액/인원수 등) 그대로만 쓰고 다른 의미로 재해석하지 마세요(예: "60.42 USD"를 "60.42%"로 둔갑시키는 것 금지). title/description에 %가 없으면 %를 지어내지 마세요.
 3. 최소 1개의 구체적 사실(숫자, 명칭, 사건)을 포함하고, "다양한 논의가 진행 중입니다" 류의 내용 없는 문장은 금지합니다. K/M/B 단위는 이미 한국어로 환산되어 있으니(예: "9B"→"90억") 그 값을 그대로 쓰고 다시 계산하지 마세요.
 4. 두 번째 문장은 첫 문장과 같은 항목의 다른 구체적 사실로 채우고, 부연할 사실이 없으면 1문장만 쓰세요.
+5. 문체 변환 필수 — 뉴스 원문(title/description)이 어떤 문체로 되어 있든(예: "~했다", "~밝혔다", "~이다" 같은 기사체), 브리핑 문장은 반드시 존댓말(합니다/습니다체)로 재작성하세요. 원문의 문체를 그대로 따라가지 말고 항상 문장 끝을 "~합니다", "~습니다", "~했습니다", "~있습니다" 형태로 바꾸세요.
+   예: "~라고 밝혔다" → "~라고 밝혔습니다" / "~와 관련이 있다" → "~와 관련이 있습니다" / "~상향 조정했다" → "~상향 조정했습니다"
 
 예시(형식 참고용, 아래 내용을 베끼지 말고 실제 title/description으로 바꿔서 작성 — 실제 기사가 어느 분야든 그 분야 그대로 요약하세요):
 한 스타트업이 12명 규모의 팀으로 5000만 달러 투자를 유치했다는 소식이 전해졌습니다. 이는 직원 1인당 약 400만 달러에 해당하는 규모로, 업계에서도 이례적인 사례로 주목받고 있습니다.`
@@ -997,12 +1032,17 @@ const maxSectionRegenerations = 1
 
 // validateSectionOutput은 생성된 섹션에 대해 모든 콘텐츠 검사를 고정된
 // 우선순위 순서(CJK -> 영어 유출 -> 반복 구문 -> 근거 없는 숫자 -> 주제
-// 불일치 -> 조작된 퍼센트 -> 근거 없는 고유명사 -> 금칙 문구)로 실행하고
-// 처음 발견된 실패를 보고합니다. hardFailure는 "절대 그대로 내보낼 수
-// 없는" 실패(CJK 오염, 새어나온 영어, 근거 없는 숫자, 주제 불일치, 근거
-// 없는 고유명사)와 "약한" 금칙어/톤 검사를 구분하며, 이 값에 따라
-// resolveBriefingSection의 호출자가 재시도 예산 소진을 오류로 취급할지
-// 아니면 마지막 결과를 그대로 내보낼지가 결정됩니다.
+// 불일치 -> 조작된 퍼센트 -> 근거 없는 고유명사 -> 반말/기사체 어미 ->
+// 금칙 문구)로 실행하고 처음 발견된 실패를 보고합니다. hardFailure는
+// "절대 그대로 내보낼 수 없는" 실패(CJK 오염, 새어나온 영어, 근거 없는
+// 숫자, 주제 불일치, 근거 없는 고유명사, 반말/기사체 어미)와 "약한"
+// 금칙어 검사를 구분하며, 이 값에 따라 resolveBriefingSection의 호출자가
+// 재시도 예산 소진을 오류(및 stale_fallback으로 대체)로 취급할지 아니면
+// 마지막 결과를 그대로 내보낼지가 결정됩니다. 반말/기사체 어미는 톤
+// 문제이긴 하지만 금칙어(인터넷 은어)보다 훨씬 눈에 띄는 house-style
+// 위반이라, 재시도 후에도 남아있으면 마지막 결과를 그냥 내보내는 대신
+// (다른 hardFailure들처럼) stale_fallback으로 넘어가도록 hardFailure로
+// 분류합니다.
 // useFallback은 (뉴스 전용) 주제 불일치/퍼센트 조작/고유명사 검사에서만
 // true가 됩니다 — generateSectionText 참고.
 func validateSectionOutput(combined string, allowedNumbers []float64, groundingText string) (reason string, hardFailure, useFallback bool) {
@@ -1026,6 +1066,9 @@ func validateSectionOutput(combined string, allowedNumbers []float64, groundingT
 	}
 	if match, found := findUngroundedProperNoun(combined, groundingText); found {
 		return fmt.Sprintf("원문에 없는 고유명사(%q) 감지(hallucination 의심)", match), true, true
+	}
+	if ending, found := findInformalSentenceEnding(combined); found {
+		return fmt.Sprintf("존댓말이 아닌 문장 종결(%q) 감지 — 원문 기사체를 그대로 따라간 것으로 의심됨", ending), true, false
 	}
 	if phrase, softViolated := findBannedPhrase(combined); softViolated {
 		return fmt.Sprintf("금칙어 감지(%q)", phrase), false, false
