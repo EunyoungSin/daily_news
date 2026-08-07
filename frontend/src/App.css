@@ -875,6 +875,32 @@
   animation: shimmer 1.6s ease-in-out infinite;
 }
 
+/* pending 동안 통화쌍/기준일/환율값/어제 대비 텍스트를 대체하는 스켈레톤
+   — .exchange__content가 이미 flex column이지만, 이 블록은 그 아래에
+   한 단계 더 감싸인 채(exchange__fade-in과 나란히 조건부 렌더링되는)
+   자기 자신의 세로 배치를 가져야 하므로 따로 선언한다. */
+.exchange__text-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  animation: exchange-fade-in 200ms ease-out;
+}
+
+/* 실제 텍스트 콘텐츠 wrapper — 이전에는 meta-row/rate/hint-row가
+   .exchange__content의 직접 자식이었지만, pending 스켈레톤과 조건부로
+   교체되도록 한 단계 감싸면서 그 flex 배치를 그대로 옮겨왔다. */
+.exchange__fade-in {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  animation: exchange-fade-in 200ms ease-out;
+}
+
+@keyframes exchange-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
 .exchange__chart-empty {
   height: 100px;
   display: flex;
