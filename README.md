@@ -82,6 +82,31 @@ AI 인사이트도 같은 키를 사용하며, 키가 없거나 호출에 실패
 큰 모델을 씁니다. 오늘 실제 호출 횟수(모델별)와 캐시 히트 수는
 `GET /api/debug/groq-usage`에서 확인할 수 있습니다.
 
+## AI 브리핑 콘텐츠 검증 (환각·반말·금칙어·반복 방지)
+
+Groq가 생성한 문장을 그대로 내보내지 않고, `validateSectionOutput`(`backend/briefing.go`)이
+고정된 순서로 여러 검사를 거칩니다. 검사는 두 등급으로 나뉩니다 — **hardFailure**는 검증에
+실패하면 에스컬레이션 모델(`GROQ_ESCALATION_MODEL`)로 한 번만 재시도하고, 그래도 실패하면
+`stale_fallback`(남아있는 캐시나 안내 문구로 대체)으로 처리합니다. **softFailure**는 재시도해도
+계속 검출되면 결과를 그대로 내보냅니다 — 현재는 금칙어 검사만 이 등급입니다.
+
+- **존댓말 강제** (hardFailure): 날씨/환율/뉴스 공통 프롬프트 규칙("항상 합니다체로 작성하세요")에
+  더해, 뉴스 문단은 원문(NewsData.io)이 기사체(~했다)라도 반드시 합니다체로 재작성하라는 전용
+  규칙이 추가돼 있습니다. `findInformalSentenceEnding`이 반말/기사체 종결을 정규식으로 탐지합니다.
+- **금칙어 필터** (softFailure): 인터넷 은어(ㅋㅋ, 대박, 헐 등)를 쓰지 말라는 프롬프트 지시와
+  `findBannedPhrase` 후처리 검사가 있습니다. 네 가지 검사 중 유일하게, 재시도까지 소진한 뒤에도
+  검출되면 결과를 그대로 내보냅니다.
+- **환각 방지** (hardFailure, 5종): `findUngroundedNumber`(원본에 없는 숫자),
+  `findFabricatedPercentage`(% 기호 조작), `findUngroundedProperNoun`(근거 없는 고유명사),
+  `findTopicMismatch`(토큰 중복도 기반 주제 이탈), `findLeakedEnglish`/`findForeignCJK`(번역 누락·
+  외국어 잔존)이 각각 실제로 관측됐던 환각 사례를 회귀 테스트로 고정해두고 있습니다. 우산 필요
+  여부(날씨)·상승/하락 판단(환율)처럼 숫자 해석이 필요한 판단은 애초에 LLM에 맡기지 않고 Go가
+  미리 계산해(`computeUmbrellaAdvice`, `computeExchangeTrend`) 프롬프트에 답으로 제공합니다 —
+  판단 자체를 LLM에서 걷어내 환각 여지를 구조적으로 없앤 것입니다.
+- **반복 감지** (hardFailure): `findRepeatedPhrase`가 10자 이상인 구절이 같은 생성 결과 안에서
+  재등장하는지 검사합니다. 이전에 캐시된 브리핑과 비교하지는 않습니다 — 매 생성 결과 "내부"의
+  반복만 잡을 뿐, 여러 번의 생성에 걸쳐 비슷한 문구가 되풀이되는 것은 감지 대상이 아닙니다.
+
 ## NewsData.io API 키 발급 (무료)
 
 뉴스 섹션은 [NewsData.io](https://newsdata.io)의 공개 API(`/api/1/latest`)를 사용합니다.
