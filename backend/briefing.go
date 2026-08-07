@@ -408,6 +408,14 @@ func hashNewsInput(input *briefingNewsInput) string {
 // 어떤 맥락에서든 공허하거나 부적절한 표현만입니다 — 예를 들어 "주목받고
 // 있습니다"는 실제 구체적 사실 뒤에 붙으면 정당한 마무리 문구가 될 수
 // 있으므로 의도적으로 제외했습니다.
+//
+// 부분 문자열(strings.Contains)로 매칭되므로, 여기에는 그 자체로 이미
+// 여러 음절인 온전한 표현만 둔다 — 한두 글자짜리를 넣으면 그 글자를
+// 포함하는 무관한 정상 단어까지 오탐한다(과거 "핵"을 여기 뒀을 때 "핵심",
+// "핵가족", "결핵"까지 걸렸던 사례 참고). "핵"으로 잡으려던 건 실제로는
+// 강조 접두사로 붙는 인터넷 은어 조합이었으므로, 그 구체적인 조합만
+// 남긴다. "헐"/"짱"처럼 접두사가 아니라 감탄사로 단독으로 쓰이는 은어는
+// bannedBriefingWords에서 단어 경계를 확인해 매칭한다.
 var bannedBriefingPhrases = []string{
 	"다양한 논의가 진행 중입니다",
 	"토론이 활발합니다",
@@ -415,7 +423,19 @@ var bannedBriefingPhrases = []string{
 	"다양한 의견이 있습니다",
 	"여러 가지 논의가 있습니다",
 	"많은 관심을 받고 있습니다",
-	"ㅋㅋ", "ㅎㅎ", "대박", "헐", "레전드", "핵", "TMI", "인정?", "짱",
+	"ㅋㅋ", "ㅎㅎ", "대박", "레전드", "TMI", "인정?",
+	"핵꿀잼", "핵노잼", "핵인싸", "핵존맛", "핵대박", "핵꿀",
+}
+
+// bannedBriefingWords는 한 글자짜리라 bannedBriefingPhrases처럼 단순
+// 부분 문자열로 매칭하면 무관한 정상 단어(예: "헐값", "짱구")까지
+// 걸리는 감탄사성 은어다. findBannedPhrase가 앞뒤 글자가 한글 음절이
+// 아닐 때(공백, 문장부호, 문자열 경계)만 매칭해, 다른 단어의 일부가
+// 아니라 독립된 단어로 쓰였을 때만 잡아낸다.
+var bannedBriefingWords = []string{"헐", "짱"}
+
+func isHangulSyllable(r rune) bool {
+	return r >= 0xAC00 && r <= 0xD7A3
 }
 
 func findBannedPhrase(text string) (string, bool) {
@@ -424,6 +444,22 @@ func findBannedPhrase(text string) (string, bool) {
 			return phrase, true
 		}
 	}
+
+	runes := []rune(text)
+	for _, word := range bannedBriefingWords {
+		wordRunes := []rune(word)
+		for i := 0; i+len(wordRunes) <= len(runes); i++ {
+			if string(runes[i:i+len(wordRunes)]) != word {
+				continue
+			}
+			beforeIsBoundary := i == 0 || !isHangulSyllable(runes[i-1])
+			afterIsBoundary := i+len(wordRunes) == len(runes) || !isHangulSyllable(runes[i+len(wordRunes)])
+			if beforeIsBoundary && afterIsBoundary {
+				return word, true
+			}
+		}
+	}
+
 	return "", false
 }
 

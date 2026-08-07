@@ -54,10 +54,25 @@ function splitSentences(text: string): string[] {
 
 // 여러 섹션이 동시에 대체됐을 때는 카드 상단에 한 번만 통합 배너로
 // 안내하고(showUnifiedStaleBanner), 정확히 하나만 대체됐을 때는 그
-// 섹션 옆에만 작은 배지를 붙인다 — 이 두 문구가 그 두 경우에 쓰인다.
-const STALE_FALLBACK_MESSAGE = '⚠️ 일시적으로 사용량 제한이 있어 이전에 저장된 내용을 보여드립니다'
-const STALE_FALLBACK_MESSAGE_MULTI =
-  '⚠️ 일부 항목은 최신 정보가 아닐 수 있어요, 사용량 제한으로 이전 내용을 보여드리는 중입니다'
+// 섹션 옆에만 작은 배지를 붙인다 — 아래 두 함수가 그 두 경우의 문구를
+// failureReason에 따라 고른다. rate_limit일 때만 "사용량 제한"이라고
+// 구체적으로 말하고, 그 외(validation_failed/missing_api_key/
+// generation_error 등 — backend/briefing.go의 classifyBriefingFailureReason
+// 참고)는 실제 원인이 사용량 제한이 아닌데도 그렇게 단정하지 않도록
+// 범용 문구로 뭉뚱그린다. 금칙어/반복 감지 같은 기술적 사유를 사용자에게
+// 그대로 노출할 필요는 없다.
+function staleFallbackMessage(failureReason?: string): string {
+  return failureReason === 'rate_limit'
+    ? '⚠️ 일시적으로 사용량 제한이 있어 이전에 저장된 내용을 보여드립니다'
+    : '⚠️ 일시적인 문제로 이전에 저장된 내용을 보여드립니다'
+}
+
+function staleFallbackMessageMulti(failureReasons: (string | undefined)[]): string {
+  const allRateLimit = failureReasons.length > 0 && failureReasons.every((reason) => reason === 'rate_limit')
+  return allRateLimit
+    ? '⚠️ 일부 항목은 최신 정보가 아닐 수 있어요, 사용량 제한으로 이전 내용을 보여드리는 중입니다'
+    : '⚠️ 일부 항목은 최신 정보가 아닐 수 있어요, 일시적인 문제로 이전 내용을 보여드리는 중입니다'
+}
 
 // 브리핑 내 weather/exchange/news 중 하나의 섹션. 자신의 generatedAt이
 // 바뀔 때만 잠깐 하이라이트된다 — 즉 이번 요청에서 *이* 섹션이 실제로
@@ -99,7 +114,7 @@ function BriefingSectionBlock({
       ))}
       {showStaleBadge && (
         <p className="briefing__stale-badge">
-          {STALE_FALLBACK_MESSAGE} ({formatUpdatedAt(meta.generatedAt)} 기준)
+          {staleFallbackMessage(meta.failureReason)} ({formatUpdatedAt(meta.generatedAt)} 기준)
         </p>
       )}
     </div>
@@ -111,9 +126,10 @@ export default function BriefingCard({ section, pending, weatherPending, exchang
   const pulsing = usePulseOnChange(section.data?.generatedAt)
 
   const briefingMeta = section.data?.briefingMeta
-  const staleSectionCount = briefingMeta
-    ? (['weather', 'exchange', 'news'] as const).filter((key) => briefingMeta[key].status === 'stale_fallback').length
-    : 0
+  const staleSections = briefingMeta
+    ? (['weather', 'exchange', 'news'] as const).filter((key) => briefingMeta[key].status === 'stale_fallback')
+    : []
+  const staleSectionCount = staleSections.length
   // 정확히 하나만 대체됐으면 그 섹션 옆에만 배지를 붙이고, 둘 이상이면
   // 개별 배지 대신 카드 상단에 통합 배너 하나만 보여준다.
   const showUnifiedStaleBanner = staleSectionCount >= 2
@@ -150,7 +166,11 @@ export default function BriefingCard({ section, pending, weatherPending, exchang
         </div>
       ) : section.success && section.data ? (
         <div className="card__body">
-          {showUnifiedStaleBanner && <p className="briefing__stale-banner">{STALE_FALLBACK_MESSAGE_MULTI}</p>}
+          {showUnifiedStaleBanner && briefingMeta && (
+            <p className="briefing__stale-banner">
+              {staleFallbackMessageMulti(staleSections.map((key) => briefingMeta[key].failureReason))}
+            </p>
+          )}
 
           <div className="briefing__text">
             <BriefingSectionBlock

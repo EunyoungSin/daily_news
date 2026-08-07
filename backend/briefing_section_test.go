@@ -19,6 +19,30 @@ func TestFindBannedPhrase(t *testing.T) {
 	if _, found := findBannedPhrase("정말 대박이네요 ㅋㅋ"); !found {
 		t.Error("expected internet slang to be detected as banned")
 	}
+	if _, found := findBannedPhrase("이 기술이 핵심입니다"); found {
+		t.Error("expected '핵심' not to be flagged as banned (substring of removed '핵' entry)")
+	}
+	if _, found := findBannedPhrase("저출산으로 핵가족이 늘고 있다"); found {
+		t.Error("expected '핵가족' not to be flagged as banned")
+	}
+	if _, found := findBannedPhrase("핵무기 실험이 감지됐다"); found {
+		t.Error("expected '핵무기' not to be flagged as banned")
+	}
+	if _, found := findBannedPhrase("결핵 환자 수가 늘었다"); found {
+		t.Error("expected '결핵' not to be flagged as banned")
+	}
+	if phrase, found := findBannedPhrase("완전 핵꿀잼이었다"); !found || phrase != "핵꿀잼" {
+		t.Errorf("expected the specific slang compound '핵꿀잼' to be detected, got phrase=%q found=%v", phrase, found)
+	}
+	if _, found := findBannedPhrase("이 매장은 헐값에 물건을 판다"); found {
+		t.Error("expected '헐값' not to be flagged as banned (word-boundary check should protect it)")
+	}
+	if _, found := findBannedPhrase("만화 주인공 짱구는 못말려"); found {
+		t.Error("expected '짱구' not to be flagged as banned (word-boundary check should protect it)")
+	}
+	if phrase, found := findBannedPhrase("헐 진짜 그런 일이 있었어?"); !found || phrase != "헐" {
+		t.Errorf("expected standalone slang '헐' to be detected, got phrase=%q found=%v", phrase, found)
+	}
 }
 
 func TestHashJSONDeterministic(t *testing.T) {
