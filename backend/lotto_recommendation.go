@@ -151,20 +151,20 @@ func decodeRecommendationNumbers(numbersCSV, groupsCSV string) ([]LottoRecommend
 	return result, nil
 }
 
-func lookupLottoRecommendation(ctx context.Context, conn *sql.DB, cycleStartDate string) (numbers []LottoRecommendationNumber, generatedAt time.Time, found bool) {
+func lookupLottoRecommendation(ctx context.Context, conn *sql.DB, cycleStartDate string) (numbers []LottoRecommendationNumber, basedOnDrwNo int, basedOnDataHash string, generatedAt time.Time, found bool) {
 	var numbersCSV, groupsCSV string
 	err := conn.QueryRowContext(ctx,
-		`SELECT numbers, number_groups, generated_at FROM lotto_recommendation WHERE cycle_start_date = ?`, cycleStartDate,
-	).Scan(&numbersCSV, &groupsCSV, &generatedAt)
+		`SELECT numbers, number_groups, based_on_drw_no, based_on_data_hash, generated_at FROM lotto_recommendation WHERE cycle_start_date = ?`, cycleStartDate,
+	).Scan(&numbersCSV, &groupsCSV, &basedOnDrwNo, &basedOnDataHash, &generatedAt)
 	if err != nil {
-		return nil, time.Time{}, false
+		return nil, 0, "", time.Time{}, false
 	}
 
 	numbers, err = decodeRecommendationNumbers(numbersCSV, groupsCSV)
 	if err != nil {
-		return nil, time.Time{}, false
+		return nil, 0, "", time.Time{}, false
 	}
-	return numbers, generatedAt, true
+	return numbers, basedOnDrwNo, basedOnDataHash, generatedAt, true
 }
 
 // insertLottoRecommendationIfAbsent는 `INSERT OR IGNORE`를 사용한다
@@ -174,20 +174,56 @@ func lookupLottoRecommendation(ctx context.Context, conn *sql.DB, cycleStartDate
 // insert는 조용히 무시되고, getLottoRecommendation이 이후에 다시 읽어서
 // 실제로 이긴 쪽의 row를 가져온다. 한 사이클 안의 모든 요청이 동일한 번호를
 // 보게 되는 것은 이 insert가 아니라 그 재조회(re-read) 덕분이다.
-func insertLottoRecommendationIfAbsent(ctx context.Context, conn *sql.DB, cycleStartDate string, numbers []LottoRecommendationNumber, generatedAt time.Time) error {
+func insertLottoRecommendationIfAbsent(ctx context.Context, conn *sql.DB, cycleStartDate string, basedOnDrwNo int, basedOnDataHash string, numbers []LottoRecommendationNumber, generatedAt time.Time) error {
 	numbersCSV, groupsCSV := encodeRecommendationNumbers(numbers)
 	_, err := conn.ExecContext(ctx, `
-		INSERT OR IGNORE INTO lotto_recommendation (cycle_start_date, numbers, number_groups, generated_at)
-		VALUES (?, ?, ?, ?)`,
-		cycleStartDate, numbersCSV, groupsCSV, generatedAt,
+		INSERT OR IGNORE INTO lotto_recommendation (cycle_start_date, based_on_drw_no, based_on_data_hash, numbers, number_groups, generated_at)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		cycleStartDate, basedOnDrwNo, basedOnDataHash, numbersCSV, groupsCSV, generatedAt,
 	)
 	return err
 }
 
+// updateLottoRecommendationForNewData는 이미 존재하는 cycle_start_date 행을
+// 새 통계 입력 기준으로 덮어쓴다 — 같은 사이클 안에서 통계(frequency)가
+// 바뀐 경우에만 호출된다. 이는 두 가지 상황을 모두 포함한다: (1) 자동
+// 수집이 막혔다가 관리자가 나중에 새 회차를 수동으로 넣는 경우, (2) 새
+// 회차 없이 이미 저장된 회차의 오타를 나중에 정정하는 경우(latest_drw_no는
+// 그대로지만 frequency 자체가 바뀐다). WHERE 절에 staleDataHash를 함께
+// 거는 것은, 동시에 여러 요청이 "낡았다"고 판단해 각자 새로 계산한(서로
+// 다른 무작위) 번호로 서로를 계속 덮어쓰는 경쟁을 막기 위해서다 — 이미
+// 누군가 newDataHash로 갱신해뒀다면 이 UPDATE는 0행에 적용되고 조용히
+// 넘어가며, getLottoRecommendation이 재조회로 그 결과를 가져온다.
+func updateLottoRecommendationForNewData(ctx context.Context, conn *sql.DB, cycleStartDate, staleDataHash string, newDrwNo int, newDataHash string, numbers []LottoRecommendationNumber, generatedAt time.Time) error {
+	numbersCSV, groupsCSV := encodeRecommendationNumbers(numbers)
+	_, err := conn.ExecContext(ctx, `
+		UPDATE lotto_recommendation
+		SET based_on_drw_no = ?, based_on_data_hash = ?, numbers = ?, number_groups = ?, generated_at = ?
+		WHERE cycle_start_date = ? AND based_on_data_hash = ?`,
+		newDrwNo, newDataHash, numbersCSV, groupsCSV, generatedAt, cycleStartDate, staleDataHash,
+	)
+	return err
+}
+
+func toLottoRecommendation(cycleStartDate string, numbers []LottoRecommendationNumber, generatedAt time.Time) LottoRecommendation {
+	return LottoRecommendation{
+		Numbers:        numbers,
+		CycleStartDate: cycleStartDate,
+		GeneratedAt:    generatedAt.Format(time.RFC3339),
+	}
+}
+
 // getLottoRecommendation은 이번 요청의 추천 상태를 결정한다: blackout 안내,
-// 캐시된 사이클의 번호, 또는 이번 주 아직 아무도 요청하지 않은 사이클을 위해
-// 새로 생성한 번호 중 하나다.
-func getLottoRecommendation(ctx context.Context, conn *sql.DB, frequency map[int]int, now time.Time) LottoRecommendation {
+// 캐시된 사이클의 번호, 또는 새로 계산한 번호 중 하나다. 캐시 유효성은
+// cycle_start_date만으로 판단하지 않고, 그 통계 계산에 실제로 쓰인
+// frequency 입력의 해시(based_on_data_hash)가 지금의 frequency와 같은지도
+// 함께 본다 — latest_drw_no(=identity)만 비교하면, 새 회차 없이 이미 저장된
+// 회차의 오타만 정정된 경우(latest_drw_no는 그대로지만 frequency는 바뀜)를
+// 놓친다. 해시 비교는 이 경우와 "같은 사이클 도중 새 회차가 추가되는"
+// 경우를 모두 잡아낸다. based_on_drw_no는 더 이상 유효성 판단에 쓰이지
+// 않고, 로그에서 "어느 회차 기준으로 계산됐는지"를 보여주는 용도로만
+// 남아있다.
+func getLottoRecommendation(ctx context.Context, conn *sql.DB, frequency map[int]int, latestDrwNo int, now time.Time) LottoRecommendation {
 	if isLottoRecommendationBlackout(now) {
 		return LottoRecommendation{
 			IsBlackout:      true,
@@ -196,39 +232,38 @@ func getLottoRecommendation(ctx context.Context, conn *sql.DB, frequency map[int
 	}
 
 	cycleStart := lottoCycleStartDate(now).Format("2006-01-02")
+	dataHash := hashJSON(frequency)
 
-	if numbers, generatedAt, found := lookupLottoRecommendation(ctx, conn, cycleStart); found {
-		return LottoRecommendation{
-			Numbers:        numbers,
-			CycleStartDate: cycleStart,
-			GeneratedAt:    generatedAt.Format(time.RFC3339),
+	numbers, basedOnDrwNo, basedOnDataHash, generatedAt, found := lookupLottoRecommendation(ctx, conn, cycleStart)
+	if found && basedOnDataHash == dataHash {
+		return toLottoRecommendation(cycleStart, numbers, generatedAt)
+	}
+
+	if found {
+		log.Printf("로또: 추천번호 캐시가 낡음(cycle=%s, 캐시 기준 회차=%d, 최신 회차=%d) — 통계 변경 감지, 재계산", cycleStart, basedOnDrwNo, latestDrwNo)
+		numbers = computeRecommendationNumbers(frequency)
+		generatedAt = time.Now()
+		if err := updateLottoRecommendationForNewData(ctx, conn, cycleStart, basedOnDataHash, latestDrwNo, dataHash, numbers, generatedAt); err != nil {
+			log.Printf("로또: 추천번호 갱신 실패(cycle=%s): %v", cycleStart, err)
+		}
+	} else {
+		numbers = computeRecommendationNumbers(frequency)
+		generatedAt = time.Now()
+		if err := insertLottoRecommendationIfAbsent(ctx, conn, cycleStart, latestDrwNo, dataHash, numbers, generatedAt); err != nil {
+			// 치명적이지 않다 — 최악의 경우 이번 요청은 저장되지 않을 방금 뽑은
+			// 번호를 보여주게 되고, 다음 요청이 insert를 다시 시도한다.
+			log.Printf("로또: 추천번호 저장 실패(cycle=%s): %v", cycleStart, err)
 		}
 	}
 
-	numbers := computeRecommendationNumbers(frequency)
-	generatedAt := time.Now()
-	if err := insertLottoRecommendationIfAbsent(ctx, conn, cycleStart, numbers, generatedAt); err != nil {
-		// 치명적이지 않다 — 최악의 경우 이번 요청은 저장되지 않을 방금 뽑은
-		// 번호를 보여주게 되고, 다음 요청이 insert를 다시 시도한다.
-		log.Printf("로또: 추천번호 저장 실패(cycle=%s): %v", cycleStart, err)
-	}
-
-	// 우리의 insert가 경쟁에서 이겼는지 여부와 무관하게 다시 읽는다. 그래야
+	// 우리의 write가 경쟁에서 이겼는지 여부와 무관하게 다시 읽는다. 그래야
 	// 경쟁에서 진 동시 요청도 자신이 로컬에서 우연히 뽑은 번호가 아니라
 	// 실제로 저장된 번호를 반환하게 된다.
-	if numbers, generatedAt, found := lookupLottoRecommendation(ctx, conn, cycleStart); found {
-		return LottoRecommendation{
-			Numbers:        numbers,
-			CycleStartDate: cycleStart,
-			GeneratedAt:    generatedAt.Format(time.RFC3339),
-		}
+	if cachedNumbers, _, _, cachedGeneratedAt, found := lookupLottoRecommendation(ctx, conn, cycleStart); found {
+		return toLottoRecommendation(cycleStart, cachedNumbers, cachedGeneratedAt)
 	}
 
 	// (단순한 경쟁 문제가 아니라) DB 왕복 자체가 완전히 실패한 경우 — 이번
 	// 요청에서라도 섹션이 계속 동작하도록 이미 생성해둔 번호로 대체한다.
-	return LottoRecommendation{
-		Numbers:        numbers,
-		CycleStartDate: cycleStart,
-		GeneratedAt:    generatedAt.Format(time.RFC3339),
-	}
+	return toLottoRecommendation(cycleStart, numbers, generatedAt)
 }

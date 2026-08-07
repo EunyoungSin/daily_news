@@ -112,7 +112,7 @@ func buildLottoData(ctx context.Context, conn *sql.DB) (*LottoData, error) {
 		}
 	}
 
-	recommendation := getLottoRecommendation(ctx, conn, frequency, time.Now())
+	recommendation := getLottoRecommendation(ctx, conn, frequency, latest.DrwNo, time.Now())
 
 	return &LottoData{
 		Latest:         latest,

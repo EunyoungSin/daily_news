@@ -128,10 +128,17 @@ CREATE TABLE IF NOT EXISTS lotto_draws (
 	created_at TEXT DEFAULT CURRENT_TIMESTAMP
 )`
 
+// data_hash는 이 인사이트를 생성할 때 실제로 모델에 넘긴 통계 입력
+// (frequency + recentAppeared)의 해시다(lotto_ai.go의 hashLottoInsightInput
+// 참고). latest_drw_no만으로 캐시 유효성을 판단하면, 관리자가 기존 회차의
+// 오타를 나중에 정정해도(회차 번호 자체는 그대로라서) 그 정정이 반영되지
+// 않은 낡은 인사이트가 계속 재사용된다 — data_hash가 이런 경우까지 잡아서
+// 실제 통계가 바뀌면 latest_drw_no가 그대로라도 캐시를 무효화한다.
 const createAIInsightCacheTable = `
 CREATE TABLE IF NOT EXISTS ai_insight_cache (
 	latest_drw_no INTEGER PRIMARY KEY,
 	insight_text TEXT NOT NULL,
+	data_hash TEXT NOT NULL DEFAULT '',
 	generated_at TEXT DEFAULT CURRENT_TIMESTAMP
 )`
 
@@ -154,8 +161,17 @@ CREATE TABLE IF NOT EXISTS briefing_section_cache (
 
 // cycle_start_date는 "이번 주" 추천을 식별하는 일요일 06:00 KST 값이며
 // (lotto_recommendation.go 참고) 기본키다 — 사이클마다 정확히 한 행만
-// 존재하고, 같은 사이클 안에서 다시 요청하면 새 번호를 생성하는 대신 같은
-// 행을 그대로 읽어온다.
+// 존재한다. 같은 사이클 안에서 다시 요청했을 때 캐시를 그대로 재사용할지는
+// cycle_start_date만으로 정하지 않고, based_on_data_hash(그 행의 통계
+// 계산에 실제로 쓰인 frequency 입력의 해시)가 지금의 frequency와 같은지도
+// 함께 본다 — 정상적인 주간 흐름(매주 새 사이클 시작 시점에 최신 회차도
+// 함께 바뀜)에서는 사실상 항상 같지만, 다음 두 예외 상황에서는 어긋날 수
+// 있어 이 컬럼이 필요하다: (1) 자동 수집이 막혀 있다가 같은 사이클 도중에
+// 관리자가 새 회차를 수동 입력하는 경우, (2) 새 회차 없이 이미 저장된
+// 회차의 오타를 나중에 정정하는 경우(latest_drw_no는 그대로라 based_on_drw_no
+// 비교만으로는 못 잡아내지만, 정정으로 frequency 자체가 바뀌므로 해시는
+// 달라진다). based_on_drw_no는 캐시 유효성 판단에는 더 이상 쓰이지 않고,
+// 로그에 "어느 회차 기준으로 계산됐는지"를 보여주는 용도로만 남아있다.
 //
 // number_groups는 원래 요구사항에는 없었지만, 캐시 히트 시 그룹 배지
 // (🔥/⚖️/❄️)를 올바르게 표시하려면 필요하다: 각 번호가 어느 그룹에서
@@ -165,10 +181,54 @@ CREATE TABLE IF NOT EXISTS briefing_section_cache (
 const createLottoRecommendationTable = `
 CREATE TABLE IF NOT EXISTS lotto_recommendation (
 	cycle_start_date TEXT PRIMARY KEY,
+	based_on_drw_no INTEGER NOT NULL DEFAULT 0,
+	based_on_data_hash TEXT NOT NULL DEFAULT '',
 	numbers TEXT NOT NULL,
 	number_groups TEXT NOT NULL,
 	generated_at TEXT DEFAULT CURRENT_TIMESTAMP
 )`
+
+// ensureColumnExists는 `table`에 `column`이 없으면 alterColumnDDL(예:
+// "based_on_drw_no INTEGER NOT NULL DEFAULT 0")로 ALTER TABLE ADD COLUMN을
+// 실행한다. 이미 배포된 Turso 테이블에는 CREATE TABLE IF NOT EXISTS만으로는
+// 나중에 스키마에 추가된 컬럼이 반영되지 않으므로 쓰는 공용 헬퍼다 —
+// PRAGMA table_info로 먼저 존재 여부를 확인해서, 이미 컬럼이 있는
+// 데이터베이스(신규 로컬 DB 포함)에 다시 실행해도 안전하다(ALTER TABLE
+// ADD COLUMN을 중복 실행하면 에러가 나므로). table/column은 항상 이
+// 파일 안의 상수 문자열만 넘어오므로 SQL 인젝션 우려 없이 그대로
+// Sprintf에 끼워 넣는다.
+func ensureColumnExists(conn *sql.DB, table, column, alterColumnDDL string) error {
+	rows, err := conn.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return fmt.Errorf("read %s schema: %w", table, err)
+	}
+	defer rows.Close()
+
+	hasColumn := false
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, colType string
+		var dfltValue sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+			return fmt.Errorf("scan %s schema: %w", table, err)
+		}
+		if name == column {
+			hasColumn = true
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read %s schema: %w", table, err)
+	}
+	if hasColumn {
+		return nil
+	}
+
+	if _, err := conn.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s`, table, alterColumnDDL)); err != nil {
+		return fmt.Errorf("add %s.%s column: %w", table, column, err)
+	}
+	return nil
+}
 
 // weather_slot_cache는 기상청 getVilageFcst가 당일 이미 지난 시각에 대해
 // 더 이상 값을 반환하지 않게 된 후에도 예보 슬롯(08:00/14:00)을 보존한다
@@ -256,11 +316,20 @@ func migrate(conn *sql.DB) error {
 	if _, err := conn.Exec(createAIInsightCacheTable); err != nil {
 		return fmt.Errorf("create ai_insight_cache: %w", err)
 	}
+	if err := ensureColumnExists(conn, "ai_insight_cache", "data_hash", "data_hash TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrate ai_insight_cache: %w", err)
+	}
 	if _, err := conn.Exec(createBriefingSectionCacheTable); err != nil {
 		return fmt.Errorf("create briefing_section_cache: %w", err)
 	}
 	if _, err := conn.Exec(createLottoRecommendationTable); err != nil {
 		return fmt.Errorf("create lotto_recommendation: %w", err)
+	}
+	if err := ensureColumnExists(conn, "lotto_recommendation", "based_on_drw_no", "based_on_drw_no INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("migrate lotto_recommendation: %w", err)
+	}
+	if err := ensureColumnExists(conn, "lotto_recommendation", "based_on_data_hash", "based_on_data_hash TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrate lotto_recommendation: %w", err)
 	}
 	if _, err := conn.Exec(createWeatherSlotCacheTable); err != nil {
 		return fmt.Errorf("create weather_slot_cache: %w", err)
