@@ -61,9 +61,16 @@ func lottoHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 이미 보여줄 데이터가 있다면 초기 채우기는 끝난 것이다 — 그 뒤로
+	// "매주 자동 업데이트" 토글이 계속 켜져 있다는 사실과는 무관하다.
+	// isCollecting을 여기서도 그대로 IsBackfilling에 넣으면, 토글이 켜져
+	// 있는 동안 useLotto가 5초마다 이 무거운 GET /api/lotto(AI 인사이트
+	// 캐시 조회 포함)를 영원히 폴링하게 된다 — GET
+	// /api/lotto/collection/status의 가벼운 5초 폴링과 뒤섞여 로그에 매번
+	// "AI 인사이트 캐시 재사용"이 따라붙던 원인이 바로 이것이었다.
 	writeLottoSection(w, LottoSection{
 		SectionMeta:   SectionMeta{Success: true, DurationMs: durationMs},
-		IsBackfilling: isCollecting,
+		IsBackfilling: false,
 		Data:          data,
 	})
 }
