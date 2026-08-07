@@ -72,14 +72,16 @@ async function readStream(
   }
 }
 
-// 브리핑 카드 안에서 날씨/환율 문단 각각을 개별적으로 로딩 표시할 때
+// 브리핑 카드 안에서 날씨/환율/뉴스 문단 각각을 개별적으로 로딩 표시할 때
 // 쓰인다 — applyParams가 city만 바꿨는지, from/to만 바꿨는지에 따라
-// 둘 중 하나(또는 둘 다)만 true가 된다. news 문단은 이 세분화 대상이
-// 아니다(뉴스 카테고리/지역 변경은 지금처럼 retrySection('briefing')이
-// 카드 전체를 브리핑 합성 중 스켈레톤으로 덮는 기존 동작을 그대로 유지한다).
+// weather/exchange 중 하나(또는 둘 다)만 true가 되고, 뉴스 카테고리/지역이
+// 바뀌면 retrySection('news')가 news만 true로 만든다(App.tsx 참고). 세
+// 필드 모두 서로 독립적이라, 예를 들어 도시만 바꿨다면 exchange/news는
+// 건드리지 않으므로 환율/뉴스 문단은 그대로 유지된 채 보여진다.
 export interface BriefingSectionPending {
   weather: boolean
   exchange: boolean
+  news: boolean
 }
 
 export function useDashboard(initialParams: DashboardParams, newsContext: NewsContext) {
@@ -102,6 +104,7 @@ export function useDashboard(initialParams: DashboardParams, newsContext: NewsCo
   const [briefingSectionPending, setBriefingSectionPending] = useState<BriefingSectionPending>({
     weather: false,
     exchange: false,
+    news: false,
   })
   const [error, setError] = useState<string | null>(null)
   const [autoRefresh, setAutoRefresh] = useState(false)
@@ -139,7 +142,7 @@ export function useDashboard(initialParams: DashboardParams, newsContext: NewsCo
     setWeatherPending(true)
     setExchangePending(true)
     setBriefingPending(true)
-    setBriefingSectionPending({ weather: false, exchange: false })
+    setBriefingSectionPending({ weather: false, exchange: false, news: false })
     setError(null)
 
     try {
@@ -187,17 +190,25 @@ export function useDashboard(initialParams: DashboardParams, newsContext: NewsCo
   // 백엔드는 통합된 엔드포인트 하나만 제공하므로, 섹션 단위 재시도는
   // 대시보드 전체를 다시 가져오되 해당 섹션만 state에 병합하고 이미
   // 로드된 다른 섹션은 건드리지 않는다. 뉴스 category/region 변경이
-  // 브리핑에 반영되는 경로도 바로 이것이다: App.tsx는 `params`를
-  // 바꾸는 대신 retrySection('briefing')을 호출하므로, 뉴스 카드의
-  // 필터가 바뀌었다고 weather/exchange까지 다시 로드되는 일은 없다.
+  // 브리핑에 반영되는 경로도 바로 이것이다: App.tsx는 `params`를 바꾸는
+  // 대신 retrySection('news')를 호출하므로, 뉴스 카드의 필터가
+  // 바뀌었다고 weather/exchange까지 다시 로드되는 일은 없다 — 'news'는
+  // applyParams의 city/currency 부분 갱신과 같은 원리로, 브리핑의 뉴스
+  // 문단만 개별 병합한다(아래 참고).
   const retrySection = useCallback(async (section: SectionKey) => {
     // 초기 로드 때 쓰는 것과 같은 "브리핑 합성 중" 스켈레톤을 띄운다 —
-    // 이게 없으면, 뉴스 category/region 변경이(바로 위 주석에서 설명한
-    // 경로를 통해 브리핑에 도달할 때) 아무 표시도 없이 조용히 뉴스 문장만
-    // 바꿔치기했고, 그 문단에만 잠깐 나타나는 2.5초짜리 배경 색조 변화
-    // 정도가 유일한 단서였다. 명시적인 pending 상태를 두면 탭을 클릭한
-    // 순간 "지금 브리핑이 다시 생성되고 있다"는 것이 확실히 드러난다.
+    // BriefingCard의 "재시도" 버튼(완전 실패 후 카드 전체를 다시 가져올
+    // 때)에서만 쓰인다. 뉴스 category/region 변경은 카드 전체가 아니라
+    // news 문단만 개별적으로 pending 처리한다(아래 'news' 분기 참고) —
+    // 날씨/환율 문단까지 스켈레톤으로 덮을 이유가 없다.
     if (section === 'briefing') setBriefingPending(true)
+    // 이게 없으면, 뉴스 category/region 변경이 아무 표시도 없이 조용히
+    // 뉴스 문장만 바꿔치기했고, 그 문단에만 잠깐 나타나는 2.5초짜리 배경
+    // 색조 변화 정도가 유일한 단서였다. 명시적인 pending 상태를 두면
+    // 탭을 클릭한 순간 "뉴스 문단이 다시 합성되고 있다"는 것이 확실히
+    // 드러난다.
+    if (section === 'news') setBriefingSectionPending((prev) => ({ ...prev, news: true }))
+
     try {
       const res = await fetch(buildURL(paramsRef.current, newsContextRef.current))
       if (!res.ok) throw new Error(`서버 오류 (status ${res.status})`)
@@ -205,13 +216,48 @@ export function useDashboard(initialParams: DashboardParams, newsContext: NewsCo
       await readStream(
         res,
         (line) => {
-          if (section === 'briefing' && line.stage !== 'final') return
+          // 'briefing'/'news' 둘 다 브리핑 합성이 끝나야 의미가 있는
+          // 값이므로 partial 줄은 무시한다 — weather/exchange는 partial
+          // 줄에서 이미 최종값이라 이 게이트가 필요 없다.
+          if ((section === 'briefing' || section === 'news') && line.stage !== 'final') return
+
+          if (section === 'news') {
+            // applyParams의 city/currency 부분 갱신과 정확히 같은
+            // 패턴이다: 날씨/환율 문단(과 그 briefingMeta)은 이전 값을
+            // 그대로 유지하고, 뉴스 문단만 새로 받은 값으로 교체한다.
+            setData((prev) => {
+              if (!prev) return line
+              const prevData = prev.briefing.data
+              const lineData = line.briefing.data
+              return {
+                ...prev,
+                totalMs: line.totalMs,
+                briefing: {
+                  ...line.briefing,
+                  data:
+                    prevData && lineData
+                      ? {
+                          ...lineData,
+                          briefingMeta: {
+                            weather: prevData.briefingMeta.weather,
+                            exchange: prevData.briefingMeta.exchange,
+                            news: lineData.briefingMeta.news,
+                          },
+                        }
+                      : lineData,
+                },
+              }
+            })
+            return
+          }
+
           setData((prev) => (prev ? { ...prev, [section]: line[section], totalMs: line.totalMs } : line))
         },
         new AbortController().signal,
       )
     } finally {
       if (section === 'briefing') setBriefingPending(false)
+      if (section === 'news') setBriefingSectionPending((prev) => ({ ...prev, news: false }))
     }
   }, [])
 
@@ -292,6 +338,7 @@ export function useDashboard(initialParams: DashboardParams, newsContext: NewsCo
           if (currencyChanged) setExchangePending(false)
           if (line.stage === 'final') {
             setBriefingSectionPending((prev) => ({
+              ...prev,
               weather: cityChanged ? false : prev.weather,
               exchange: currencyChanged ? false : prev.exchange,
             }))

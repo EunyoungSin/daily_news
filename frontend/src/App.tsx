@@ -84,9 +84,10 @@ export default function App() {
   )
 
   // category/region을 URL에 유지해 새로고침해도 선택값이 보존되게 하고,
-  // (weather/exchange가 아니라) 브리핑만 다시 가져와서 뉴스 문단을
-  // 맞춘다 — 최초 마운트 시에는 건너뛴다. useDashboard의 초기 로드가
-  // newsContext ref를 통해 현재 category/region을 이미 읽기 때문이다.
+  // (weather/exchange나 카드 전체가 아니라) 브리핑의 뉴스 문단만
+  // 개별적으로 다시 가져와서 맞춘다 — 최초 마운트 시에는 건너뛴다.
+  // useDashboard의 초기 로드가 newsContext ref를 통해 현재
+  // category/region을 이미 읽기 때문이다.
   const isFirstNewsEffect = useRef(true)
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search)
@@ -98,7 +99,7 @@ export default function App() {
       isFirstNewsEffect.current = false
       return
     }
-    retrySection('briefing')
+    retrySection('news')
   }, [newsCategory, newsRegion, retrySection])
 
   return (
@@ -244,6 +245,7 @@ export default function App() {
             pending={briefingPending}
             weatherPending={briefingSectionPending.weather}
             exchangePending={briefingSectionPending.exchange}
+            newsPending={briefingSectionPending.news}
             onRetry={retryBriefing}
           />
         ) : (

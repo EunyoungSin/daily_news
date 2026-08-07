@@ -280,7 +280,10 @@ export interface LottoCollectionStatus {
   savedCount: number
 }
 
-export type SectionKey = 'weather' | 'exchange' | 'briefing'
+// 'news'는 뉴스 카테고리/지역이 바뀌어 브리핑의 뉴스 문단만 개별적으로
+// 다시 합성할 때 쓰인다(useDashboard.ts의 retrySection 참고) — 'briefing'과
+// 달리 날씨/환율 문단과 카드 전체 스켈레톤은 건드리지 않는다.
+export type SectionKey = 'weather' | 'exchange' | 'briefing' | 'news'
 
 // backend/news.go의 newsCategories와 정확히 일치시킨 것.
 export const NEWS_CATEGORY_OPTIONS: { value: string; label: string }[] = [
