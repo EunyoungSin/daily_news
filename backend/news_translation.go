@@ -194,7 +194,7 @@ func fetchNewsTranslation(ctx context.Context, items []NewsItem) ([]newsTranslat
 		content, callErr := callGroqChat(ctx, apiKey, model, []groqChatMessage{
 			{Role: "system", Content: newsTranslationSystemPrompt},
 			{Role: "user", Content: userContent},
-		}, 0.2, 700, true)
+		}, 0.2, 700, 0, true)
 		if callErr != nil {
 			return nil, callErr
 		}

@@ -62,7 +62,7 @@ func getLottoAIInsight(ctx context.Context, conn *sql.DB, latestDrwNo int, frequ
 	content, err := callGroqChat(ctx, apiKey, escalationGroqModel(), []groqChatMessage{
 		{Role: "system", Content: lottoAISystemPrompt},
 		{Role: "user", Content: userContent},
-	}, 0.3, 500, false)
+	}, 0.3, 500, 0, false)
 	if err != nil {
 		return "", false, time.Time{}, err
 	}

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -797,5 +799,41 @@ func TestValidateSectionOutputPrecedence(t *testing.T) {
 				t.Errorf("useFallback = %v, want %v", fallback, tc.wantFallback)
 			}
 		})
+	}
+}
+
+// briefingNewsPromptTokenBudget는 뉴스 브리핑 프롬프트(system+user) 총합이
+// 절대 넘지 말아야 할 근사 토큰 예산이다. 240자 description일 때 실측
+// 6,148토큰, 그 뒤 존댓말 강화/환각 방지 지침이 하나둘 늘어난 뒤 다시
+// 2,464토큰까지 커져 llama-3.1-8b-instant의 분당 한도(6,000 TPM)를 단일
+// 요청만으로 위협하는 문제가 반복적으로 발생했다 — 이 값은 "다음에 규칙을
+// 하나 더 추가했을 때 예산을 넘었는지"를 사람이 매번 로그를 보고 계산하지
+// 않고도 CI/로컬 테스트에서 바로 잡아내기 위한 것이다.
+const briefingNewsPromptTokenBudget = 1500
+
+// TestNewsBriefingPromptFitsWithinTokenBudget은 뉴스 브리핑 프롬프트가
+// briefingNewsPromptTokenBudget을 넘지 않는지 검증한다. 헤드라인 3개
+// 모두를 실제 자연스러운 한국어 문장(공백·문장부호 포함)을 반복해 만든
+// 뒤 title/description 상한(briefingNewsTitleMaxRunes/
+// briefingNewsDescriptionMaxRunes)에 맞춰 잘라 넣는다 — 모든 문자를
+// 공백 없는 한글로만 채우는 인위적인 최악의 경우보다는, 실제로 들어올 수
+// 있는 "상한까지 채워진 자연스러운 헤드라인 3개"에 가까운 시나리오를
+// 기준으로 삼는다.
+func TestNewsBriefingPromptFitsWithinTokenBudget(t *testing.T) {
+	longSentence := strings.Repeat("이번 조사에 따르면 관련 업계 전반에 걸쳐 변화가 있었던 것으로 나타났다. ", 5)
+	news := &NewsData{}
+	for i := 0; i < briefingNewsHeadlineCount; i++ {
+		news.Items = append(news.Items, NewsItem{ID: fmt.Sprintf("id%d", i), Title: longSentence, Description: longSentence})
+	}
+	newsInput := toBriefingNewsInput(news)
+	newsJSON, err := json.Marshal(newsInput)
+	if err != nil {
+		t.Fatalf("marshal news input: %v", err)
+	}
+	userContent := fmt.Sprintf("[뉴스 데이터]: %s\n\n위 데이터를 바탕으로 한국어 뉴스 브리핑 문장을 작성하세요.", newsJSON)
+
+	total := estimateTokenCount(newsSectionSystemPrompt) + estimateTokenCount(userContent)
+	if total > briefingNewsPromptTokenBudget {
+		t.Errorf("뉴스 브리핑 프롬프트 추정 토큰 수 %d가 예산 %d를 초과했습니다 — newsSectionSystemPrompt나 briefingNewsDescriptionMaxRunes/briefingNewsTitleMaxRunes를 더 줄여야 합니다", total, briefingNewsPromptTokenBudget)
 	}
 }

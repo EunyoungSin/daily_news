@@ -280,10 +280,20 @@ type briefingNewsInput struct {
 // 달하는데, 한 요청에 헤드라인 여러 개 분량이 들어가면 금방 누적됩니다 —
 // 240자였을 때 실측 결과 뉴스 브리핑 요청 하나가 6,148토큰까지 늘어나
 // llama-3.1-8b-instant의 분당 한도(6,000 TPM)를 단일 요청만으로 초과하는
-// 것이 확인되어, 100자로 더 줄였습니다. 요약에는 구체적 사실 하나를 더
-// 뽑아낼 만큼의 description만 있으면 충분하지 전체가 필요한 게 아니므로,
-// 문맥을 약간 포기하는 대신 요청당 토큰 비용을 실질적으로 낮춥니다.
-const briefingNewsDescriptionMaxRunes = 100
+// 것이 확인되어 100자로 줄였는데, 그 뒤 존댓말 강화·환각 방지 지침이
+// newsSectionSystemPrompt에 추가되며 프롬프트 총합이 다시 2,464토큰까지
+// 늘어난 것이 재확인되어(TestNewsBriefingPromptFitsWithinTokenBudget 참고)
+// 80자로 한 번 더 줄였습니다. 요약에는 구체적 사실 하나를 더 뽑아낼 만큼의
+// description만 있으면 충분하지 전체가 필요한 게 아니므로, 문맥을 약간
+// 포기하는 대신 요청당 토큰 비용을 실질적으로 낮춥니다.
+const briefingNewsDescriptionMaxRunes = 80
+
+// briefingNewsTitleMaxRunes는 title에 대한 같은 종류의 상한입니다. 실제
+// NewsData.io 헤드라인은 대부분 이보다 훨씬 짧아 평소에는 거의 잘리지
+// 않지만, description처럼 상한이 아예 없으면 드물게 매우 긴 제목 하나가
+// 뉴스 브리핑 프롬프트의 토큰 예산(1,500토큰, 아래 테스트 참고)을 조용히
+// 넘겨버릴 수 있어 방어적으로 상한을 둡니다.
+const briefingNewsTitleMaxRunes = 80
 
 func truncateRunes(s string, maxRunes int) string {
 	runes := []rune(s)
@@ -305,7 +315,7 @@ func toBriefingNewsInput(news *NewsData) *briefingNewsInput {
 	for i, it := range items {
 		result[i] = briefingNewsItem{
 			ID:          it.ID,
-			Title:       annotateNumericUnits(it.Title),
+			Title:       annotateNumericUnits(truncateRunes(it.Title, briefingNewsTitleMaxRunes)),
 			Description: annotateNumericUnits(truncateRunes(it.Description, briefingNewsDescriptionMaxRunes)),
 		}
 	}
@@ -955,15 +965,14 @@ func allowedNewsNumbers(input *briefingNewsInput) []float64 {
 // 됩니다. JSON 파싱이 필요 없어져 callGroqChat도 jsonMode=false로
 // 호출합니다(groq.go 참고).
 const briefingCommonRules = `공통 규칙:
-- 항상 정중한 존댓말(합니다체)로, 반말/명령조·인터넷 은어("ㅋㅋ","대박","헐","인정","TMI" 등)·과장된 표현·이모지 없이 담백하게 작성하세요.
+- 항상 존댓말(합니다체)로, 반말·인터넷 은어("ㅋㅋ","대박","헐","TMI" 등)·이모지 없이 담백하게 작성하세요.
 - 마크다운(#, **, -, 번호 목록)이나 제목 없이 순수한 문장으로만 구성하세요.
-- 데이터에 없는 내용이나 일반 상식(계절적 특성 등 추상적 설명 포함)을 지어내지 마세요.
-- 같은 구절을 문장 안에서 반복하지 마세요(예: "60.42%의 지분을 보유한 60.42%의 지분을 보유한"처럼 같은 어구를 두 번 잇는 것 금지).
-- 응답은 순수 한국어로만 작성하세요. 한자·중국어·일본어 문자는 하나도 섞지 마세요(숫자, USD/KRW 같은 알파벳 약어는 예외).
-- 영어 원문을 그대로 남기지 말고 완전한 한국어 문장으로 재구성하세요(고유명사는 예외).
+- 데이터에 없는 내용을 지어내지 마세요.
+- 같은 구절을 문장 안에서 반복하지 마세요(예: "60.42%의 지분을 보유한 60.42%의 지분을 보유한" 처럼 같은 어구를 두 번 잇는 것 금지).
+- 순수 한국어로만 작성하세요 — 한자·중국어·일본어는 하나도 섞지 말고(숫자, USD/KRW 같은 알파벳 약어는 예외), 영어 원문은 그대로 남기지 말고 완전한 한국어 문장으로 재구성하세요(고유명사는 예외).
 - 응답은 문장 텍스트만 그대로 출력하세요. 따옴표나 설명, 마크다운 코드블록으로 감싸지 마세요.
 
-문장 수: 부연할 구체적 데이터가 있으면 2문장(첫 문장=핵심 사실, 두 번째 문장=데이터 근거 부연), 없으면 1문장만 — 문장 수를 맞추려고 없는 내용을 지어내지 마세요.`
+문장 수: 부연할 구체적 데이터가 있으면 2문장, 없으면 1문장만 — 문장 수를 맞추려고 없는 내용을 지어내지 마세요.`
 
 const weatherSectionSystemPrompt = briefingCommonRules + `
 
@@ -994,6 +1003,18 @@ const exchangeSectionSystemPrompt = briefingCommonRules + `
 // 반복되던 수식어와 부연 설명은 덜어냈습니다. briefingCommonRules에 이미
 // 있는 "반복 구절 금지"는 여기서 다시 쓰지 않습니다.
 //
+// 이후 존댓말 강화(문체 변환 규칙 + 예시), 환각 방지 부연 설명 등이 하나둘
+// 추가되며 총합이 다시 2,464토큰까지 늘어난 것이 재확인되어(뉴스 브리핑
+// 요청 하나가 llama-3.1-8b-instant의 분당 한도를 다시 위협할 수준),
+// TestNewsBriefingPromptFitsWithinTokenBudget으로 예산(1,500토큰)을 아예
+// 테스트로 고정해두고 아래처럼 한 번 더 압축했습니다. 문체 변환 규칙은
+// briefingCommonRules의 존댓말 지침과 중복되던 별도 설명·예시를 걷어내고
+// 한 줄로 줄였고, 근거 없는 내용 금지/두 번째 문장 규칙은 각각의
+// 부연 설명을 지우되 hallucination 사례를 막는 핵심 문구는 그대로
+// 남겼습니다 — 검증은 여전히 validateSectionOutput의 정규식 검사가
+// 최종 방어선이므로, 여기 프롬프트는 "적발 확률을 낮추는" 역할이지
+// 유일한 방어 수단이 아닙니다.
+//
 // 이 프롬프트는 국내/해외 뉴스 브리핑에 공통으로 쓰이므로(newsBriefingCacheKey
 // 참고), 카테고리를 특정 분야로 못박지 않는 범용 페르소나여야 합니다.
 // 예전에는 이 서비스가 Hacker News 전용이었던 시절의 흔적으로 itTermGlossary
@@ -1006,18 +1027,14 @@ const exchangeSectionSystemPrompt = briefingCommonRules + `
 // newsTranslationSystemPrompt)에만 남기고 여기서는 제거했습니다.
 const newsSectionSystemPrompt = briefingCommonRules + `
 
-당신은 다양한 분야(정치, 경제, 사회, 문화, 스포츠, 기술 등)의 뉴스 헤드라인 중 하나를 골라 하루 브리핑의 뉴스 문장을 작성하는 비서입니다. 뉴스의 실제 카테고리나 소재를 임의로 특정 분야(기술, AI, 의료 등)로 바꾸거나 재해석하지 마세요. 각 항목은 title(제목)과 description(설명)으로 구성됩니다. 숫자·명칭·구체적 성과가 있는 항목을 우선 선택하고, "우리의 입장" 같은 추상적 의견 제목이라 구체적 사실이 없다면 건너뛰고 다른 항목을 고르세요.
+당신은 뉴스 헤드라인(title/description) 하나를 골라 브리핑 문장을 쓰는 비서입니다. 카테고리를 임의로 다른 분야로 바꾸지 말고, 숫자·명칭이 있는 항목을 우선 고르세요.
 
 절대 규칙:
-1. 근거 없는 내용 금지 — 요약할 항목의 title과 description을 반드시 먼저 읽고 그 안의 핵심 사건·소재만 다루세요. 원문에 없는 새로운 사건, 기술, 인물, 상황, 회사명·인명·기관명·계약 상대방을 절대 지어내지 마세요(예: 계약 상대방이 description에 없으면 "A사가 B사와 계약"처럼 상대방을 지어내지 말 것). 원문의 실제 주제와 다른 분야로 바꿔 서술하는 것도 금지합니다. 덧붙일 사실이 없으면 title만으로 짧은 문장 하나만 쓰세요.
-2. 숫자 단위/의미 바꿔치기 금지 — 숫자는 원래 의미(가격/금액/인원수 등) 그대로만 쓰고 다른 의미로 재해석하지 마세요(예: "60.42 USD"를 "60.42%"로 둔갑시키는 것 금지). title/description에 %가 없으면 %를 지어내지 마세요.
-3. 최소 1개의 구체적 사실(숫자, 명칭, 사건)을 포함하고, "다양한 논의가 진행 중입니다" 류의 내용 없는 문장은 금지합니다. K/M/B 단위는 이미 한국어로 환산되어 있으니(예: "9B"→"90억") 그 값을 그대로 쓰고 다시 계산하지 마세요.
-4. 두 번째 문장은 첫 문장과 같은 항목의 다른 구체적 사실로 채우고, 부연할 사실이 없으면 1문장만 쓰세요.
-5. 문체 변환 필수 — 뉴스 원문(title/description)이 어떤 문체로 되어 있든(예: "~했다", "~밝혔다", "~이다" 같은 기사체), 브리핑 문장은 반드시 존댓말(합니다/습니다체)로 재작성하세요. 원문의 문체를 그대로 따라가지 말고 항상 문장 끝을 "~합니다", "~습니다", "~했습니다", "~있습니다" 형태로 바꾸세요.
-   예: "~라고 밝혔다" → "~라고 밝혔습니다" / "~와 관련이 있다" → "~와 관련이 있습니다" / "~상향 조정했다" → "~상향 조정했습니다"
+1. title/description에 없는 사건·인물·회사명·계약 상대방을 지어내지 말고, 숫자를 다른 단위(예: %)로 바꿔치기하지 마세요.
+2. 구체적 사실(숫자·명칭) 최소 1개를 포함하고, "다양한 논의가 진행 중입니다" 같은 내용 없는 문장은 금지합니다. K/M/B 단위는 이미 한국어로 환산돼 있으니 그대로 쓰세요.
+3. 원문이 기사체("~했다")여도 항상 합니다체로 재작성하세요.
 
-예시(형식 참고용, 아래 내용을 베끼지 말고 실제 title/description으로 바꿔서 작성 — 실제 기사가 어느 분야든 그 분야 그대로 요약하세요):
-한 스타트업이 12명 규모의 팀으로 5000만 달러 투자를 유치했다는 소식이 전해졌습니다. 이는 직원 1인당 약 400만 달러에 해당하는 규모로, 업계에서도 이례적인 사례로 주목받고 있습니다.`
+예시: 한 스타트업이 5000만 달러 투자를 유치했습니다.`
 
 // maxSectionRegenerations는 어떤 검사(또는 몇 개의 검사)가 실패했는지와
 // 무관하게, 섹션 하나의 콘텐츠 검증 전체 예산을 공유되는 재시도 한 번으로
@@ -1111,6 +1128,17 @@ func validateSectionOutput(combined string, allowedNumbers []float64, groundingT
 const briefingSectionTemperature = 0.3
 const briefingSectionMaxTokens = 300
 
+// briefingSectionFrequencyPenalty: 반복 생성 루프가 max_tokens 상한(300)에
+// 도달해서가 아니라(실제 completionTokens는 로그상 32~145 수준으로 한참
+// 못 미쳤다) 훨씬 짧은 응답 안에서 같은 구절이 그대로 재등장하는 방식으로
+// 계속 관측되어, 그 원인에 직접 대응하는 디코딩 파라미터를 추가했다 —
+// callGroqChat의 frequencyPenalty 문서 주석 참고. 0.3~0.7 구간이 일반적인
+// 권장값이라 중간값인 0.4로 시작한다. 값을 더 올리면 이론적으로는 반복을
+// 더 강하게 억제하지만, 조사, 어미("~습니다") 등 한국어 문장에서 자연스럽게
+// 반복되는 정상적인 토큰까지 회피하게 만들어 문장이 어색해질 위험이
+// 커지므로 보수적으로 시작한다.
+const briefingSectionFrequencyPenalty = 0.4
+
 // generateSectionText는 Groq에 순수 텍스트 응답을 요청합니다(jsonMode=false
 // — 예전에는 {"simple":"...","detailed":"..."} JSON을 요청했지만, 출력
 // 토큰을 줄이고 프롬프트를 단순화하기 위해 detailed 하나만 남기고 JSON
@@ -1129,7 +1157,7 @@ func generateSectionText(ctx context.Context, name, model, systemPrompt, userCon
 		content, callErr := callGroqChat(ctx, apiKey, currentModel, []groqChatMessage{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userContent},
-		}, briefingSectionTemperature, briefingSectionMaxTokens, false)
+		}, briefingSectionTemperature, briefingSectionMaxTokens, briefingSectionFrequencyPenalty, false)
 		if callErr != nil {
 			return "", callErr
 		}

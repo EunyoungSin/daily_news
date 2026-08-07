@@ -379,6 +379,16 @@ func fetchKMAForecastAt(ctx context.Context, nx, ny int, baseDate, baseTime stri
 		return nil, err
 	}
 
+	// 호출부(특히 backfillPastSlotFromEarlierVilageFcstRun의 05시/02시 등
+	// 소급 조회)가 실제로 이 base_date/base_time으로 요청을 보냈는지, 그리고
+	// 그 응답이 진짜 빈 배열(items=0 — 기상청이 그 회차 자체를 아직 채우지
+	// 않았거나 격자 좌표가 어긋난 것으로 의심되는 상황)이었는지, 아니면
+	// 항목은 있었지만 그중 우리가 찾는 슬롯만 없었는지를 구분할 수 있도록
+	// 매 응답의 원본 항목 수를 남긴다 — kmaRequestWithRetry가 에러 자체는
+	// 이미 상세히 반환/로깅하므로(HTTP 상태, resultCode 등), 여기서는 "에러
+	// 없이 성공했지만 내용이 비어 있었다"는, 그와는 별개의 경우를 채운다.
+	log.Printf("날씨(KMA 단기예보): base_date=%s base_time=%s 조회 응답 %d건 수신", baseDate, baseTime, len(items))
+
 	return buildKMAForecast(items, time.Now()), nil
 }
 

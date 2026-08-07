@@ -200,11 +200,12 @@ func groqUsageHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 type groqChatRequest struct {
-	Model          string              `json:"model"`
-	Messages       []groqChatMessage   `json:"messages"`
-	Temperature    float64             `json:"temperature"`
-	MaxTokens      int                 `json:"max_tokens,omitempty"`
-	ResponseFormat *groqResponseFormat `json:"response_format,omitempty"`
+	Model            string              `json:"model"`
+	Messages         []groqChatMessage   `json:"messages"`
+	Temperature      float64             `json:"temperature"`
+	MaxTokens        int                 `json:"max_tokens,omitempty"`
+	FrequencyPenalty float64             `json:"frequency_penalty,omitempty"`
+	ResponseFormat   *groqResponseFormat `json:"response_format,omitempty"`
 }
 
 type groqResponseFormat struct {
@@ -245,12 +246,23 @@ type groqChatResponse struct {
 // 이 상한에 도달할 때까지 계속 토큰을 소비하며 응답이 느려지고 TPM
 // 예산까지 갉아먹는 원인이 될 수 있었다. 짧은 출력을 기대하는 호출부일수록
 // 더 낮은 maxTokens로 이런 루프를 훨씬 일찍 끊어낼 수 있다.
-func callGroqChat(ctx context.Context, apiKey, model string, messages []groqChatMessage, temperature float64, maxTokens int, jsonMode bool) (string, error) {
+//
+// frequencyPenalty(0이면 미전송)는 그 반복 루프 자체(토큰 한도까지 채우는
+// 것과는 별개로, completionTokens가 한도에 한참 못 미치는데도 같은 구절이
+// 응답 안에서 그대로 재등장하는 현상)를 디코딩 단계에서 직접 억제한다 —
+// 이미 나온 토큰의 등장 빈도에 비례해 다음 생성 시 그 토큰의 확률을
+// 낮추므로, "60.42%의 지분을 보유한 60.42%의 지분을 보유한"처럼 같은
+// 구절이 그대로 되풀이되는 경향을 프롬프트 수정 없이도 줄인다. 그래도
+// 완전히 없앨 수는 없으므로 briefing.go의 findRepeatedPhrase가 여전히
+// 최종 방어선으로 남아 있다. 반복이 보고된 적 없는 호출부(로또 인사이트,
+// 뉴스 헤드라인 번역)는 0을 넘겨 기존 동작을 그대로 유지한다.
+func callGroqChat(ctx context.Context, apiKey, model string, messages []groqChatMessage, temperature float64, maxTokens int, frequencyPenalty float64, jsonMode bool) (string, error) {
 	reqBody := groqChatRequest{
-		Model:       model,
-		Messages:    messages,
-		Temperature: temperature,
-		MaxTokens:   maxTokens,
+		Model:            model,
+		Messages:         messages,
+		Temperature:      temperature,
+		MaxTokens:        maxTokens,
+		FrequencyPenalty: frequencyPenalty,
 	}
 	if jsonMode {
 		reqBody.ResponseFormat = &groqResponseFormat{Type: "json_object"}
