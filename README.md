@@ -2,8 +2,8 @@
 
 Go 백엔드가 날씨(국내 도시는 기상청 API, 해외 도시 및 폴백은 Open-Meteo) / 환율(Frankfurter) / 뉴스(NewsData.io)를 오픈 API로 병렬 수집하고, 결과를 DB(Turso/libSQL)에 캐싱합니다. 이 데이터를 바탕으로 Groq LLM이 날씨·환율·뉴스 각 섹션별 한국어 브리핑을 생성하며, 원본 데이터가 바뀌지 않으면 이전 브리핑을 그대로 재사용해 불필요한 AI 호출을 줄입니다.<br>
 
-로또 섹션은 초기 50회차 데이터를 정적 시드로 확보한 뒤, 이후로는 동행복권 공개 API를 통해 매주 최신 회차만 최소한으로 수집해 DB(Turso/libSQL)에 저장합니다(API 접근이 제한될 경우를 대비한 관리자 수동 입력 기능도 갖추고 있습니다).<br>
-이 누적 데이터를 통계로 집계해 Groq AI API로 요약 인사이트를 제공합니다.<br>
+로또 섹션은 초기 50회차 데이터를 정적 시드로 확보한 뒤, 이후로는 공개 GitHub 데이터셋을 통해 매주 최신 회차만 최소한으로 수집해 DB(Turso/libSQL)에 저장합니다(동행복권이 이 서버의 IP를 차단해 직접 호출 대신 이 방식을 씁니다 — 두 소스 모두 실패할 경우를 대비한 관리자 수동 입력 기능도 갖추고 있습니다).<br>
+이 누적 데이터를 통계로 집계해 Groq AI API로 요약 인사이트를 제공하고, 가중 랜덤 샘플링 + 패턴 필터링으로 계산한 "이번 주 추천 번호"도 함께 보여줍니다.<br>
 
 프론트엔드는 React + TypeScript(Vite)로 구성되어 있습니다.<br>
 
@@ -12,7 +12,7 @@ https://daily-news-o9mf.onrender.com/ 에서 확인해 보실 수 있습니다.
 ## 프로젝트 구조
 
 ```
-backend/    Go, 표준 라이브러리 위주 (net/http, sync, context) + Turso/libSQL(database/sql, SQLite 호환) + 오픈API 4종(기상청, Open-Meteo, Frankfuter, NewsData.io) + Groq API + 동행복권 API
+backend/    Go, 표준 라이브러리 위주 (net/http, sync, context) + Turso/libSQL(database/sql, SQLite 호환) + 오픈API 4종(기상청, Open-Meteo, Frankfuter, NewsData.io) + Groq API + 로또 GitHub 데이터셋(폴백: 동행복권 API)
 frontend/   React + TypeScript (Vite)
 ```
 
@@ -339,22 +339,49 @@ GitHub 소스가 계속 실패하면 아래 "관리자 API"로 수동 입력할 
 `X-Admin-Key`가 없거나 틀리면 401을, `ADMIN_SECRET_KEY` 자체가 설정되지 않았으면
 503을 반환합니다 — 두 경우 모두 DB에는 전혀 접근하지 않습니다.
 
+### 4. 이번 주 추천 번호 — 4단계 파이프라인
+
+"이번 주 추천 번호"는 4단계로 계산됩니다(`backend/lotto_recommendation_pipeline.go`):
+
+1. **빈도 집계**: 최근 50회 데이터에서 번호별 출현 횟수와, 마지막 출현
+   이후 몇 회차가 지났는지(미출현 기간)를 계산합니다.
+2. **가중치 정책 선택**: 화면에서 고를 수 있는 세 가지 모드 중 하나로
+   가중 랜덤 샘플링을 합니다 — `uniform`(완전 무작위, 기본값), `trend`
+   (출현 빈도 상위 12개 "핫넘버"에 가중치 부여), `regression`(미출현
+   기간이 가장 긴 12개 "콜드넘버"에 가중치 부여). 이 가중치는 과거 출현
+   패턴을 재미로 반영한 것일 뿐, 실제 당첨 확률은 매 회차 독립적으로
+   균등합니다 — 추첨 기계는 지난 회차를 기억하지 못합니다.
+3. **패턴 필터 검증**: 뽑힌 6개 조합이 홀짝 비율(2:4~4:2), 구간 분포
+   (1-9/10-19/20-29/30-39/40-45 중 한 구간에 4개 이상 몰리지 않음), 총합
+   (100~170), 연속번호(3개 이상 연속 금지), 직전 회차 중복(2개 이상
+   금지) 조건을 모두 만족하는지 확인합니다. 하나라도 벗어나면 2단계로
+   돌아가 재추출하며, 최대 1000회를 재추출해도 못 찾으면 마지막 후보를
+   그대로 쓰고 경고 로그를 남깁니다(실제로는 무작위 6개 조합 대부분이
+   이미 통과하므로 이 상한에 도달하는 경우는 극히 드뭅니다).
+4. **결과 출력**: 통과한 세트 1개를 홀짝비/합계/구간분포/직전회차중복
+   통계와 함께 오름차순으로 반환합니다.
+
+캐싱은 `(cycle_start_date, mode)` 복합키로 이루어집니다 — 같은 주기(cycle)
+안에서 화면에서 uniform → trend → uniform으로 모드를 오가도, 각 모드가
+처음 계산됐을 때의 세트를 독립적으로 캐싱해뒀다가 그대로 재사용합니다
+(다시 계산하지 않습니다). 회차가 갱신되거나 이미 저장된 회차의 오타가
+정정되어 `based_on_data_hash`가 지금의 frequency와 달라지면, 그 시점에
+조회되는 모드부터 순차적으로 재계산됩니다 — 다른 모드의 캐시는 그
+모드가 다음에 조회될 때 각자 독립적으로 무효화됩니다.
+
+이번 회차 판매가 마감되는 토요일 20:00 KST부터 다음 회차 번호가 공개되는
+일요일 06:00 KST까지는 추천을 아예 숨기고(`isBlackout: true`)
+`nextAvailableAt`으로 다음 공개 시각만 안내합니다.
+
+`GET /api/lotto?mode={uniform|trend|regression}`로 원하는 모드를 지정할 수
+있고, 값이 없거나 잘못된 값이면 `uniform`으로 대체됩니다.
+
 ### 그 외
 
 - 통계(번호별 출현 횟수, 최근 10회 출현 번호)는 Go가 아니라 DB의
   `UNION ALL` + `GROUP BY`로 집계합니다.
 - AI 인사이트는 `ai_insight_cache` 테이블에 `latest_drw_no` 기준으로 캐싱되어,
   새 회차가 추가되기 전까지는 Groq를 다시 호출하지 않습니다.
-- 번호 추천(🔥 최근 출현 많음 / ⚖️ 중간 빈도 / ❄️ 최근 출현 적음)은 최근
-  50회 출현 빈도로 1~45를 15개씩 세 구간으로 나눈 뒤, 각 구간에서 무작위로
-  2개씩 뽑아 총 6개를 보여줍니다 — 어느 구간이 통계적으로 더 유리하다는
-  뜻이 아니라 매번 다른 조합을 보여주기 위한 장치일 뿐입니다(로또 추첨은
-  매번 독립적인 사건이라 과거 출현 횟수가 다음 회차 확률에 영향을 주지
-  않습니다). 이번 회차 판매가 마감되는 토요일 20:00 KST부터 다음 회차 번호가
-  공개되는 일요일 06:00 KST까지는 추천을 아예 숨기고(`isBlackout: true`)
-  `nextAvailableAt`으로 다음 공개 시각만 안내합니다. 같은 주기(cycle) 안에서는
-  누가 먼저 요청하든 `lotto_recommendation` 테이블에 `cycle_start_date`
-  (해당 일요일 날짜) 기준으로 캐싱된 동일한 번호를 보여줍니다.
 
 ### DB 스키마
 
@@ -374,11 +401,20 @@ CREATE TABLE ai_insight_cache (
   generated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+-- (cycle_start_date, mode) 복합 기본키 — 사이클마다, 그리고 그 사이클
+-- 안에서 선택된 모드마다 정확히 한 행만 존재한다. numbers/stats_json은
+-- 세트 1개(번호 6개와 그 통계)를 담는다. number_groups는 예전 방식의
+-- 흔적으로 더 이상 쓰지 않지만 컬럼 자체는 남아있다.
 CREATE TABLE lotto_recommendation (
-  cycle_start_date TEXT PRIMARY KEY,
+  cycle_start_date TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'uniform',
+  based_on_drw_no INTEGER NOT NULL DEFAULT 0,
+  based_on_data_hash TEXT NOT NULL DEFAULT '',
   numbers TEXT NOT NULL,
-  number_groups TEXT NOT NULL,
-  generated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  number_groups TEXT NOT NULL DEFAULT '',
+  stats_json TEXT NOT NULL DEFAULT '{}',
+  generated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (cycle_start_date, mode)
 );
 
 -- 날씨/환율/뉴스 AI 브리핑 문단 캐시. section 값은 "weather", "exchange",
@@ -594,7 +630,8 @@ AI 브리핑 카드만 스켈레톤 상태로 대기시킵니다.
   독립적으로 캐싱됩니다(`briefing_section_cache`의 `section` 값이 `news:{region}:{category}` 형태).
 
 `GET /api/lotto`도 `/api/dashboard`와 별도의 단발성 JSON 응답입니다(NDJSON 아님).
-같은 `success`/`durationMs`/`error?`/`data?` 형태를 따르며, `data`는 다음 필드를 가집니다.
+같은 `success`/`durationMs`/`error?`/`data?` 형태를 따르며, `?mode={uniform|trend|regression}`
+쿼리 파라미터를 받습니다(위 "이번 주 추천 번호" 참고). `data`는 다음 필드를 가집니다.
 
 - `latest`: 최신 회차 1건 (`drwNo`, `drwDate`, `numbers`, `bonus`)
 - `history`: 최근 50회 목록, 최신순
@@ -602,10 +639,12 @@ AI 브리핑 카드만 스켈레톤 상태로 대기시킵니다.
 - `recentAppeared`: 최근 10회 동안 출현한 번호(중복 제거)
 - `aiInsight`: `{ available, text, cached, generatedAt? }` — `available`이 `false`면
   `text`는 안내 메시지이고 나머지 필드는 무시하면 됩니다.
-- `recommendation`: `{ isBlackout, numbers?, cycleStartDate?, generatedAt?, nextAvailableAt? }` —
+- `recommendation`: `{ isBlackout, mode?, set?, cycleStartDate?, generatedAt?, nextAvailableAt? }` —
   `isBlackout`이 `true`면 판매 마감~신규 회차 공개 사이라 번호 추천이
-  숨겨진 상태이고, `nextAvailableAt`에 다음 공개 시각이 담깁니다(위 "로또
-  섹션" 참고).
+  숨겨진 상태이고, `nextAvailableAt`에 다음 공개 시각이 담깁니다. 그 외에는
+  `mode`(요청받은 가중치 정책)와 `set: { numbers, stats }`가 채워집니다 —
+  `stats`는 `{ oddEvenRatio, sum, bandDistribution, overlapWithPrevious }`
+  형태입니다(위 "이번 주 추천 번호" 참고).
 
 `GET /healthz`는 DB/외부 API를 전혀 건드리지 않고 프로세스가 요청을 받을 수
 있으면 즉시 200을 반환합니다 — Render 등 플랫폼 헬스체크 전용이며(위

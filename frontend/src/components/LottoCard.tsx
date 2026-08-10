@@ -1,6 +1,7 @@
 import { lazy, Suspense, useState } from 'react'
-import type { LottoSection } from '../types'
+import type { LottoRecommendationMode, LottoSection } from '../types'
 import { usePulseOnChange } from '../hooks/usePulseOnChange'
+import { splitSentences } from '../utils/sentenceSplit'
 import LottoBall from './lotto/LottoBall'
 import LottoRecommendation from './lotto/LottoRecommendation'
 import CollectionToggle from './lotto/CollectionToggle'
@@ -16,6 +17,8 @@ interface Props {
   loading: boolean
   error: string | null
   onRetry: () => Promise<void>
+  recommendationMode: LottoRecommendationMode
+  onRecommendationModeChange: (mode: LottoRecommendationMode) => void
 }
 
 function formatUpdatedAt(iso: string): string {
@@ -46,7 +49,14 @@ function LottoHeatmapSkeleton() {
   )
 }
 
-export default function LottoCard({ section, loading, error, onRetry }: Props) {
+export default function LottoCard({
+  section,
+  loading,
+  error,
+  onRetry,
+  recommendationMode,
+  onRecommendationModeChange,
+}: Props) {
   const [retrying, setRetrying] = useState(false)
   const pulsing = usePulseOnChange(section?.data?.latest.drwNo)
 
@@ -139,7 +149,11 @@ export default function LottoCard({ section, loading, error, onRetry }: Props) {
               </div>
             </div>
 
-            <LottoRecommendation recommendation={section.data.recommendation} />
+            <LottoRecommendation
+              recommendation={section.data.recommendation}
+              mode={recommendationMode}
+              onModeChange={onRecommendationModeChange}
+            />
 
             <div className="lotto__section">
               <h3 className="lotto__section-title">최근 10회 출현 번호</h3>
@@ -156,7 +170,9 @@ export default function LottoCard({ section, loading, error, onRetry }: Props) {
               </h3>
               {section.data.aiInsight.available ? (
                 <>
-                  <p className="lotto__insight-text">{section.data.aiInsight.text}</p>
+                  {splitSentences(section.data.aiInsight.text).map((sentence, i) => (
+                    <p className="lotto__insight-text" key={i}>{sentence}</p>
+                  ))}
                   {section.data.aiInsight.generatedAt && (
                     <div className="briefing__meta">
                       <span>마지막 업데이트: {formatUpdatedAt(section.data.aiInsight.generatedAt)}</span>

@@ -76,7 +76,14 @@ export default function App() {
   const retryExchange = useCallback(() => retrySection('exchange'), [retrySection])
   const retryBriefing = useCallback(() => retrySection('briefing'), [retrySection])
 
-  const { section: lottoSection, loading: lottoLoading, error: lottoError, retry: retryLotto } = useLotto()
+  const {
+    section: lottoSection,
+    loading: lottoLoading,
+    error: lottoError,
+    retry: retryLotto,
+    mode: lottoRecommendationMode,
+    setMode: setLottoRecommendationMode,
+  } = useLotto()
 
   const { section: newsSection, loading: newsLoading, error: newsError, retry: retryNews } = useNews(
     newsCategory,
@@ -263,7 +270,14 @@ export default function App() {
       {/* 위 대시보드 그리드와는 독립적이다 — 자체 fetch, 자체
           로딩/에러 상태, 자체 재시도를 갖는다. */}
       <div className="dashboard-grid dashboard-grid--lotto">
-        <LottoCard section={lottoSection} loading={lottoLoading} error={lottoError} onRetry={retryLotto} />
+        <LottoCard
+          section={lottoSection}
+          loading={lottoLoading}
+          error={lottoError}
+          onRetry={retryLotto}
+          recommendationMode={lottoRecommendationMode}
+          onRecommendationModeChange={setLottoRecommendationMode}
+        />
       </div>
     </div>
   )

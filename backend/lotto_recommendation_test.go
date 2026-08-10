@@ -82,82 +82,55 @@ func TestNextLottoAvailableAt(t *testing.T) {
 	}
 }
 
-func TestComputeRecommendationNumbers(t *testing.T) {
-	frequency := make(map[int]int, 45)
-	for n := 1; n <= 45; n++ {
-		frequency[n] = 45 - n // 1이 가장 많이 나오고 45가 가장 적게 나옴
+func TestEncodeDecodeRecommendationSetRoundTrip(t *testing.T) {
+	original := LottoRecommendationSet{
+		Numbers: []int{3, 12, 19, 27, 33, 41},
+		Stats: LottoRecommendationStats{
+			OddEvenRatio:        "3:3",
+			Sum:                 135,
+			BandDistribution:    map[string]int{"1-9": 1, "10-19": 1, "20-29": 1, "30-39": 1, "40-45": 2},
+			OverlapWithPrevious: 1,
+		},
 	}
 
-	result := computeRecommendationNumbers(frequency)
-
-	if len(result) != 6 {
-		t.Fatalf("expected 6 numbers, got %d", len(result))
+	numbersJSON, statsJSON, err := encodeRecommendationSet(original)
+	if err != nil {
+		t.Fatalf("encode error: %v", err)
 	}
 
-	seen := make(map[int]bool)
-	groupCounts := map[string]int{}
-	for _, n := range result {
-		if n.Number < 1 || n.Number > 45 {
-			t.Errorf("number %d out of range 1-45", n.Number)
-		}
-		if seen[n.Number] {
-			t.Errorf("duplicate number %d", n.Number)
-		}
-		seen[n.Number] = true
-		groupCounts[n.Group]++
+	decoded, err := decodeRecommendationSet(numbersJSON, statsJSON)
+	if err != nil {
+		t.Fatalf("decode error: %v", err)
 	}
-
-	for _, group := range []string{recommendationGroupHot, recommendationGroupMid, recommendationGroupCold} {
-		if groupCounts[group] != 2 {
-			t.Errorf("expected exactly 2 numbers in group %q, got %d", group, groupCounts[group])
+	if len(decoded.Numbers) != len(original.Numbers) {
+		t.Fatalf("decoded.Numbers length mismatch")
+	}
+	for j := range original.Numbers {
+		if decoded.Numbers[j] != original.Numbers[j] {
+			t.Errorf("decoded.Numbers[%d] = %d, want %d", j, decoded.Numbers[j], original.Numbers[j])
 		}
 	}
-
-	// frequency[n] = 45-n이므로, 구간 1(hot, 빈도 상위 15개)은 1-15번,
-	// 구간 2(mid)는 16-30번, 구간 3(cold)은 31-45번이 된다.
-	for _, n := range result {
-		switch n.Group {
-		case recommendationGroupHot:
-			if n.Number < 1 || n.Number > 15 {
-				t.Errorf("hot number %d not in expected band 1-15", n.Number)
-			}
-		case recommendationGroupMid:
-			if n.Number < 16 || n.Number > 30 {
-				t.Errorf("mid number %d not in expected band 16-30", n.Number)
-			}
-		case recommendationGroupCold:
-			if n.Number < 31 || n.Number > 45 {
-				t.Errorf("cold number %d not in expected band 31-45", n.Number)
-			}
+	// LottoRecommendationStats는 map 필드(BandDistribution)를 담고
+	// 있어 == 비교가 불가능하므로 필드별로 확인한다.
+	if decoded.Stats.OddEvenRatio != original.Stats.OddEvenRatio ||
+		decoded.Stats.Sum != original.Stats.Sum ||
+		decoded.Stats.OverlapWithPrevious != original.Stats.OverlapWithPrevious {
+		t.Errorf("decoded.Stats = %+v, want %+v", decoded.Stats, original.Stats)
+	}
+	for band, count := range original.Stats.BandDistribution {
+		if decoded.Stats.BandDistribution[band] != count {
+			t.Errorf("decoded.Stats.BandDistribution[%q] = %d, want %d", band, decoded.Stats.BandDistribution[band], count)
 		}
 	}
 }
 
-func TestEncodeDecodeRecommendationNumbersRoundTrip(t *testing.T) {
-	original := []LottoRecommendationNumber{
-		{Number: 3, Group: "hot"},
-		{Number: 12, Group: "hot"},
-		{Number: 19, Group: "mid"},
-		{Number: 27, Group: "mid"},
-		{Number: 33, Group: "cold"},
-		{Number: 41, Group: "cold"},
-	}
-
-	numbersCSV, groupsCSV := encodeRecommendationNumbers(original)
-	if numbersCSV != "3,12,19,27,33,41" {
-		t.Errorf("numbersCSV = %q, want %q", numbersCSV, "3,12,19,27,33,41")
-	}
-
-	decoded, err := decodeRecommendationNumbers(numbersCSV, groupsCSV)
-	if err != nil {
-		t.Fatalf("decode error: %v", err)
-	}
-	if len(decoded) != len(original) {
-		t.Fatalf("decoded length = %d, want %d", len(decoded), len(original))
-	}
-	for i := range original {
-		if decoded[i] != original[i] {
-			t.Errorf("decoded[%d] = %+v, want %+v", i, decoded[i], original[i])
-		}
+func TestDecodeRecommendationSetRejectsOldArrayFormat(t *testing.T) {
+	// 예전(다중 세트) 형식 — 지금의 단일 세트 형식으로는 타입이 맞지
+	// 않아 디코딩에 실패해야 한다(lookupLottoRecommendation이 이를 낡은
+	// 캐시로 취급해 재계산하도록 만드는 안전장치).
+	numbersJSON := `[[1,2,3,4,5,6],[7,8,9,10,11,12]]`
+	statsJSON := `[{"oddEvenRatio":"3:3","sum":21,"bandDistribution":{},"overlapWithPrevious":0}]`
+	if _, err := decodeRecommendationSet(numbersJSON, statsJSON); err == nil {
+		t.Error("expected an error when decoding the old multi-set array format, got nil")
 	}
 }

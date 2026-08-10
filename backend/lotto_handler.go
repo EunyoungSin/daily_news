@@ -16,6 +16,17 @@ import (
 // 데이터를 읽어서 보여줄 뿐이다.
 const lottoTimeout = 15 * time.Second
 
+// parseLottoMode는 ?mode= 쿼리 파라미터를 검증한다 — trend/regression/
+// uniform 중 하나가 아니면(값이 없는 경우 포함) 조용히 기본값
+// uniform으로 대체한다. uniform이 기본값인 이유는 다른 모드들과 달리
+// 통계적으로 편향이 없기 때문이다.
+func parseLottoMode(raw string) string {
+	if isValidLottoMode(raw) {
+		return raw
+	}
+	return lottoModeUniform
+}
+
 func lottoHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	w.Header().Set("Content-Type", "application/json")
@@ -37,7 +48,8 @@ func lottoHandler(w http.ResponseWriter, r *http.Request) {
 
 	isCollecting := lottoIsCollecting()
 
-	data, err := buildLottoData(ctx, db)
+	mode := parseLottoMode(r.URL.Query().Get("mode"))
+	data, err := buildLottoData(ctx, db, mode)
 	durationMs := time.Since(start).Milliseconds()
 
 	if err != nil {
@@ -76,7 +88,7 @@ func lottoHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func buildLottoData(ctx context.Context, conn *sql.DB) (*LottoData, error) {
+func buildLottoData(ctx context.Context, conn *sql.DB, recommendationMode string) (*LottoData, error) {
 	history, err := queryLottoHistory(ctx, conn, lottoHistoryWindow)
 	if err != nil {
 		return nil, err
@@ -113,7 +125,7 @@ func buildLottoData(ctx context.Context, conn *sql.DB) (*LottoData, error) {
 		}
 	}
 
-	recommendation := getLottoRecommendation(ctx, conn, frequency, latest.DrwNo, time.Now())
+	recommendation := getLottoRecommendation(ctx, conn, history, frequency, latest.DrwNo, recommendationMode, time.Now())
 
 	return &LottoData{
 		Latest:         latest,

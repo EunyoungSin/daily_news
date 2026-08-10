@@ -273,34 +273,149 @@ CREATE TABLE IF NOT EXISTS briefing_section_cache (
 	generated_at TEXT DEFAULT CURRENT_TIMESTAMP
 )`
 
-// cycle_start_date는 "이번 주" 추천을 식별하는 일요일 06:00 KST 값이며
-// (lotto_recommendation.go 참고) 기본키다 — 사이클마다 정확히 한 행만
-// 존재한다. 같은 사이클 안에서 다시 요청했을 때 캐시를 그대로 재사용할지는
-// cycle_start_date만으로 정하지 않고, based_on_data_hash(그 행의 통계
-// 계산에 실제로 쓰인 frequency 입력의 해시)가 지금의 frequency와 같은지도
-// 함께 본다 — 정상적인 주간 흐름(매주 새 사이클 시작 시점에 최신 회차도
-// 함께 바뀜)에서는 사실상 항상 같지만, 다음 두 예외 상황에서는 어긋날 수
-// 있어 이 컬럼이 필요하다: (1) 자동 수집이 막혀 있다가 같은 사이클 도중에
-// 관리자가 새 회차를 수동 입력하는 경우, (2) 새 회차 없이 이미 저장된
-// 회차의 오타를 나중에 정정하는 경우(latest_drw_no는 그대로라 based_on_drw_no
-// 비교만으로는 못 잡아내지만, 정정으로 frequency 자체가 바뀌므로 해시는
-// 달라진다). based_on_drw_no는 캐시 유효성 판단에는 더 이상 쓰이지 않고,
-// 로그에 "어느 회차 기준으로 계산됐는지"를 보여주는 용도로만 남아있다.
+// (cycle_start_date, mode)가 복합 기본키다 — 사이클마다, 그리고 그
+// 사이클 안에서 선택된 모드마다 정확히 한 행만 존재한다. 이 복합키
+// 덕분에 사용자가 화면에서 uniform -> trend -> uniform으로 오가도 각
+// 모드의 캐시가 서로 다른 행에 독립적으로 남아있다가 그대로 재사용된다
+// (예전에는 cycle_start_date 단독 기본키라 한 사이클에 모드 하나의
+// 세트만 저장할 수 있어서, 모드를 바꿀 때마다 이전 모드의 캐시를
+// 덮어쓸 수밖에 없었다).
 //
-// number_groups는 원래 요구사항에는 없었지만, 캐시 히트 시 그룹 배지
-// (🔥/⚖️/❄️)를 올바르게 표시하려면 필요하다: 각 번호가 어느 그룹에서
-// 뽑혔는지를 저장해두지 않으면, 그 정보는 생성 요청이 끝나는 순간 사라져
-// 버리고, 나중에 그 시점의 빈도 데이터로 다시 유추하면 번호가 처음
-// 생성되었을 때 실제로 보여준 내용과 달라질 수 있다.
+// 같은 (사이클, 모드) 조합을 다시 요청했을 때 캐시를 그대로 재사용할지는
+// based_on_data_hash(그 행의 통계 계산에 실제로 쓰인 frequency 입력의
+// 해시)가 지금의 frequency와 같은지로 판단한다 — 정상적인 주간 흐름
+// (매주 새 사이클 시작 시점에 최신 회차도 함께 바뀜)에서는 사실상 항상
+// 같지만, 다음 두 예외 상황에서는 어긋날 수 있어 이 컬럼이 필요하다:
+// (1) 자동 수집이 막혀 있다가 같은 사이클 도중에 관리자가 새 회차를
+// 수동 입력하는 경우, (2) 새 회차 없이 이미 저장된 회차의 오타를 나중에
+// 정정하는 경우(latest_drw_no는 그대로라 based_on_drw_no 비교만으로는
+// 못 잡아내지만, 정정으로 frequency 자체가 바뀌므로 해시는 달라진다).
+// 이 해시는 모드와 무관하게 frequency만으로 계산되므로(모드는 이미 기본키
+// 자체가 구분해준다), 회차가 갱신되면 캐시된 모든 모드가 (각자 다음에
+// 조회될 때) 독립적으로 무효화된다. based_on_drw_no는 캐시 유효성
+// 판단에는 더 이상 쓰이지 않고, 로그에 "어느 회차 기준으로 계산됐는지"를
+// 보여주는 용도로만 남아있다.
+//
+// numbers/stats_json은 세트 1개(번호 6개와 그 통계)를 담는다 —
+// lotto_recommendation.go의 encodeRecommendationSet 참고. numbers는
+// "[1,5,12,23,34,41]" 같은 단순 JSON 배열이고, stats_json은 같은 세트의
+// 통계(홀짝비/합계/구간분포/직전회차중복) JSON 객체다. 캐시 히트 시에도
+// 이 통계를 다시 계산하지 않고 그대로 재사용하기 위해 stats_json이
+// 필요하다 — 재계산하면 based_on_data_hash가 가리키는 시점의 frequency가
+// 아니라 그 이후 바뀐 최신 frequency를 참고해 실제로 보여준 세트와
+// 어긋나는 통계가 나올 수 있다.
+//
+// number_groups는 예전 "빈도 상/중/하 구간에서 2개씩 뽑기" 방식에서 각
+// 번호가 어느 그룹(hot/mid/cold)이었는지 저장하던 컬럼이다 — 지금의
+// 4단계 파이프라인(가중 샘플링 + 패턴 필터)에는 "번호 하나하나의 그룹"이라는
+// 개념 자체가 없으므로 더 이상 쓰지 않는다. 이미 배포된 테이블에서 이
+// 컬럼만 안전하게 지울 방법이 마땅치 않아(NOT NULL 제약을 다른 방식으로
+// 되돌리는 등 번거로움만 있고 이득은 없다) 컬럼 자체는 남겨두되, 새로
+// 쓰는 행에는 항상 빈 문자열을 넣는다.
 const createLottoRecommendationTable = `
 CREATE TABLE IF NOT EXISTS lotto_recommendation (
-	cycle_start_date TEXT PRIMARY KEY,
+	cycle_start_date TEXT NOT NULL,
+	mode TEXT NOT NULL DEFAULT 'uniform',
 	based_on_drw_no INTEGER NOT NULL DEFAULT 0,
 	based_on_data_hash TEXT NOT NULL DEFAULT '',
 	numbers TEXT NOT NULL,
-	number_groups TEXT NOT NULL,
-	generated_at TEXT DEFAULT CURRENT_TIMESTAMP
+	number_groups TEXT NOT NULL DEFAULT '',
+	stats_json TEXT NOT NULL DEFAULT '{}',
+	generated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (cycle_start_date, mode)
 )`
+
+// lottoRecommendationHasCompositePrimaryKey는 lotto_recommendation의
+// PRIMARY KEY가 이미 (cycle_start_date, mode) 복합키인지 확인한다 —
+// PRAGMA table_info가 각 컬럼의 pk 순번(기본키가 아니면 0, 기본키면
+// 1부터 시작하는 순번)을 알려주므로, pk > 0인 컬럼이 2개 이상이면
+// 복합키다. 브랜드 뉴 데이터베이스는 createLottoRecommendationTable이
+// 이미 복합키로 테이블을 만들어두므로 항상 true다 — 이 함수가 false를
+// 반환하는 경우는 오직 이 마이그레이션 이전에 cycle_start_date 단독
+// 기본키로 만들어진 이미 배포된 테이블뿐이다.
+func lottoRecommendationHasCompositePrimaryKey(conn *sql.DB) (bool, error) {
+	rows, err := conn.Query(`PRAGMA table_info(lotto_recommendation)`)
+	if err != nil {
+		return false, fmt.Errorf("read lotto_recommendation schema: %w", err)
+	}
+	defer rows.Close()
+
+	pkColumns := 0
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, colType string
+		var dfltValue sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+			return false, fmt.Errorf("scan lotto_recommendation schema: %w", err)
+		}
+		if pk > 0 {
+			pkColumns++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("read lotto_recommendation schema: %w", err)
+	}
+	return pkColumns >= 2, nil
+}
+
+// migrateLottoRecommendationToCompositeKey는 lotto_recommendation이 아직
+// 예전의 cycle_start_date 단독 기본키를 쓰고 있다면 (cycle_start_date,
+// mode) 복합 기본키로 다시 만든다. SQLite/libSQL은 ALTER TABLE로 기본키를
+// 바로 바꿀 수 없으므로, 표준적인 "새 테이블 생성 -> 데이터 복사 -> 옛
+// 테이블 삭제 -> 이름 변경" 절차를 트랜잭션으로 묶어서 쓴다 — 중간에
+// 실패해도 옛 테이블과 새 테이블이 동시에 존재하거나 데이터가 유실되는
+// 상태로 남지 않는다.
+//
+// 예전 테이블은 cycle_start_date당 최대 한 행만 가질 수 있었으므로(그게
+// 그때의 기본키였다), 그 행을 그대로 복사해 넣어도 새 복합키 제약을
+// 위반할 수 없다 — 어떤 모드였든 그 모드 하나로 유일한 행이 된다.
+func migrateLottoRecommendationToCompositeKey(conn *sql.DB) error {
+	hasComposite, err := lottoRecommendationHasCompositePrimaryKey(conn)
+	if err != nil {
+		return err
+	}
+	if hasComposite {
+		return nil
+	}
+
+	log.Println("로또: lotto_recommendation을 (cycle_start_date, mode) 복합 기본키로 마이그레이션합니다")
+
+	tx, err := conn.Begin()
+	if err != nil {
+		return fmt.Errorf("begin lotto_recommendation PK migration: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`
+		CREATE TABLE lotto_recommendation_new (
+			cycle_start_date TEXT NOT NULL,
+			mode TEXT NOT NULL DEFAULT 'uniform',
+			based_on_drw_no INTEGER NOT NULL DEFAULT 0,
+			based_on_data_hash TEXT NOT NULL DEFAULT '',
+			numbers TEXT NOT NULL,
+			number_groups TEXT NOT NULL DEFAULT '',
+			stats_json TEXT NOT NULL DEFAULT '{}',
+			generated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (cycle_start_date, mode)
+		)`); err != nil {
+		return fmt.Errorf("create lotto_recommendation_new: %w", err)
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO lotto_recommendation_new
+			(cycle_start_date, mode, based_on_drw_no, based_on_data_hash, numbers, number_groups, stats_json, generated_at)
+		SELECT cycle_start_date, mode, based_on_drw_no, based_on_data_hash, numbers, number_groups, stats_json, generated_at
+		FROM lotto_recommendation`); err != nil {
+		return fmt.Errorf("copy lotto_recommendation rows: %w", err)
+	}
+	if _, err := tx.Exec(`DROP TABLE lotto_recommendation`); err != nil {
+		return fmt.Errorf("drop old lotto_recommendation: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE lotto_recommendation_new RENAME TO lotto_recommendation`); err != nil {
+		return fmt.Errorf("rename lotto_recommendation_new: %w", err)
+	}
+
+	return tx.Commit()
+}
 
 // ensureColumnExists는 `table`에 `column`이 없으면 alterColumnDDL(예:
 // "based_on_drw_no INTEGER NOT NULL DEFAULT 0")로 ALTER TABLE ADD COLUMN을
@@ -444,6 +559,18 @@ func migrate(conn *sql.DB) error {
 	}
 	if err := ensureColumnExists(conn, "lotto_recommendation", "based_on_data_hash", "based_on_data_hash TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("migrate lotto_recommendation: %w", err)
+	}
+	if err := ensureColumnExists(conn, "lotto_recommendation", "mode", "mode TEXT NOT NULL DEFAULT 'uniform'"); err != nil {
+		return fmt.Errorf("migrate lotto_recommendation: %w", err)
+	}
+	if err := ensureColumnExists(conn, "lotto_recommendation", "stats_json", "stats_json TEXT NOT NULL DEFAULT '{}'"); err != nil {
+		return fmt.Errorf("migrate lotto_recommendation: %w", err)
+	}
+	// 반드시 위 ensureColumnExists 호출들 뒤에 온다 — 이 마이그레이션이
+	// 옛 테이블의 모든 컬럼(mode, stats_json 포함)을 새 테이블로 그대로
+	// 복사하므로, 그 컬럼들이 이미 존재해야 한다.
+	if err := migrateLottoRecommendationToCompositeKey(conn); err != nil {
+		return fmt.Errorf("migrate lotto_recommendation to composite key: %w", err)
 	}
 	if _, err := conn.Exec(createWeatherSlotCacheTable); err != nil {
 		return fmt.Errorf("create weather_slot_cache: %w", err)

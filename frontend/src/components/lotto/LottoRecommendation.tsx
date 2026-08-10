@@ -1,26 +1,33 @@
 import { useEffect, useState } from 'react'
-import type { LottoRecommendation, LottoRecommendationGroup, LottoRecommendationNumber } from '../../types'
+import type { LottoRecommendation, LottoRecommendationMode, LottoRecommendationSet } from '../../types'
 import LottoBall from './LottoBall'
 
-const RECOMMENDATION_GROUP_ICON: Record<LottoRecommendationGroup, string> = {
-  hot: '🔥',
-  mid: '⚖️',
-  cold: '❄️',
-}
+const MODE_OPTIONS: { value: LottoRecommendationMode; label: string }[] = [
+  { value: 'uniform', label: '완전 무작위' },
+  { value: 'trend', label: '핫넘버 우선' },
+  { value: 'regression', label: '콜드넘버 우선' },
+]
 
-const RECOMMENDATION_GROUP_LABEL: Record<LottoRecommendationGroup, string> = {
-  hot: '최근 출현 많음',
-  mid: '중간 빈도',
-  cold: '최근 출현 적음',
-}
+const BAND_LABELS = ['1-9', '10-19', '20-29', '30-39', '40-45']
 
-function RecommendationBall({ n }: { n: LottoRecommendationNumber }) {
+// 4단계 파이프라인이 통과시킨 세트 하나 — 번호 6개와 그 통계(홀짝비,
+// 합계, 구간분포, 직전 회차와의 중복)를 함께 보여준다. 어떤 세트가
+// "더 나은" 세트라는 뜻이 아니라, 그 세트가 3단계 패턴 필터의 어떤
+// 조건들을 만족했는지 사실을 보여줄 뿐이다.
+function RecommendationSetCard({ set }: { set: LottoRecommendationSet }) {
+  const bandSummary = BAND_LABELS.map((label) => `${label}: ${set.stats.bandDistribution[label] ?? 0}`).join(' · ')
+
   return (
-    <div className="lotto__rec-ball-wrap">
-      <span className="lotto__rec-group-icon" title={RECOMMENDATION_GROUP_LABEL[n.group]} aria-hidden="true">
-        {RECOMMENDATION_GROUP_ICON[n.group]}
-      </span>
-      <LottoBall n={n.number} />
+    <div className="lotto__rec-set">
+      <div className="lotto__balls">
+        {set.numbers.map((n) => (
+          <LottoBall n={n} key={n} />
+        ))}
+      </div>
+      <div className="lotto__rec-set-stats">
+        홀짝 {set.stats.oddEvenRatio} · 합계 {set.stats.sum} · 직전 회차 중복 {set.stats.overlapWithPrevious}개
+      </div>
+      <div className="lotto__rec-set-stats lotto__rec-set-stats--bands">구간분포 {bandSummary}</div>
     </div>
   )
 }
@@ -58,12 +65,37 @@ function useCountdownLabel(targetIso: string | undefined): string {
   return label
 }
 
-export default function LottoRecommendation({ recommendation }: { recommendation: LottoRecommendation }) {
+interface Props {
+  recommendation: LottoRecommendation
+  mode: LottoRecommendationMode
+  onModeChange: (mode: LottoRecommendationMode) => void
+}
+
+export default function LottoRecommendation({ recommendation, mode, onModeChange }: Props) {
   const countdown = useCountdownLabel(recommendation.isBlackout ? recommendation.nextAvailableAt : undefined)
+  // trend/regression은 이름만 보면 예측 알고리즘처럼 들릴 수 있어, 과거
+  // 출현 패턴을 재미로 반영한 것일 뿐이라는 설명을 눈에 잘 띄게 붙인다.
+  const showModeCaveat = mode === 'trend' || mode === 'regression'
 
   return (
     <div className="lotto__section lotto__recommendation">
       <h3 className="lotto__section-title">🎲 이번 주 추천 번호</h3>
+
+      <label className="lotto__rec-mode-label">
+        추천 방식
+        <select value={mode} onChange={(e) => onModeChange(e.target.value as LottoRecommendationMode)}>
+          {MODE_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      {showModeCaveat && (
+        <p className="lotto__rec-mode-caveat">
+          ⚠️ 과거 출현 패턴을 재미로 반영한 방식일 뿐, 실제 확률과는 무관합니다.
+        </p>
+      )}
 
       {recommendation.isBlackout ? (
         <div className="lotto__rec-blackout">
@@ -74,16 +106,11 @@ export default function LottoRecommendation({ recommendation }: { recommendation
           {countdown && <p className="lotto__rec-countdown">{countdown}</p>}
         </div>
       ) : (
-        <div className="lotto__balls">
-          {recommendation.numbers?.map((n) => (
-            <RecommendationBall n={n} key={n.number} />
-          ))}
-        </div>
+        recommendation.set && <RecommendationSetCard set={recommendation.set} />
       )}
 
       <p className="lotto__rec-disclaimer">
-        최근 50회 출현 빈도를 상/중/하로 나눠 골고루 섞은 재미용 번호로, 실제 당첨 확률과는 무관하며 특정 조합의
-        구매를 권하는 것이 아닙니다.
+        재미로 즐기는 번호입니다. 실제 당첨 확률에는 아무 영향이 없으며, 특정 조합을 구매하시라는 의미가 아닙니다.
       </p>
     </div>
   )

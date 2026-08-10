@@ -257,26 +257,40 @@ type LottoAIInsight struct {
 	GeneratedAt string `json:"generatedAt,omitempty"`
 }
 
-// LottoRecommendationNumber는 "이번 주 추천 번호" 6개 중 하나이며, 어느
-// 빈도 그룹(hot/mid/cold)에서 뽑혔는지 태그가 붙어 있다 — 어디까지나
-// "빈도대 골고루 섞기"라는 다양성을 위한 장치일 뿐, 특정 그룹이
-// 당첨 확률을 높여준다는 주장은 아니다. lotto_recommendation.go의
-// computeRecommendationNumbers 참고.
-type LottoRecommendationNumber struct {
-	Number int    `json:"number"`
-	Group  string `json:"group"` // "hot" | "mid" | "cold"
+// LottoRecommendationStats는 한 세트(6개 번호)가 4단계 패턴 필터를
+// 통과한 뒤의 통계 요약이다 — lotto_recommendation_pipeline.go의
+// computeRecommendationStats 참고. 어떤 조합이 "더 나은" 조합이라는
+// 뜻이 아니라, 그 조합이 어떤 필터 조건들을 만족했는지 사실을 보여줄
+// 뿐이다.
+type LottoRecommendationStats struct {
+	OddEvenRatio        string         `json:"oddEvenRatio"`        // "홀:짝", 예: "3:3"
+	Sum                 int            `json:"sum"`                 // 6개 번호의 합
+	BandDistribution    map[string]int `json:"bandDistribution"`    // "1-9".."40-45" 5개 구간별 개수
+	OverlapWithPrevious int            `json:"overlapWithPrevious"` // 직전 회차 당첨번호(보너스 제외)와 겹치는 개수, 0 또는 1
 }
 
-// LottoRecommendation은 현재 판매 회차에 대한 고정된 번호 세트
+// LottoRecommendationSet은 4단계 파이프라인을 통과한 번호 6개(오름차순)와
+// 그 통계다. "이번 주 추천 번호"는 (사이클, 모드)마다 이 세트를 정확히
+// 1개만 생성·캐싱한다.
+type LottoRecommendationSet struct {
+	Numbers []int                    `json:"numbers"`
+	Stats   LottoRecommendationStats `json:"stats"`
+}
+
+// LottoRecommendation은 현재 판매 회차에 대한 고정된 추천 세트
 // (IsBlackout false)이거나, 이번 회차 판매 마감부터 다음 회차 번호가
 // 나오기 전까지 추천이 잠시 중단되었다는 안내(IsBlackout true) 중
-// 하나다 — lotto_recommendation.go 참고.
+// 하나다 — lotto_recommendation.go 참고. Mode는 이 Set을 생성할 때
+// 쓰인 가중치 정책이다("trend" | "regression" | "uniform"). Set이
+// 포인터인 이유는 blackout일 때 JSON 응답에서 아예 필드 자체를 생략하기
+// 위해서다(omitempty는 값 타입 구조체에는 효과가 없다).
 type LottoRecommendation struct {
-	IsBlackout      bool                        `json:"isBlackout"`
-	Numbers         []LottoRecommendationNumber `json:"numbers,omitempty"`
-	CycleStartDate  string                      `json:"cycleStartDate,omitempty"`
-	GeneratedAt     string                      `json:"generatedAt,omitempty"`
-	NextAvailableAt string                      `json:"nextAvailableAt,omitempty"`
+	IsBlackout      bool                    `json:"isBlackout"`
+	Mode            string                  `json:"mode,omitempty"`
+	Set             *LottoRecommendationSet `json:"set,omitempty"`
+	CycleStartDate  string                  `json:"cycleStartDate,omitempty"`
+	GeneratedAt     string                  `json:"generatedAt,omitempty"`
+	NextAvailableAt string                  `json:"nextAvailableAt,omitempty"`
 }
 
 type LottoData struct {

@@ -230,19 +230,36 @@ export interface LottoAIInsight {
   generatedAt?: string
 }
 
-export type LottoRecommendationGroup = 'hot' | 'mid' | 'cold'
+// "trend"(핫넘버 우선)/"regression"(콜드넘버 우선)/"uniform"(완전 무작위,
+// 기본값) — backend/lotto_recommendation_pipeline.go의 2단계 가중치 정책과
+// 이름을 맞췄다.
+export type LottoRecommendationMode = 'trend' | 'regression' | 'uniform'
 
-export interface LottoRecommendationNumber {
-  number: number
-  group: LottoRecommendationGroup
+// LottoRecommendationSet 하나가 3단계 패턴 필터를 통과한 뒤의 통계
+// 요약이다 — 어떤 세트가 "더 나은" 세트라는 뜻이 아니라, 그 세트가 어떤
+// 조건들을 만족했는지 사실을 보여줄 뿐이다.
+export interface LottoRecommendationStats {
+  oddEvenRatio: string // "홀:짝", 예: "3:3"
+  sum: number
+  bandDistribution: Record<string, number> // "1-9".."40-45" 5개 구간별 개수
+  overlapWithPrevious: number // 직전 회차 당첨번호와 겹치는 개수(0 또는 1)
 }
 
-// 현재 판매 회차에 대한 고정된 번호 세트(isBlackout false)이거나,
+export interface LottoRecommendationSet {
+  numbers: number[] // 6개, 오름차순 정렬
+  stats: LottoRecommendationStats
+}
+
+// 현재 판매 회차에 대한 고정된 추천 세트(isBlackout false)이거나,
 // 이번 회차 판매 마감 후 다음 회차 번호가 나오기 전까지 추천이
-// 일시 중단되었다는 안내(isBlackout true) 둘 중 하나다.
+// 일시 중단되었다는 안내(isBlackout true) 둘 중 하나다. (사이클, 모드)당
+// 세트를 정확히 1개만 생성·캐싱한다 — 같은 사이클 안에서 모드를
+// uniform -> trend -> uniform으로 오가도 각 모드의 세트가 각각 캐싱되어
+// 있다가 그대로 재사용된다.
 export interface LottoRecommendation {
   isBlackout: boolean
-  numbers?: LottoRecommendationNumber[]
+  mode?: LottoRecommendationMode
+  set?: LottoRecommendationSet
   cycleStartDate?: string
   generatedAt?: string
   nextAvailableAt?: string

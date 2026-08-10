@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { LottoSection } from '../types'
+import type { LottoRecommendationMode, LottoSection } from '../types'
 
 // 로또 섹션은 의도적으로 useDashboard와 분리되어 있다: weather/exchange/news/
 // briefing이 공유하는 NDJSON 스트림이 아니라 평범한 JSON GET 요청이며, 자체
@@ -15,6 +15,10 @@ export function useLotto() {
   const [section, setSection] = useState<LottoSection | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // "이번 주 추천 번호"에 쓸 가중치 정책 — 기본값은 통계적으로 편향이
+  // 없는 uniform이다. 화면에서 사용자가 바꾸면 load가 새 mode로 다시
+  // 실행된다(아래 useEffect 참고).
+  const [mode, setMode] = useState<LottoRecommendationMode>('uniform')
   const abortRef = useRef<AbortController | null>(null)
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -32,7 +36,7 @@ export function useLotto() {
     setError(null)
 
     try {
-      const res = await fetch('/api/lotto', { signal: controller.signal })
+      const res = await fetch(`/api/lotto?mode=${mode}`, { signal: controller.signal })
       if (!res.ok) throw new Error(`서버 오류 (status ${res.status})`)
       const data: LottoSection = await res.json()
       setSection(data)
@@ -46,7 +50,7 @@ export function useLotto() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [mode])
 
   useEffect(() => {
     load()
@@ -56,5 +60,5 @@ export function useLotto() {
     }
   }, [load])
 
-  return { section, loading, error, retry: load }
+  return { section, loading, error, retry: load, mode, setMode }
 }
