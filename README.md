@@ -107,6 +107,16 @@ Groq가 생성한 문장을 그대로 내보내지 않고, `validateSectionOutpu
   재등장하는지 검사합니다. 이전에 캐시된 브리핑과 비교하지는 않습니다 — 매 생성 결과 "내부"의
   반복만 잡을 뿐, 여러 번의 생성에 걸쳐 비슷한 문구가 되풀이되는 것은 감지 대상이 아닙니다.
 
+새로운 실패 유형을 발견했을 때는 프롬프트에 규칙 문장을 추가하기보다 먼저 위 검사기 중 하나를
+추가/확장해 해결할 수 없는지부터 검토하세요 — 검사기는 실행 시점에만 비용이 들지만, 프롬프트
+문구는 캐시가 미스될 때마다 세 섹션(날씨/환율/뉴스) 각각에서 토큰 비용이 듭니다. 실제로 뉴스
+섹션 프롬프트는 규칙이 하나둘 늘어날 때마다 총 토큰 수가 커져 `llama-3.1-8b-instant`의 분당
+한도(6,000 TPM)를 두 차례(6,148토큰, 이후 2,464토큰) 위협한 전례가 있습니다. 재발을 막기 위해
+`TestWeatherBriefingPromptFitsWithinTokenBudget`/`TestExchangeBriefingPromptFitsWithinTokenBudget`/
+`TestNewsBriefingPromptFitsWithinTokenBudget`(`backend/briefing_section_test.go`)이 세 섹션
+프롬프트의 추정 토큰 수 예산을 각각 고정해두고 있으니, 프롬프트를 수정했다면 반드시 이 테스트를
+통과하는지 확인하세요.
+
 ## NewsData.io API 키 발급 (무료)
 
 뉴스 섹션은 [NewsData.io](https://newsdata.io)의 공개 API(`/api/1/latest`)를 사용합니다.

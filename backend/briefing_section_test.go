@@ -802,6 +802,57 @@ func TestValidateSectionOutputPrecedence(t *testing.T) {
 	}
 }
 
+// briefingWeatherPromptTokenBudget/briefingExchangePromptTokenBudget은
+// 날씨/환율 프롬프트(system+user)에 대한 같은 종류의 예산이다 — 뉴스처럼
+// 요청마다 크기가 늘어나는 입력(헤드라인)은 없지만, 언젠가 누군가
+// weatherSectionSystemPrompt/exchangeSectionSystemPrompt에 규칙을 하나 더
+// 추가하는 순간 이 두 섹션도 똑같이 TPM 한도를 위협할 수 있다. 실측
+// 총합(929/853토큰)에 여유를 둔 값이다.
+const briefingWeatherPromptTokenBudget = 1200
+const briefingExchangePromptTokenBudget = 1100
+
+// TestWeatherBriefingPromptFitsWithinTokenBudget/
+// TestExchangeBriefingPromptFitsWithinTokenBudget은 getBriefing이 실제로
+// 만드는 것과 같은 형태의 대표 입력(오전/오후 예보, JPY 환율처럼 필드가
+// 가장 많이 채워지는 경우)으로 프롬프트를 구성해 예산 내에 있는지 검증한다.
+func TestWeatherBriefingPromptFitsWithinTokenBudget(t *testing.T) {
+	input := &briefingWeatherInput{
+		Current: briefingCurrentWeather{City: "seoul", CityLabel: "서울", TemperatureC: 23.4, WindSpeedKph: 12.3, WeatherCode: 1, Description: "맑음", ObservedAt: "2026-08-10T09:00:00+09:00"},
+		Today: briefingDayForecast{
+			Morning:   &briefingPeriodForecast{TemperatureC: 18.2, WeatherCode: 1, Description: "맑음", PrecipProbability: 10},
+			Afternoon: &briefingPeriodForecast{TemperatureC: 27.9, WeatherCode: 2, Description: "구름 조금", PrecipProbability: 20},
+		},
+	}
+	weatherJSON, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("marshal weather input: %v", err)
+	}
+	userContent := fmt.Sprintf("[날씨 데이터]: %s\n\n위 데이터를 바탕으로 한국어 날씨 브리핑 문장을 작성하세요.", weatherJSON)
+
+	total := estimateTokenCount(weatherSectionSystemPrompt) + estimateTokenCount(userContent)
+	if total > briefingWeatherPromptTokenBudget {
+		t.Errorf("날씨 브리핑 프롬프트 추정 토큰 수 %d가 예산 %d를 초과했습니다 — weatherSectionSystemPrompt를 더 줄여야 합니다", total, briefingWeatherPromptTokenBudget)
+	}
+}
+
+func TestExchangeBriefingPromptFitsWithinTokenBudget(t *testing.T) {
+	input := &briefingExchangeInput{
+		BaseCurrency: "JPY", QuoteCurrency: "KRW", BaseUnits: jpyDisplayUnits, Rate: 905.12, Date: "2026-08-10",
+		SevenDaysAgoRate: 900.55, SevenDaysAgoDate: "2026-08-03", ChangePercent: 0.5,
+		Trend: &exchangeTrend{Direction: "상승", Implication: "KRW 약세"},
+	}
+	exchangeJSON, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("marshal exchange input: %v", err)
+	}
+	userContent := fmt.Sprintf("[환율 데이터]: %s\n\n위 데이터를 바탕으로 한국어 환율 브리핑 문장을 작성하세요.", exchangeJSON)
+
+	total := estimateTokenCount(exchangeSectionSystemPrompt) + estimateTokenCount(userContent)
+	if total > briefingExchangePromptTokenBudget {
+		t.Errorf("환율 브리핑 프롬프트 추정 토큰 수 %d가 예산 %d를 초과했습니다 — exchangeSectionSystemPrompt를 더 줄여야 합니다", total, briefingExchangePromptTokenBudget)
+	}
+}
+
 // briefingNewsPromptTokenBudget는 뉴스 브리핑 프롬프트(system+user) 총합이
 // 절대 넘지 말아야 할 근사 토큰 예산이다. 240자 description일 때 실측
 // 6,148토큰, 그 뒤 존댓말 강화/환각 방지 지침이 하나둘 늘어난 뒤 다시
