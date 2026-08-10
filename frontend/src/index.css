@@ -23,6 +23,14 @@
   --accent-lotto: #ff6ec7;
   --accent-danger: #ff7a7a;
 
+  /* generic interactive accent — for chrome with no card identity of its
+     own (global toggle, select focus ring, the primary "조회" action).
+     An alias to --accent-briefing rather than a new hue: reusing a card's
+     identity color (e.g. weather's teal) for unrelated controls made that
+     color mean two different things at once, which read as "blue
+     everywhere" rather than a deliberate accent. */
+  --accent-interactive: var(--accent-briefing);
+
   /* Korean FX/stock convention: 상승(rise) = red, 하락(fall) = blue —
      the opposite of US convention, and distinct from the section
      identity accents above (this pair means "direction", not "which

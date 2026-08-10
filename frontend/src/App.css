@@ -64,7 +64,7 @@
 
 .controls__field select:focus-visible {
   outline: none;
-  border-color: var(--accent-weather);
+  border-color: var(--accent-interactive);
 }
 
 .controls__toggle {
@@ -103,13 +103,13 @@
 }
 
 .controls__toggle input[type='checkbox']:checked {
-  background: color-mix(in srgb, var(--accent-weather) 35%, var(--panel-sunken));
-  border-color: color-mix(in srgb, var(--accent-weather) 50%, transparent);
+  background: color-mix(in srgb, var(--accent-interactive) 35%, var(--panel-sunken));
+  border-color: color-mix(in srgb, var(--accent-interactive) 50%, transparent);
 }
 
 .controls__toggle input[type='checkbox']:checked::after {
   transform: translateX(13px);
-  background: var(--accent-weather);
+  background: var(--accent-interactive);
 }
 
 /* "조회"와 "지금 새로고침" 버튼이 공유하는 스타일 — 컨트롤 행에서
@@ -117,6 +117,9 @@
    선택만 하고 아직 적용하지 않은 상태일 때 --pending 클래스가 추가로
    붙지만(아래 참고), 새로고침에는 그런 상태가 없다 — 항상 현재 적용된
    파라미터로 다시 요청할 뿐, 대기 중인 값이라는 개념 자체가 없기 때문이다. */
+/* 기본(보조) 스타일 — "지금 새로고침"처럼 항상 눌러도 되지만 우선순위가
+   낮은 액션은 배경 없는 고스트 버튼으로 존재감을 낮춘다. 주 액션
+   (--primary)과의 대비를 명확히 하기 위한 것이다. */
 .controls__action {
   display: inline-flex;
   align-items: center;
@@ -124,15 +127,16 @@
   padding: var(--space-2) var(--space-4);
   border-radius: var(--radius-control);
   border: 1px solid var(--panel-border);
-  background: var(--panel-alt);
-  color: var(--text);
+  background: transparent;
+  color: var(--text-dim);
   font-size: 13px;
   font-weight: 600;
-  transition: transform 180ms ease-out, background 180ms ease-out, box-shadow 180ms ease-out, border-color 180ms ease-out;
+  transition: transform 180ms ease-out, background 180ms ease-out, box-shadow 180ms ease-out, border-color 180ms ease-out, color 180ms ease-out;
 }
 
 .controls__action:hover:not(:disabled) {
-  background: var(--panel-sunken);
+  background: var(--panel-alt);
+  color: var(--text);
   transform: translateY(-1px);
   box-shadow: var(--shadow-card);
 }
@@ -146,17 +150,28 @@
   cursor: default;
 }
 
-/* 도시/통화 드롭다운은 조회를 눌러야 반영된다 — 대기 중인 변경사항이
-   있으면 강조색으로 눈에 띄게 해서 "눌러야 함"을 유도한다. */
-.controls__action--pending {
-  background: color-mix(in srgb, var(--accent-briefing) 22%, var(--panel-alt));
-  border-color: color-mix(in srgb, var(--accent-briefing) 55%, transparent);
+/* "조회"는 드롭다운 선택을 실제로 적용하는 주 액션이라, 대기 중인
+   변경사항이 없는 평상시에도 옅게 강조색을 둘러 보조 액션과 구분해둔다. */
+.controls__action--primary {
+  border-color: color-mix(in srgb, var(--accent-interactive) 35%, var(--panel-border));
   color: var(--text);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-briefing) 16%, transparent);
+}
+
+.controls__action--primary:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent-interactive) 55%, var(--panel-border));
+}
+
+/* 도시/통화 드롭다운은 조회를 눌러야 반영된다 — 대기 중인 변경사항이
+   있으면 강조색으로 한층 더 눈에 띄게 해서 "눌러야 함"을 유도한다. */
+.controls__action--pending {
+  background: color-mix(in srgb, var(--accent-interactive) 22%, var(--panel-alt));
+  border-color: color-mix(in srgb, var(--accent-interactive) 55%, transparent);
+  color: var(--text);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-interactive) 16%, transparent);
 }
 
 .controls__action--pending:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent-briefing) 30%, var(--panel-alt));
+  background: color-mix(in srgb, var(--accent-interactive) 30%, var(--panel-alt));
 }
 
 .controls__action-spinner {
@@ -260,6 +275,13 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+  /* .card와 마찬가지로 grid item의 기본 min-width:auto를 없애야 한다 —
+     안 그러면 .briefing__section의 의도적인 음수 margin(하이라이트
+     배경용 "bleed")처럼 자식의 min-content가 카드 내부에서는
+     overflow: hidden으로 안전하게 가려지는 요소라도, 그리드 트랙
+     자체의 최소 너비 계산에는 그대로 반영되어 뷰포트보다 넓은
+     가로 스크롤을 만들어냈다. */
+  min-width: 0;
 }
 
 @media (max-width: 860px) {
@@ -288,6 +310,7 @@
   overflow: hidden;
   --card-accent: var(--text-dim);
   min-height: 0;
+  min-width: 0;
 }
 
 .card::before {
@@ -684,14 +707,15 @@
 }
 
 .weather__period-glyph {
-  font-size: 26px;
+  display: flex;
+  color: var(--accent-weather);
   line-height: 1;
 }
 
 .weather__period-temp {
   font-family: var(--font-data);
-  font-size: 22px;
-  font-weight: 300;
+  font-size: 25px;
+  font-weight: 700;
   color: var(--text);
   line-height: 1.1;
 }
@@ -814,17 +838,19 @@
 }
 
 .exchange__pair {
-  font-size: 12.5px;
+  font-size: 11px;
   color: var(--text-faint);
   font-family: var(--font-data);
+  letter-spacing: 0.02em;
 }
 
 .exchange__rate {
   font-family: var(--font-data);
-  font-size: 36px;
-  font-weight: 300;
+  font-size: 44px;
+  font-weight: 700;
   color: var(--text);
-  letter-spacing: -0.01em;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
 }
 
 /* hint와 yesterday를 하나로 묶는다 — 모바일에서는 세로로 쌓이고
@@ -931,7 +957,7 @@
 }
 
 .exchange__date {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--text-faint);
 }
 
@@ -980,8 +1006,8 @@
   padding: 6px 11px;
   border: 1px solid var(--panel-border);
   border-radius: var(--radius-pill);
-  background: var(--panel-alt);
-  color: var(--text-dim);
+  background: transparent;
+  color: var(--text-faint);
   font-size: 12.5px;
   font-weight: 600;
   transition: color 200ms ease-out, border-color 200ms ease-out, background 200ms ease-out;
@@ -1028,14 +1054,22 @@
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-2);
 }
 
 .news__item {
   display: grid;
   grid-template-columns: 18px 1fr;
   gap: var(--space-3);
+  padding: var(--space-2);
+  margin: 0 calc(var(--space-2) * -1);
+  border-radius: var(--radius-control);
   font-size: 13.5px;
+  transition: background 150ms ease-out;
+}
+
+.news__item:hover {
+  background: var(--panel-alt);
 }
 
 .news__rank {
@@ -1056,7 +1090,7 @@
 .news__link {
   color: var(--text);
   text-decoration: none;
-  line-height: 1.45;
+  line-height: 1.6;
   transition: color 150ms ease-out;
 }
 
@@ -1168,7 +1202,7 @@
   border: none;
   border-radius: var(--radius-pill);
   background: transparent;
-  color: var(--text-dim);
+  color: var(--text-faint);
   font-size: 12.5px;
   font-weight: 600;
   white-space: nowrap;
@@ -1324,11 +1358,17 @@
   min-width: 0;
 }
 
+/* .card__title과 동일한 타입 스케일(크기/굵기/자간/색상)을 공유해서,
+   카드 제목과 카드 내부 섹션 라벨이 같은 위계 톤으로 읽히게 한다 —
+   uppercase는 이 텍스트가 전부 한글+이모지라 시각적으로는 무효과지만,
+   두 클래스의 규칙을 완전히 동일하게 맞춰 앞으로 스타일이 갈라지지
+   않도록 한다. */
 .lotto__section-title {
   margin: 0 0 var(--space-3);
   font-size: 12.5px;
   font-weight: 600;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
   color: var(--text-dim);
   display: flex;
   align-items: center;
@@ -1416,10 +1456,17 @@
   display: grid;
   grid-template-columns: auto auto 1fr;
   align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-2) 0;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-2);
+  margin: 0 calc(var(--space-2) * -1);
+  border-radius: var(--radius-control);
   border-bottom: 1px solid var(--panel-border);
   font-size: 12.5px;
+  transition: background 150ms ease-out;
+}
+
+.lotto__history-row:hover {
+  background: var(--panel-alt);
 }
 
 .lotto__history-row:last-child {
@@ -1450,7 +1497,7 @@
 .lotto__heatmap {
   display: grid;
   grid-template-columns: repeat(9, 1fr);
-  gap: 3px;
+  gap: 6px;
 }
 
 .lotto__heat-cell {
@@ -1458,9 +1505,9 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 1px;
+  gap: 2px;
   aspect-ratio: 1;
-  border-radius: 6px;
+  border-radius: 8px;
   color: var(--text);
 }
 

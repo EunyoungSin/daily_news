@@ -1,18 +1,7 @@
 import { useState } from 'react'
 import type { WeatherSection } from '../types'
 import { usePulseOnChange } from '../hooks/usePulseOnChange'
-
-function weatherGlyph(code: number): string {
-  if (code === 0) return '☀'
-  if (code === 1 || code === 2) return '⛅'
-  if (code === 3) return '☁'
-  if (code === 45 || code === 48) return '\u{1F32B}'
-  if (code >= 51 && code <= 67) return '\u{1F327}'
-  if (code >= 71 && code <= 77) return '\u{1F328}'
-  if (code >= 80 && code <= 86) return '\u{1F326}'
-  if (code === 95 || code === 96 || code === 99) return '⛈'
-  return '–'
-}
+import WeatherIcon from './weather/WeatherIcon'
 
 const HIGH_PRECIP_THRESHOLD = 40
 
@@ -76,8 +65,8 @@ function PeriodCell({
           </span>
         )}
       </div>
-      <div className="weather__period-glyph" aria-hidden="true">
-        {weatherGlyph(code)}
+      <div className="weather__period-glyph">
+        <WeatherIcon code={code} size={32} />
       </div>
       <div className="weather__period-temp">{tempC.toFixed(1)}°</div>
       <div className="weather__period-desc">{description}</div>

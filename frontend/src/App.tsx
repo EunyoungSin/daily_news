@@ -158,7 +158,9 @@ export default function App() {
 
           <button
             type="button"
-            className={hasPendingChange ? 'controls__action controls__action--pending' : 'controls__action'}
+            className={
+              'controls__action controls__action--primary' + (hasPendingChange ? ' controls__action--pending' : '')
+            }
             onClick={applyPendingParams}
             disabled={loading || isSameCurrency}
           >
