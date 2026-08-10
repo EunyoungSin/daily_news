@@ -88,11 +88,10 @@ func loadDotEnv(path string) {
 func main() {
 	loadDotEnv(".env")
 
-	if conn, err := connectDB(); err != nil {
-		log.Printf("경고: 데이터베이스 연결 실패, 로또 섹션은 비활성화됩니다: %v", err)
-	} else if err := migrate(conn); err != nil {
-		log.Printf("경고: 테이블 마이그레이션 실패, 로또 섹션은 비활성화됩니다: %v", err)
-		conn.Close()
+	if conn, err := connectDBWithRetry(); err != nil {
+		errType := classifyDBErrorType(err)
+		setDBErrorType(errType)
+		log.Printf("경고: 데이터베이스 연결/마이그레이션 실패(%d회 재시도 후, 분류: %s), 로또 섹션은 비활성화됩니다: %v", dbConnectMaxAttempts, errType, err)
 	} else {
 		db = conn
 		log.Println("데이터베이스 연결 및 마이그레이션 완료")

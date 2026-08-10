@@ -27,6 +27,7 @@ func lottoHandler(w http.ResponseWriter, r *http.Request) {
 				DurationMs: time.Since(start).Milliseconds(),
 				Error:      "⚠️ 데이터베이스에 연결할 수 없습니다",
 			},
+			DBErrorType: currentDBErrorType(),
 		})
 		return
 	}

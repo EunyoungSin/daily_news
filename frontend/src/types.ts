@@ -265,6 +265,10 @@ export interface LottoSection extends SectionMeta {
   // 회차를 채우는 중이면 true. true인 동안 useLotto는 짧은 간격으로 폴링한다.
   isBackfilling: boolean
   data?: LottoData
+  // db가 nil이라 섹션 자체가 실패했을 때만 채워진다(백엔드 db.go 참고).
+  // "turso_outage"는 Turso 인프라 자체의 장애로 보이는 경우, "connection_failed"는
+  // 그 외 일반적인 연결 실패(인증/타임아웃 등)다. 정상일 때는 필드가 아예 없다.
+  dbErrorType?: 'turso_outage' | 'connection_failed'
 }
 
 // GET /api/lotto/collection/status의 응답 — 로또 카드의 "매주 자동

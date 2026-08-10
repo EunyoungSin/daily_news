@@ -7,6 +7,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/tursodatabase/go-libsql"
@@ -51,6 +54,117 @@ func connectDB() (*sql.DB, error) {
 		return connectLocalDB()
 	}
 	return connectRemoteDB(dbURL, os.Getenv("TURSO_AUTH_TOKEN"))
+}
+
+// dbConnectMaxAttempts/dbConnectRetryInterval은 connectDBWithRetry가
+// connectDB+migrate 전체를 몇 차례, 얼마의 간격으로 재시도할지 정한다.
+// 마이그레이션은 서버가 뜰 때 딱 한 번만 실행되던 일회성 작업이라, 그
+// 시도 시점에 Turso 인프라가 잠깐(몇 초~십수 초) 흔들리고 있으면
+// dbErrorTypeTursoOutage로 확정되어 로또 섹션이 서버 재배포 전까지
+// 계속 비활성화된 채로 남았다 — 실제로는 그 장애가 대개 짧게 끝나므로,
+// 확정 전에 몇 초 간격으로 몇 번 더 시도해볼 여유를 둔다. 4회 × 3초는
+// 최악의 경우 서버 시작을 약 9초 지연시키는데, 이는 시작 시 단 한 번만
+// 감수하는 비용이라 감내할 만하다.
+const dbConnectMaxAttempts = 4
+const dbConnectRetryInterval = 3 * time.Second
+
+// connectDBWithRetry는 connectDB로 연결한 뒤 곧바로 migrate까지 실행하는
+// 전체 시퀀스를, 실패할 때마다 dbConnectRetryInterval만큼 쉬고
+// dbConnectMaxAttempts번까지 다시 시도한다. 연결에는 성공했지만
+// 마이그레이션에서 실패한 경우 그 커넥션을 닫고 처음부터(재연결부터) 다시
+// 시도한다 — 마이그레이션 실패가 커넥션 자체의 문제(예: 연결이 그 사이에
+// 끊김)일 수도 있기 때문이다. 마지막 시도까지 실패하면 그 마지막 에러를
+// 반환하며, 호출자(main)가 classifyDBErrorType으로 분류해 상태를 확정한다.
+func connectDBWithRetry() (*sql.DB, error) {
+	var lastErr error
+	for attempt := 1; attempt <= dbConnectMaxAttempts; attempt++ {
+		conn, err := connectDB()
+		if err == nil {
+			if migrateErr := migrate(conn); migrateErr != nil {
+				conn.Close()
+				lastErr = migrateErr
+			} else {
+				return conn, nil
+			}
+		} else {
+			lastErr = err
+		}
+
+		if attempt < dbConnectMaxAttempts {
+			log.Printf("DB 연결/마이그레이션 시도 %d/%d 실패, %s 후 재시도: %v", attempt, dbConnectMaxAttempts, dbConnectRetryInterval, lastErr)
+			time.Sleep(dbConnectRetryInterval)
+		}
+	}
+	return nil, lastErr
+}
+
+const (
+	// dbErrorTypeTursoOutage는 Turso 인프라 자체(엣지/프록시 레이어)가
+	// 요청을 처리하지 못하는 것으로 보이는 실패다 — 우리 쪽 자격증명이나
+	// 설정과 무관하며, 보통 시간이 지나면 스스로 복구된다.
+	dbErrorTypeTursoOutage = "turso_outage"
+	// dbErrorTypeConnectionFailed는 그 외 일반적인 연결 실패다(인증 토큰
+	// 오류, DNS/타임아웃, 잘못된 URL 등) — 원인이 우리 쪽 설정에 있을 수
+	// 있어 자동 복구를 기대하기 어렵다.
+	dbErrorTypeConnectionFailed = "connection_failed"
+)
+
+// dbOutageStatusPattern은 Turso 인프라 장애를 시사하는 에러 메시지의 특징을
+// 정규식 하나로 잡아낸다: "upstream forward failed"(Turso 엣지 프록시에서
+// 실제로 관측된 바 있는 문구)나, HTTP 5xx 계열 상태 코드(502 Bad Gateway를
+// 포함해 500~599 전체)가 메시지에 포함되어 있으면 우리 쪽이 아니라 Turso
+// 쪽 인프라 문제로 본다 — 502 Bad Gateway는 "502"라는 세 자리 숫자
+// 자체가 이미 이 5xx 패턴에 들어맞으므로 별도 문구로 다시 매칭할 필요가
+// 없다. \b로 단어 경계를 확인해, 숫자 앞뒤에 다른 숫자가 더 붙어있는
+// 상황(예: 포트 번호 5000, "1500토큰")까지 우연히 걸리지 않게 한다.
+var dbOutageStatusPattern = regexp.MustCompile(`upstream forward failed|\b5\d{2}\b`)
+
+// classifyDBErrorType은 DB 연결/마이그레이션 실패 err를
+// dbErrorTypeTursoOutage 또는 dbErrorTypeConnectionFailed로 분류한다. err가
+// nil이면(연결이 정상이라는 뜻이므로) 빈 문자열을 반환한다 — lottoHandler는
+// 이 값을 그대로 LottoSection.DBErrorType에 실어 보내는데, omitempty
+// 덕분에 빈 문자열은 응답 JSON에서 필드 자체가 사라져 "정상" 상태를
+// null/없음으로 표현한다.
+func classifyDBErrorType(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.ToLower(err.Error())
+	if dbOutageStatusPattern.MatchString(msg) {
+		return dbErrorTypeTursoOutage
+	}
+	return dbErrorTypeConnectionFailed
+}
+
+// dbErrorState는 마이그레이션 재시도가 모두 소진된 뒤 확정된 DB 에러
+// 종류를 보관한다 — main이 서버 시작 시 딱 한 번만 기록하고, 이후
+// lottoHandler 등 요청 핸들러가 여러 goroutine에서 동시에 읽을 수 있으므로
+// (net/http는 요청마다 별도 goroutine을 쓴다) 읽기/쓰기 모두 뮤텍스로
+// 보호한다.
+var dbErrorState struct {
+	mu   sync.RWMutex
+	kind string
+}
+
+func setDBErrorType(kind string) {
+	dbErrorState.mu.Lock()
+	defer dbErrorState.mu.Unlock()
+	dbErrorState.kind = kind
+}
+
+// currentDBErrorType은 db가 nil인 동안 lottoHandler가 응답에 실어 보낼
+// dbErrorType 값을 읽어온다. setDBErrorType이 아직 한 번도 호출되지
+// 않았다면(이론상 db==nil인데 이 값도 비어있는 상태는 있을 수 없지만,
+// 방어적으로) dbErrorTypeConnectionFailed로 안전하게 폴백한다 — 빈
+// 문자열을 그대로 내보내면 프론트엔드가 "정상"으로 오인할 수 있기
+// 때문이다.
+func currentDBErrorType() string {
+	dbErrorState.mu.RLock()
+	defer dbErrorState.mu.RUnlock()
+	if dbErrorState.kind == "" {
+		return dbErrorTypeConnectionFailed
+	}
+	return dbErrorState.kind
 }
 
 // connectLocalDB는 로컬 파일에 연결한다. "file:" 접두사는 SQLite/libSQL이

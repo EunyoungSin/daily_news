@@ -302,6 +302,12 @@ type LottoSection struct {
 	// 포함)를 영원히 5초마다 폴링하게 된다.
 	IsBackfilling bool       `json:"isBackfilling"`
 	Data          *LottoData `json:"data,omitempty"`
+	// DBErrorType은 db가 nil이라 이 섹션 자체가 실패했을 때만 채워진다
+	// (db.go의 classifyDBErrorType/currentDBErrorType 참고) — "turso_outage"
+	// 는 Turso 인프라 자체의 장애로 보이는 경우, "connection_failed"는 그 외
+	// 일반적인 연결 실패다. 정상일 때는 omitempty로 필드 자체가 응답에서
+	// 빠져 프론트엔드에서 null/undefined로 보인다.
+	DBErrorType string `json:"dbErrorType,omitempty"`
 }
 
 // Stage는 핸들러가 스트리밍으로 내려보내는 두 NDJSON 라인을 구분한다:

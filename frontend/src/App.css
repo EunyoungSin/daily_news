@@ -446,6 +446,23 @@
   cursor: default;
 }
 
+.card__error-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.card__error-status-link {
+  font-size: 12px;
+  color: var(--text-dim);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.card__error-status-link:hover {
+  color: var(--accent-danger);
+}
+
 .card__preparing {
   align-items: center;
   justify-content: center;

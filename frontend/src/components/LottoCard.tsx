@@ -60,6 +60,7 @@ export default function LottoCard({ section, loading, error, onRetry }: Props) {
   }
 
   const failureMessage = error || (section && !section.success ? section.error : null)
+  const isTursoOutage = section?.dbErrorType === 'turso_outage'
 
   return (
     <section className="card card--lotto">
@@ -97,10 +98,28 @@ export default function LottoCard({ section, loading, error, onRetry }: Props) {
 
       {!loading && failureMessage && !section?.data && !section?.isBackfilling && (
         <div className="card__body card__error">
-          <p>⚠️ {failureMessage}</p>
-          <button type="button" onClick={handleRetry} disabled={retrying}>
-            {retrying ? '재시도 중…' : '재시도'}
-          </button>
+          <p>
+            {isTursoOutage
+              ? '⚠️ 데이터베이스 서비스(Turso)에 일시적인 장애가 있는 것으로 보입니다. 잠시 후 자동으로 복구됩니다.'
+              : failureMessage.startsWith('⚠️')
+                ? failureMessage
+                : `⚠️ ${failureMessage}`}
+          </p>
+          <div className="card__error-actions">
+            <button type="button" onClick={handleRetry} disabled={retrying}>
+              {retrying ? '재시도 중…' : '재시도'}
+            </button>
+            {isTursoOutage && (
+              <a
+                className="card__error-status-link"
+                href="https://status.turso.tech"
+                target="_blank"
+                rel="noreferrer noopener"
+              >
+                Turso 상태 확인 →
+              </a>
+            )}
+          </div>
         </div>
       )}
 
