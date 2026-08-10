@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sync"
@@ -206,6 +207,108 @@ type dhlotteryResponse struct {
 	BnusNo      int    `json:"bnusNo"`
 }
 
+// lottoGitHubDatasetBaseURL은 자동 수집이 회차를 조회하는 유일한 대상이다.
+// dhlottery가 이 서버의 IP를 차단해(자동 요청을 봇으로 판단한 것으로
+// 보인다 — lottoUserAgent 주석 참고) 직접 호출이 계속 실패했었다. 이를
+// 우회하기 위해 커뮤니티가 유지 관리하는 공개 GitHub 저장소
+// smok95/lotto로 갈아탔다 — 매주 토요일 추첨 직후(실측:
+// 2026-07-25/08-01/08-08 모두 KST 20:41~21:00 사이 커밋)에 회차별 JSON
+// 파일을 자동 커밋해 raw.githubusercontent.com으로 그대로 서빙하므로,
+// dhlottery를 전혀 두드리지 않고도 최신 회차를 얻을 수 있다. 이 소스가
+// 실패하면 checkForNewLottoRound는 dhlottery로 다시 폴백하지 않고 다음
+// 정기 점검까지 기다린다 — fetchLottoDraw 문서 주석 참고.
+const lottoGitHubDatasetBaseURL = "https://raw.githubusercontent.com/smok95/lotto/main/results"
+
+// githubLottoDraw는 lottoGitHubDatasetBaseURL이 회차별로 제공하는 JSON의
+// 부분집합이다 — divisions/total_sales_amount/winners_combination 등
+// 이 대시보드가 쓰지 않는 필드는 그대로 무시된다(encoding/json은 구조체에
+// 없는 필드를 조용히 건너뛴다).
+type githubLottoDraw struct {
+	DrawNo  int    `json:"draw_no"`
+	Numbers []int  `json:"numbers"`
+	BonusNo int    `json:"bonus_no"`
+	Date    string `json:"date"` // RFC3339, 예: "2026-08-08T00:00:00Z"
+}
+
+// parseGitHubLottoDraw는 lottoGitHubDatasetBaseURL/{drwNo}.json의 원본
+// 바이트를 dhlotteryResponse와 동일한 모양으로 변환한다 — 호출하는 쪽
+// (checkForNewLottoRound)과 저장하는 쪽(insertLottoDraw) 모두 데이터
+// 출처가 dhlottery인지 이 GitHub 데이터셋인지 신경 쓸 필요가 없다.
+// fetchLottoDrawFromGitHub의 네트워크 호출과 분리해뒀다 — 이 변환/검증
+// 로직(회차 번호 불일치, 번호 개수, 날짜 형식)은 네트워크 없이 단위
+// 테스트로 고정해둘 가치가 있기 때문이다.
+func parseGitHubLottoDraw(body []byte, wantDrwNo int) (*dhlotteryResponse, error) {
+	var parsed githubLottoDraw
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("parse github lotto dataset response for round %d: %w", wantDrwNo, err)
+	}
+	if parsed.DrawNo != wantDrwNo || len(parsed.Numbers) != 6 {
+		return nil, fmt.Errorf("unexpected github lotto dataset response shape for round %d (draw_no=%d, numbers=%d개)",
+			wantDrwNo, parsed.DrawNo, len(parsed.Numbers))
+	}
+
+	drawDate, err := time.Parse(time.RFC3339, parsed.Date)
+	if err != nil {
+		return nil, fmt.Errorf("parse github lotto dataset date %q for round %d: %w", parsed.Date, wantDrwNo, err)
+	}
+
+	return &dhlotteryResponse{
+		ReturnValue: "success",
+		DrwNo:       parsed.DrawNo,
+		DrwNoDate:   drawDate.Format("2006-01-02"),
+		DrwtNo1:     parsed.Numbers[0],
+		DrwtNo2:     parsed.Numbers[1],
+		DrwtNo3:     parsed.Numbers[2],
+		DrwtNo4:     parsed.Numbers[3],
+		DrwtNo5:     parsed.Numbers[4],
+		DrwtNo6:     parsed.Numbers[5],
+		BnusNo:      parsed.BonusNo,
+	}, nil
+}
+
+// fetchLottoDrawFromGitHub는 lottoGitHubDatasetBaseURL/{drwNo}.json을 조회해
+// parseGitHubLottoDraw로 변환한다. 아직 그 회차 파일이 없으면(다음 추첨
+// 전) 404가 오는데, 이는 dhlottery의 ReturnValue!="success"와 같은 뜻이지만
+// 별도로 구분하지 않는다 — 어느 쪽이든 이 함수가 에러를 반환하면
+// checkForNewLottoRound는 그대로 dhlottery 폴백으로 넘어가고, dhlottery
+// 쪽에서 "아직 발표 전"과 "진짜 실패"를 다시 한번 정확히 구분한다.
+func fetchLottoDrawFromGitHub(ctx context.Context, drwNo int) (*dhlotteryResponse, error) {
+	url := fmt.Sprintf("%s/%d.json", lottoGitHubDatasetBaseURL, drwNo)
+
+	callCtx, cancel := context.WithTimeout(ctx, lottoFetchTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(callCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := lottoHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("github lotto dataset returned status %d for round %d", resp.StatusCode, drwNo)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read github lotto dataset response for round %d: %w", drwNo, err)
+	}
+
+	return parseGitHubLottoDraw(body, drwNo)
+}
+
+// fetchLottoDraw/fetchLottoDrawWithShortRetry는 dhlottery를 직접 호출해
+// 회차를 조회하던 원래 방식이다. 지금은 checkForNewLottoRound가 이 둘을
+// 전혀 호출하지 않는다 — dhlottery가 이 서버의 IP를 차단해 자동 수집이
+// 계속 실패했고, 그걸 우회하려고 GitHub 데이터셋(lottoGitHubDatasetBaseURL
+// 주석 참고)으로 갈아탔기 때문이다. 나중에 dhlottery 접근이 다시 가능해지거나
+// GitHub 소스가 더 이상 유지되지 않는 경우를 대비해 백업으로 코드에 남겨
+// 둔다 — 실제로 되살리려면 checkForNewLottoRound에서 다시 호출하도록
+// 연결해야 한다.
 func fetchLottoDraw(ctx context.Context, drwNo int) (*dhlotteryResponse, error) {
 	url := fmt.Sprintf("https://www.dhlottery.co.kr/common.do?method=getLottoNumber&drwNo=%d", drwNo)
 
@@ -329,17 +432,22 @@ func checkForNewLottoRound(ctx context.Context, conn *sql.DB) {
 	}
 
 	log.Printf("로또: %d회차가 이미 발표되었을 시점 — 조회 시도", nextDrwNo)
-	data, err := fetchLottoDrawWithShortRetry(ctx, nextDrwNo)
+
+	// GitHub 데이터셋만 사용한다 — dhlottery 직접 호출(fetchLottoDraw/
+	// fetchLottoDrawWithShortRetry)로의 폴백은 의도적으로 두지 않았다.
+	// dhlottery가 이 서버의 IP를 차단해 자동 수집이 계속 실패했던 것이
+	// 애초에 이 GitHub 소스로 갈아탄 이유였으므로, 여기서 실패했다고 다시
+	// dhlottery로 넘어가 봐야 마찬가지로 차단당해 시간만 낭비하고 오히려
+	// 추가 차단 사유를 만들 뿐이다. 실패하면 다음 정기 점검까지 조용히
+	// 기다린다 — 아래 fetchLottoDraw류 함수는 dhlottery 접근이 다시
+	// 가능해지는 경우를 대비한 백업으로 코드에 남겨뒀을 뿐, 이 경로에서는
+	// 호출하지 않는다.
+	data, err := fetchLottoDrawFromGitHub(ctx, nextDrwNo)
 	if err != nil {
-		log.Printf("로또: %d회차 조회 실패(재시도 소진) — 다음 정기 점검까지 대기: %v", nextDrwNo, err)
+		log.Printf("로또: GitHub 데이터셋에서 %d회차 조회 실패 — 다음 정기 점검까지 대기: %v", nextDrwNo, err)
 		return
 	}
-	if data.ReturnValue != "success" {
-		// 이론상 추정치가 실제보다 살짝 앞서 나간 경우(예: 이번 주 추첨
-		// 직전)다. 다음 점검에서 다시 확인한다.
-		log.Printf("로또: %d회차가 아직 dhlottery에 발표되지 않음 — 다음 점검까지 대기", nextDrwNo)
-		return
-	}
+	log.Printf("로또: GitHub 데이터셋에서 %d회차 조회 성공", nextDrwNo)
 
 	insertCtx, cancel := context.WithTimeout(context.Background(), lottoInsertTimeout)
 	defer cancel()

@@ -277,11 +277,32 @@ DB에 저장되고, 프론트엔드 날씨 카드에 "예보치" 배지 + 툴팁
 DB에 저장된 최신 회차의 다음 번호가, 2002-12-07(1회차)부터 매주 토요일
 추첨되는 주기로 계산했을 때 이미 발표됐어야 할 시점인지. 그렇다면 그 회차
 **하나만** 조회를 시도합니다 — 여러 회차를 동시에 병렬로 긁어오는 로직은
-완전히 제거했습니다. 실패해도 넉넉한 간격(1분, 5분)으로 딱 2번만 더 재시도하고,
-그래도 안 되면 다음 날 정기 점검까지 조용히 기다립니다(예전처럼 짧은 간격으로
-계속 두드리지 않습니다). 상태 응답은 `lastCollectedAt`(마지막으로 신규 회차를
-저장한 시각), `lastCheckedAt`/`nextCheckAt`(마지막/다음 점검 시각), `savedCount`를
-담습니다.
+완전히 제거했습니다.
+
+**원래는 dhlottery(`https://www.dhlottery.co.kr/common.do?method=getLottoNumber`)를
+서버가 직접 호출했지만, dhlottery가 이 서버의 IP를 차단해 자동 요청이 계속
+실패하는 상태가 됐습니다.** 이를 우회하기 위해, 커뮤니티가 유지 관리하는
+공개 GitHub 저장소 [`smok95/lotto`](https://github.com/smok95/lotto)에서
+회차 데이터를 가져오도록 바꿨습니다(`fetchLottoDrawFromGitHub`,
+`backend/lotto.go`) — 이 저장소는 매주 토요일 추첨 직후(실측: 2026-07-25/
+08-01/08-08 모두 KST 20:41~21:00 사이 커밋)에 회차별 JSON 파일
+(`https://raw.githubusercontent.com/smok95/lotto/main/results/{회차}.json`)을
+자동 커밋해 그대로 서빙하므로, dhlottery를 전혀 두드리지 않고도 최신 회차를
+얻을 수 있습니다.
+
+dhlottery를 직접 호출하던 원래 코드(`fetchLottoDraw`/
+`fetchLottoDrawWithShortRetry`)는 **삭제하지 않고 `backend/lotto.go`에 그대로
+남겨뒀지만, 자동 수집 경로에서는 더 이상 호출하지 않습니다** — 이미 이
+서버의 IP가 차단된 상태라 폴백으로 다시 두드려봐야 실패만 반복할 뿐이고,
+그 재시도 자체가 차단을 더 굳히는 원인이 될 수도 있기 때문입니다. GitHub
+소스가 실패하면(파일이 아직 없거나 형식이 바뀐 경우) 그대로 다음 정기
+점검까지 기다립니다 — dhlottery로의 폴백은 없습니다. 나중에 dhlottery
+접근이 다시 가능해지거나 이 GitHub 저장소가 더 이상 유지되지 않게 되면,
+남겨둔 코드를 다시 연결해서 쓸 수 있습니다.
+
+GitHub 소스가 계속 실패하면 아래 "관리자 API"로 수동 입력할 수 있습니다. 상태
+응답은 `lastCollectedAt`(마지막으로 신규 회차를 저장한 시각),
+`lastCheckedAt`/`nextCheckAt`(마지막/다음 점검 시각), `savedCount`를 담습니다.
 
 ### 3. 관리자 API — dhlottery가 막혔을 때의 수동 대체 수단
 
