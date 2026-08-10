@@ -1338,11 +1338,16 @@
 
 /* ---------- 로또 ---------- */
 
+/* align-items: stretch(그리드 기본값)로 두 컬럼을 같은 높이로 맞춘다
+   — 왼쪽(최신회차+추천번호+최근10회+AI인사이트, 4블록)이 보통 더 길어서
+   오른쪽 컬럼이 그 높이만큼 늘어난다. 늘어난 높이를 오른쪽 컬럼 안에서
+   실제로 채우는 건 .lotto__section--history(회차별 당첨번호)의
+   flex-grow 몫이다 — 아래 .lotto__col 참고. */
 .lotto__body {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--space-6);
-  align-items: start;
+  align-items: stretch;
 }
 
 @media (max-width: 860px) {
@@ -1351,20 +1356,70 @@
   }
 }
 
+/* 서브섹션 대부분(.lotto__section, 추천 번호 박스)이 이제 각자 옅은
+   배경색의 독립된 박스라서, 그 사이 구분은 옅은 구분선이 아니라
+   컬럼 gap만으로 준다 — 박스 두 개를 선으로 잇는 게 아니라 여백으로
+   띄워놓는 편이 "각자 독립된 블록"이라는 느낌에 더 잘 맞는다. */
 .lotto__col {
   display: flex;
   flex-direction: column;
-  gap: var(--space-5);
+  gap: var(--space-6);
   min-width: 0;
+}
+
+/* .lotto__latest는 박스 배경이 없는 유일한 서브섹션이라 자체 padding이
+   없었다 — 그래서 "1236회 · ..."와 번호 뱃지가 .lotto__section 박스들
+   (padding: var(--space-4))보다 왼쪽으로 더 붙어 보였다. 왼쪽 시작선만
+   맞추면 되므로 좌측 padding만 그 값과 동일하게 맞춘다. */
+.lotto__latest {
+  padding-left: var(--space-4);
+}
+
+/* 회차별 당첨번호/번호별 출현 횟수/최근 10회 출현 번호/AI 통계 인사이트
+   네 섹션이 모두 이 클래스로 감싸여 있다 — 옅은 배경색 박스로 묶어서
+   "제목 + 그 아래 내용"이 하나의 블록임을 즉시 알아볼 수 있게 한다.
+   .lotto__recommendation과 padding/배경/radius 값을 그대로 맞춰서
+   전체 서브섹션들의 박스 톤이 일관되게 보이도록 했다. */
+.lotto__section {
+  padding: var(--space-4);
+  background: var(--panel-alt);
+  border-radius: var(--radius-control);
+}
+
+/* 오른쪽 컬럼에서 "회차별 당첨번호" 박스에만 붙는 수식자 — 이 박스가
+   .lotto__col의 남는 세로 공간을 전부 가져가게 한다("번호별 출현
+   횟수" 박스는 flex-grow가 없는 기본값(0)이라 그대로 자기 콘텐츠
+   높이를 유지한다). 내부를 flex-column으로 바꿔서 제목은 원래
+   높이대로 두고, 그 아래 .lotto__history(실제 스크롤 리스트)가
+   늘어난 박스 높이를 다시 이어받게 한다.
+
+   flex-basis는 반드시 0이어야 한다(auto면 안 됨) — .lotto__body의
+   grid가 "이 행이 몇 px이어야 하는지" 미리 잴 때, flex-basis: auto인
+   자식은 자기 콘텐츠 실제 높이(50행 전부, 스크롤 없이 ~2900px)를
+   그대로 제출해버린다. 그러면 오른쪽 컬럼의 "타고난 높이" 자체가
+   왼쪽보다 훨씬 커져서, align-items: stretch가 오히려 왼쪽 컬럼을
+   그 큰 값으로 늘려버리고(왼쪽에는 그 늘어난 공간을 받아줄 flex-grow
+   자식이 없으니) 왼쪽 컬럼 하단에 빈 공간이 생기는 정반대 결과가
+   났었다. flex-basis: 0은 이 사전 측정 단계에서 이 박스가 "0"이라고
+   보고하게 만들어, 그리드 행 높이가 왼쪽 컬럼의 자연스러운 높이로
+   정해지게 하고, 실제 렌더링 때(높이가 확정된 뒤) flex-grow가 그
+   확정된 높이만큼만 이 박스를 채운다. */
+.lotto__section--history {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
 }
 
 /* .card__title과 동일한 타입 스케일(크기/굵기/자간/색상)을 공유해서,
    카드 제목과 카드 내부 섹션 라벨이 같은 위계 톤으로 읽히게 한다 —
    uppercase는 이 텍스트가 전부 한글+이모지라 시각적으로는 무효과지만,
-   두 클래스의 규칙을 완전히 동일하게 맞춰 앞으로 스타일이 갈라지지
-   않도록 한다. */
+   두 클래스의 규칙을 완전히 동일하게 맞춘다. margin-bottom을
+   좁게 잡은 이유는 제목과 바로 아래 내용(리스트 첫 줄 등)이 한
+   그룹으로 읽히게 하기 위해서다 — 그룹 사이의 넓은 여백은 대신
+   .lotto__col의 gap이 담당한다. */
 .lotto__section-title {
-  margin: 0 0 var(--space-3);
+  margin: 0 0 var(--space-2);
   font-size: 12.5px;
   font-weight: 600;
   letter-spacing: 0.09em;
@@ -1373,6 +1428,20 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
+}
+
+/* 토글 버튼 + 상태 캡션(CollectionToggle.tsx)을 세로로 쌓아 왼쪽
+   정렬하는 자기만의 줄 — 카드 제목("🎱 로또")과 그 아래 최신 회차
+   정보("1236회 · ...") 사이에서, "이 카드가 최신 회차를 어떻게
+   갱신하는지"에 대한 설정이라는 맥락을 유지하면서도 헤더에는
+   제목만 남긴다. margin-bottom으로 아래 최신 회차 정보와 살짝
+   떼어놓아 별개의 영역임을 알린다. */
+.lotto__toggle-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin-bottom: var(--space-3);
 }
 
 .lotto__latest-meta {
@@ -1425,12 +1494,12 @@
 .lotto__badges {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2);
+  gap: 10px;
 }
 
 .lotto__insight-text {
   font-size: 14.5px;
-  line-height: 1.7;
+  line-height: 1.8;
   color: var(--text);
   margin: 0 0 var(--space-2);
 }
@@ -1444,16 +1513,47 @@
   color: var(--text-dim);
 }
 
+/* 고정 max-height 대신 flex: 1로 .lotto__section--history 박스 안의
+   남는 세로 공간을 그대로 흡수한다 — 그 박스 자체가 왼쪽 컬럼 높이에
+   맞춰 늘어나므로(.lotto__section--history 참고), 결과적으로 왼쪽/
+   오른쪽 컬럼의 바닥선이 맞춰진다. 50행 전체보다 공간이 부족하면
+   overflow-y: auto가 그 안에서 스크롤을 만든다. 두 컬럼이 같은 그리드
+   행에 있지 않은 좁은 화면(860px 이하)에서는 늘어날 여유 공간이
+   없으므로 그 media query에서 max-height 상한을 다시 준다. */
 .lotto__history {
   list-style: none;
   margin: 0;
   padding: 0;
-  max-height: 320px;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+}
+
+/* 세로 스택(860px 이하)에서는 두 .lotto__col이 각자 다른 그리드 행에
+   놓여 align-items: stretch가 둘의 높이를 맞춰줄 대상이 없다 —
+   .lotto__col 자신의 높이가 외부에서 정해지지 않고 콘텐츠로만
+   정해지는데, flex-basis: 0/min-height: 0인 .lotto__section--history는
+   채울 여유 공간이 없으면 그대로 0으로 찌그러진다(실제로 리스트가
+   사라지는 버그로 나타났다). flex-grow를 꺼서 자기 콘텐츠만큼만
+   차지하게 하고, 회차별 당첨번호 리스트가 50행까지 끝없이 늘어나
+   페이지를 길게 만들지 않도록 원래 있던 내부 스크롤 상한선을 준다.
+
+   이 media query를 .lotto__section--history/.lotto__history의 기본
+   규칙보다 반드시 아래에 둔다 — 미디어쿼리 조건이 아니라 소스 순서가
+   동일 specificity의 승패를 가르기 때문에, 위쪽에 두면 아래 나오는
+   기본 규칙에 덮어써진다(데스크톱 컴팩트 모드 블록 맨 위 주석 참고). */
+@media (max-width: 860px) {
+  .lotto__section--history {
+    flex: 0 0 auto;
+  }
+
+  .lotto__history {
+    max-height: 320px;
+  }
 }
 
 .lotto__history-row {
@@ -1555,15 +1655,6 @@
   text-align: center;
 }
 
-.lotto__collection-toggle {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-2) var(--space-3);
-  padding: var(--space-2) var(--space-4);
-  border-bottom: 1px solid var(--panel-border);
-}
-
 .lotto__toggle-btn {
   padding: 6px 14px;
   border: 1px solid var(--panel-border);
@@ -1597,7 +1688,7 @@
 }
 
 .lotto__recommendation {
-  padding: var(--space-3);
+  padding: var(--space-4);
   background: var(--panel-alt);
   border-radius: var(--radius-control);
 }
@@ -1621,17 +1712,6 @@
   font-size: 12.5px;
 }
 
-/* trend/regression은 이름만 보면 예측 알고리즘처럼 들릴 수 있어, 눈에
-   잘 띄는 경고 톤(danger 계열의 옅은 배경)으로 무관함을 분명히 한다. */
-.lotto__rec-mode-caveat {
-  margin: 0 0 var(--space-3);
-  padding: 6px var(--space-2);
-  border-radius: var(--radius-control);
-  background: color-mix(in srgb, var(--accent-danger) 10%, transparent);
-  color: color-mix(in srgb, var(--accent-danger) 85%, var(--text-dim));
-  font-size: 11.5px;
-}
-
 .lotto__rec-set-stats {
   margin-top: 6px;
   font-size: 11px;
@@ -1646,9 +1726,9 @@
 .lotto__rec-disclaimer {
   font-size: 11px;
   color: var(--text-faint);
-  margin: var(--space-2) 0 0;
+  margin: var(--space-3) 0 0;
   padding-top: var(--space-2);
-  border-top: 1px dashed var(--panel-border);
+  border-top: 1px solid var(--panel-border);
 }
 
 .lotto__rec-blackout {
@@ -1784,10 +1864,6 @@
      그렇게 하면 토글 버튼 텍스트가 단어 중간에서 줄바꿈되어 버린다. */
 
   .lotto__col {
-    gap: var(--space-4);
-  }
-
-  .lotto__history {
-    max-height: 260px;
+    gap: var(--space-5);
   }
 }

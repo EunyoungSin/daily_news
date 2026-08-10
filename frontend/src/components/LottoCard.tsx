@@ -84,8 +84,6 @@ export default function LottoCard({
         )}
       </header>
 
-      <CollectionToggle onToggle={onRetry} />
-
       {loading && !section && (
         <div className="card__body lotto__skeleton" aria-label="로또 데이터 불러오는 중">
           <div className="skeleton-weather-row">
@@ -137,6 +135,9 @@ export default function LottoCard({
         <div className="card__body lotto__body">
           <div className="lotto__col">
             <div className="lotto__latest">
+              <div className="lotto__toggle-row">
+                <CollectionToggle onToggle={onRetry} />
+              </div>
               <div className="lotto__latest-meta">
                 {section.data.latest.drwNo}회 · {section.data.latest.drwDate}
               </div>

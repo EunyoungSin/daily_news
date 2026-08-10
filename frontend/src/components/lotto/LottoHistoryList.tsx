@@ -21,7 +21,7 @@ function HistoryRow({ draw }: { draw: LottoDraw }) {
 // 비용도 있어(최대 50행) LottoCard.tsx에서 React.lazy로 지연 로딩한다.
 export default function LottoHistoryList({ history }: { history: LottoDraw[] }) {
   return (
-    <div className="lotto__section">
+    <div className="lotto__section lotto__section--history">
       <h3 className="lotto__section-title">회차별 당첨번호 (최근 {history.length}회)</h3>
       <ol className="lotto__history">
         {history.map((draw) => (

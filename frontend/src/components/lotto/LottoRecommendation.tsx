@@ -3,9 +3,9 @@ import type { LottoRecommendation, LottoRecommendationMode, LottoRecommendationS
 import LottoBall from './LottoBall'
 
 const MODE_OPTIONS: { value: LottoRecommendationMode; label: string }[] = [
-  { value: 'uniform', label: '완전 무작위' },
-  { value: 'trend', label: '핫넘버 우선' },
-  { value: 'regression', label: '콜드넘버 우선' },
+  { value: 'trend', label: '🔥 고빈도 번호 우선' },
+  { value: 'regression', label: '❄️ 저빈도 번호 우선' },
+  { value: 'uniform', label: '⚖️ 완전 무작위' },
 ]
 
 const BAND_LABELS = ['1-9', '10-19', '20-29', '30-39', '40-45']
@@ -73,9 +73,6 @@ interface Props {
 
 export default function LottoRecommendation({ recommendation, mode, onModeChange }: Props) {
   const countdown = useCountdownLabel(recommendation.isBlackout ? recommendation.nextAvailableAt : undefined)
-  // trend/regression은 이름만 보면 예측 알고리즘처럼 들릴 수 있어, 과거
-  // 출현 패턴을 재미로 반영한 것일 뿐이라는 설명을 눈에 잘 띄게 붙인다.
-  const showModeCaveat = mode === 'trend' || mode === 'regression'
 
   return (
     <div className="lotto__section lotto__recommendation">
@@ -91,11 +88,6 @@ export default function LottoRecommendation({ recommendation, mode, onModeChange
           ))}
         </select>
       </label>
-      {showModeCaveat && (
-        <p className="lotto__rec-mode-caveat">
-          ⚠️ 과거 출현 패턴을 재미로 반영한 방식일 뿐, 실제 확률과는 무관합니다.
-        </p>
-      )}
 
       {recommendation.isBlackout ? (
         <div className="lotto__rec-blackout">

@@ -29,8 +29,12 @@ export default function CollectionToggle({ onToggle }: { onToggle: () => void })
     onToggle()
   }
 
+  // 이 버튼과 상태 캡션은 LottoCard.tsx의 .lotto__toggle-row(카드 제목과
+  // 최신 회차 정보 사이, 세로로 쌓이는 자기만의 줄)에 Fragment로 흘러
+  // 들어간다 — 버튼 아래 캡션이 자연스럽게 다음 줄로 쌓이도록 별개의
+  // flex item으로 둔다.
   return (
-    <div className="lotto__collection-toggle">
+    <>
       <button
         type="button"
         className={running ? 'lotto__toggle-btn lotto__toggle-btn--on' : 'lotto__toggle-btn'}
@@ -46,6 +50,6 @@ export default function CollectionToggle({ onToggle }: { onToggle: () => void })
           마지막 성공: {status.lastCollectedAt ? formatDateTime(status.lastCollectedAt) : '아직 없음'}
         </span>
       )}
-    </div>
+    </>
   )
 }
