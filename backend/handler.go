@@ -29,6 +29,17 @@ const sectionTimeout = 8 * time.Second
 // 더 크게 늘어나는 손해가 더 크다고 판단했다.
 const weatherSectionTimeout = 21 * time.Second
 
+// newsSectionTimeout은 뉴스(브리핑용 내부 조회)만을 위한 별도 예산이다 —
+// weatherSectionTimeout과 같은 이유로 sectionTimeout(8초)에서 분리했다.
+// 실측 결과 NewsData.io는 평소 1초 안팎으로 응답하지만, "context deadline
+// exceeded"로 실패한 사례가 실제로 보고되어 약간의 여유를 더 뒀다 — 8초를
+// 유지한 채 원인을 크레딧 소진/타임아웃 설정으로 좁혀본 결과 둘 다 원인이
+// 아니었고(오늘 남은 크레딧 충분, 재시도 시 0.9초 만에 정상 응답) 일시적
+// 외부 지연 쪽에 무게가 실렸으므로, 근본 원인을 알 수 없는 그런 순간적
+// 지연을 흡수할 여지를 조금 늘리는 선에서 12초로 올렸다. 환율은 여전히
+// sectionTimeout(8초)을 그대로 쓴다.
+const newsSectionTimeout = 12 * time.Second
+
 func withTiming(fn func() error) (int64, error) {
 	start := time.Now()
 	err := fn()
@@ -100,7 +111,7 @@ func dashboardHandler(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		defer wg.Done()
-		ctx, cancel := context.WithTimeout(r.Context(), sectionTimeout)
+		ctx, cancel := context.WithTimeout(r.Context(), newsSectionTimeout)
 		defer cancel()
 
 		data, _, err := getCachedOrFetchNews(ctx, newsCategory, newsRegion)

@@ -1,7 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"log"
+	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -177,5 +182,46 @@ func TestCoalesceNewsFetchPropagatesErrorToAllWaiters(t *testing.T) {
 		if !errors.Is(err, wantErr) {
 			t.Errorf("caller %d: expected the shared error %v, got %v", i, wantErr, err)
 		}
+	}
+}
+
+// TestLogNewsDataIORateLimitHeadersLogsRealHeaderNames은 실측(curl로
+// NewsData.io를 직접 호출)으로 확인한 실제 헤더 이름들을 회귀 테스트로
+// 고정한다 — 문서화되어 있지 않아 이름이 바뀌면 조용히 로그가 비게 될
+// 수 있으므로, 헤더 이름 자체가 맞는지 여기서 검증한다.
+func TestLogNewsDataIORateLimitHeadersLogsRealHeaderNames(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	header := http.Header{}
+	header.Set("X-RateLimit-Limit", "60")
+	header.Set("X-RateLimit-Remaining", "59")
+	header.Set("X-RateLimit-Reset", "1786427692")
+	header.Set("X-API-Limit-Remaining", "194")
+	header.Set("Retry-After", "900")
+
+	logNewsDataIORateLimitHeaders(header)
+
+	logged := buf.String()
+	for _, want := range []string{"59", "60", "1786427692", "194", "900"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("expected log output to contain %q, got %q", want, logged)
+		}
+	}
+}
+
+// TestLogNewsDataIORateLimitHeadersSkipsWhenAbsent는 헤더가 전혀 없을 때
+// (다른 요금제이거나 NewsData.io가 표기를 바꾼 경우) 패닉하거나 의미 없는
+// 로그를 남기지 않아야 함을 확인한다.
+func TestLogNewsDataIORateLimitHeadersSkipsWhenAbsent(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	logNewsDataIORateLimitHeaders(http.Header{})
+
+	if buf.Len() != 0 {
+		t.Errorf("expected no log output when no rate-limit headers are present, got %q", buf.String())
 	}
 }

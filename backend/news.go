@@ -112,11 +112,21 @@ func fetchNewsDataIO(ctx context.Context, category, region string) (*NewsData, e
 	recordNewsDataIOCall()
 	log.Printf("[NewsData.io 호출] category=%s region=%s (오늘 %d회째)", category, region, newsDataIOUsageCount())
 
+	callStart := time.Now()
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		// resp가 nil이라 응답 헤더 자체가 없다 — 크레딧/한도 문제라면 보통
+		// 즉시 4xx로 거절되지, 이렇게 응답 자체를 못 받고 "context deadline
+		// exceeded"로 실패하지는 않는다. 걸린 시간을 함께 남겨서, 실제로
+		// sectionTimeout(호출부 참고) 한도까지 꽉 채우고 끊긴 것인지(=
+		// NewsData.io가 느렸거나 네트워크 경로가 막혔던 것) 아니면 그보다
+		// 훨씬 이르게 실패했는지(연결 자체가 즉시 거부된 것) 구분할 수 있게
+		// 한다.
+		log.Printf("[NewsData.io 호출] category=%s region=%s 실패(%s 경과): %v", category, region, time.Since(callStart).Round(time.Millisecond), err)
 		return nil, err
 	}
 	defer resp.Body.Close()
+	logNewsDataIORateLimitHeaders(resp.Header)
 
 	var parsed newsDataIOResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
@@ -231,6 +241,34 @@ func recordNewsDataIOCall() {
 		newsDataIOUsage.count = 0
 	}
 	newsDataIOUsage.count++
+}
+
+// logNewsDataIORateLimitHeaders는 NewsData.io 응답에 실제로 담겨 오는
+// 한도 관련 헤더를 로그로 남긴다 — 실측(curl로 직접 호출) 결과 확인된
+// 헤더 이름을 그대로 사용한다: X-RateLimit-Limit/-Remaining/-Reset은
+// 15분 단위 요청 속도 제한이고, X-API-Limit-Remaining은 하루 200-credit
+// 요금제 기준 오늘 남은 크레딧이다(newsDataIOUsage의 자체 카운터는 이
+// 프로세스가 직접 호출한 횟수만 세므로, 여러 인스턴스가 같은 키를
+// 공유하거나 프로세스가 재시작되면 실제 값과 어긋날 수 있다 — 이 헤더가
+// NewsData.io 스스로 집계한 진짜 값이라 교차 검증에 쓸 수 있다).
+// Retry-After는 문서상 429(Rate Limit Exceeded) 응답에 실린다고 되어
+// 있지만 실측 결과 200 응답에도 항상 실려 있었다(다음 15분 창이 초기화될
+// 때까지 남은 초) — 값이 비어있지 않으면 그대로 남긴다. 어느 헤더든
+// 없으면(다른 요금제거나 NewsData.io가 표기를 바꾸면) 빈 문자열이
+// 반환되므로 orDash로 "-"를 대신 찍는다.
+func logNewsDataIORateLimitHeaders(header http.Header) {
+	rateLimit := header.Get("X-RateLimit-Limit")
+	rateRemaining := header.Get("X-RateLimit-Remaining")
+	rateReset := header.Get("X-RateLimit-Reset")
+	dailyRemaining := header.Get("X-API-Limit-Remaining")
+	retryAfter := header.Get("Retry-After")
+
+	if rateLimit == "" && rateRemaining == "" && dailyRemaining == "" {
+		return
+	}
+
+	log.Printf("[NewsData.io 호출] 남은 한도 — 15분당 요청: %s/%s(reset=%s), 오늘 남은 크레딧: %s, Retry-After: %s",
+		orDash(rateRemaining), orDash(rateLimit), orDash(rateReset), orDash(dailyRemaining), orDash(retryAfter))
 }
 
 func newsDataIOUsageCount() int {

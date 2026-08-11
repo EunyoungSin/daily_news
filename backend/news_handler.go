@@ -7,7 +7,11 @@ import (
 	"time"
 )
 
-const newsTimeout = 8 * time.Second
+// newsTimeout은 handler.go의 newsSectionTimeout과 같은 값을 쓴다 — 이
+// 엔드포인트도 결국 같은 getCachedOrFetchNews/NewsData.io 호출 경로를
+// 타므로, 브리핑용 내부 조회만 여유를 늘리고 뉴스 카드 자체는 그대로
+// 8초로 남겨두면 카드 쪽만 여전히 쉽게 타임아웃되는 비대칭이 생긴다.
+const newsTimeout = 12 * time.Second
 
 // newsHandler는 (GET /api/dashboard에 묶여 있는 날씨/환율/브리핑과 달리)
 // 독립된 엔드포인트다. 덕분에 뉴스 카드는 다른 섹션을 건드리지 않고
