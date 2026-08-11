@@ -1163,3 +1163,45 @@ func TestNewsBriefingPromptFitsWithinTokenBudget(t *testing.T) {
 		t.Errorf("뉴스 브리핑 프롬프트 추정 토큰 수 %d가 예산 %d를 초과했습니다 — newsSectionSystemPrompt나 briefingNewsDescriptionMaxRunes/briefingNewsTitleMaxRunes를 더 줄여야 합니다", total, briefingNewsPromptTokenBudget)
 	}
 }
+
+// TestNewsSectionSystemPromptBansCJKAsTopPriorityRule은 실제 보고된
+// 재발 사례를 회귀 테스트로 고정한다: "domestic/international이 같은
+// briefingCommonRules를 공유하니 CJK 금지 지침이 이미 적용돼 있다"고
+// 판단했던 것과 별개로, 리팩터링 과정에서 이 지침 자체가 조용히
+// 빠지거나 순서가 밀려날 위험은 항상 남아있다. 이 테스트는 (1) 지침이
+// 실제로 존재하는지, (2) 다른 규칙보다 먼저(최우선 순위로) 오는지를
+// 직접 문자열로 검증한다 — international 전용 프롬프트가 따로 없고
+// newsSectionSystemPrompt 하나를 domestic/international이 그대로
+// 공유하므로, 이 테스트 하나로 두 경로 모두를 커버한다.
+func TestNewsSectionSystemPromptBansCJKAsTopPriorityRule(t *testing.T) {
+	cjkRuleIdx := strings.Index(newsSectionSystemPrompt, "한자·중국어·일본어")
+	if cjkRuleIdx == -1 {
+		t.Fatal("expected newsSectionSystemPrompt to contain an explicit CJK-ban rule, found none")
+	}
+
+	informalToneRuleIdx := strings.Index(newsSectionSystemPrompt, "합니다체(존댓말)로")
+	if informalToneRuleIdx == -1 {
+		t.Fatal("sanity check failed: expected to find the honorific-tone rule for position comparison")
+	}
+	if cjkRuleIdx >= informalToneRuleIdx {
+		t.Errorf("expected the CJK-ban rule to appear before other common rules (highest priority), but it came after the tone rule (cjk idx=%d, tone idx=%d)", cjkRuleIdx, informalToneRuleIdx)
+	}
+
+	// 입력(원문 헤드라인)에 영어와 이미 계산된 한글 숫자 표기가 섞여
+	// 있어도 순수 한국어로 재구성하라는 지침이 명시적으로 있어야 한다 —
+	// annotateNumericUnits가 "revenue of 6010만 달러 misses"처럼 원문
+	// 자체를 의도적으로 영어+한글 혼종으로 만들어두기 때문에, 모델이 이
+	// 혼종 입력을 그대로 베끼거나 착각해 한자로 새는 것을 막기 위함이다.
+	if !strings.Contains(newsSectionSystemPrompt, "영어 문장과 이미 계산된 한글 숫자 표기가 섞여") {
+		t.Error("expected an explicit instruction addressing mixed English/Korean-numeral input")
+	}
+
+	// domestic/international이 이 지침을 정말로 공유하는지 — 별도의
+	// region 전용 프롬프트 상수가 있다면 이 회귀 자체가 재발할 수 있다.
+	if weatherSectionSystemPrompt == newsSectionSystemPrompt || exchangeSectionSystemPrompt == newsSectionSystemPrompt {
+		t.Fatal("sanity check failed: section prompts should be distinct from each other")
+	}
+	if !strings.HasPrefix(newsSectionSystemPrompt, briefingCommonRules) {
+		t.Error("expected newsSectionSystemPrompt to start with the shared briefingCommonRules (the single source of the CJK-ban rule for both domestic and international)")
+	}
+}

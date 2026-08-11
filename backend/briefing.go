@@ -1168,11 +1168,11 @@ func allowedNewsNumbers(input *briefingNewsInput) []float64 {
 // 토큰과 프롬프트 복잡도를 줄이기 위해 detailed 하나의 순수 텍스트만
 // 반환하도록 단순화했다 — callGroqChat도 jsonMode=false로 호출한다.)
 const briefingCommonRules = `공통 규칙:
+- [최우선] 응답은 반드시 순수 한국어로만 — 한자·중국어·일본어 문자는 단 하나도 쓰지 마세요. 입력에 영어 문장과 이미 계산된 한글 숫자 표기가 섞여 있어도(예: "revenue of 6010만 달러 misses") 그 숫자 값은 그대로 쓰되 문장 전체를 완전한 한국어로 재구성하세요 — 영어 단어를 그대로 옮기지 말고, 절대 한자·일본어로 바꿔 쓰지 마세요(숫자, USD/KRW 같은 약어, 고유명사는 예외).
 - 항상 합니다체(존댓말)로 — 반말·기사체·인터넷 은어·이모지 금지.
 - 마크다운·제목 없이 순수 문장만.
 - 데이터에 없는 내용을 지어내지 마세요.
 - 같은 구절을 문장 안에서 반복하지 마세요.
-- 순수 한국어만 사용 — 한자·중국어·일본어 금지(숫자, USD/KRW 같은 약어는 예외), 영어 원문은 한국어 문장으로 재구성(고유명사는 예외).
 - 문장 텍스트만 그대로 출력 — 따옴표·설명·코드블록 금지.
 
 문장 수: 부연할 데이터가 있으면 2문장, 없으면 1문장 — 채우려고 지어내지 마세요.`
@@ -1506,8 +1506,14 @@ func generateNewsSectionText(ctx context.Context, name, model, systemPrompt, use
 
 	retryText, retryErr := generateSectionText(ctx, name, frequentGroqModel(), systemPrompt, reducedUserContent, allowedNewsNumbers(reduced), newsGroundingText(reduced), hallucinationFallback)
 	if retryErr != nil {
-		log.Printf("브리핑(%s): 문제 항목 제외 후에도 생성 실패 — stale_fallback으로 넘어갑니다", name)
-		return text, err
+		// retryErr(이번 시도의 실제 실패 사유)을 반환해야 한다 — 예전에는
+		// 여기서 최초 실패(err, 예: "한자/CJK 문자 감지")를 그대로
+		// 반환했는데, 그러면 이 세 번째 시도가 실제로는 API 오류든 빈
+		// 응답이든 또 다른 검증 실패든, 로그와 최종 실패 사유(및
+		// classifyBriefingFailureReason 분류)에는 항상 두 번째 시도의
+		// 낡은 사유만 남아 실제 원인을 알 수 없었다.
+		log.Printf("브리핑(%s): 문제 항목 제외 후에도 생성 실패(%v) — stale_fallback으로 넘어갑니다 (최초 실패 사유는 참고용: %v)", name, retryErr, err)
+		return retryText, retryErr
 	}
 	log.Printf("브리핑(%s): 문제 항목 제외 후 재생성 성공", name)
 	return retryText, nil
