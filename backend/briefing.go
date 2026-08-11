@@ -965,10 +965,46 @@ func isGroundedSportsRoundNumber(num float64, groundingText string) bool {
 	return false
 }
 
+// extractEnglishUnitNumbers는 groundingText(원문 영어 헤드라인/description)에서
+// numericUnitPattern으로 잡히는 "숫자+단위" 표현("£25bn", "$6.6bn", "25
+// million")을 찾아, annotateNumericUnits와 같은 배수를 적용한 값으로
+// 반환합니다 — 사전 변환 단계와 똑같은 계산을 검증 단계에서 원문을
+// 대상으로 한 번 더 수행하는 것입니다.
+//
+// 정상적인 흐름이라면 briefingNewsInput.Items는 이미 annotateNumericUnits를
+// 거친 뒤라 groundingText에는 "bn"/"million" 같은 원문 단위 표기가 전혀
+// 남아있지 않고 "250억"처럼 이미 변환된 한글 숫자만 있어야 합니다 — 그
+// 경우 allowedNumbers 쪽 extractNumbers가 이미 250억을 뽑아내므로 이
+// 함수는 아무것도 찾지 못한 채 지나갑니다. 이 함수는 그 사전 변환이
+// 놓친 경우(예: description이 잘리며 단위 글자까지 잘려나간 경우, 또는
+// annotateNumericUnits가 아직 인식하지 못하는 새 표기)에 대한 이중
+// 방어선입니다 — "£25bn"이 무슨 이유로든 원문 그대로 남아있어도, 생성문의
+// "250억"을 여전히 근거 있는 값으로 인정할 수 있게 합니다.
+func extractEnglishUnitNumbers(groundingText string) []float64 {
+	if groundingText == "" {
+		return nil
+	}
+	var result []float64
+	for _, m := range numericUnitPattern.FindAllStringSubmatch(groundingText, -1) {
+		numStr, unitText := m[2], strings.ToLower(m[3])
+		multiplier, ok := numericUnitMultipliers[unitText]
+		if !ok {
+			continue
+		}
+		num, err := strconv.ParseFloat(numStr, 64)
+		if err != nil {
+			continue
+		}
+		result = append(result, num*multiplier)
+	}
+	return result
+}
+
 // findUngroundedNumber는 text에 언급된 숫자 중, allowedNumbers 안의
-// 어떤 숫자와도 (numbersMatch의 오차 범위 내에서) 대응되지 않고
-// sportsRoundExceptions에도 해당하지 않는 첫 번째 숫자를 반환합니다 —
-// 즉, 모델이 주어진 데이터에서 가져온 게 아니라 지어낸 것으로 보이는
+// 어떤 숫자와도 (numbersMatch의 오차 범위 내에서) 대응되지 않고,
+// sportsRoundExceptions에도, groundingText의 단위 표기를 환산한
+// extractEnglishUnitNumbers에도 해당하지 않는 첫 번째 숫자를 반환합니다
+// — 즉, 모델이 주어진 데이터에서 가져온 게 아니라 지어낸 것으로 보이는
 // 수치입니다. 이 검사는 예를 들어 헤드라인의 평범한 "$500"이 "1200만
 // 달러"로 둔갑해 돌아오는 경우를 잡아냅니다: 여기엔 annotateNumericUnits가
 // 처리할 K/M/B 축약 자체가 없으므로, 이 검사가 모델이 숫자를 그냥 잘못
@@ -981,16 +1017,25 @@ func isGroundedSportsRoundNumber(num float64, groundingText string) bool {
 // 허용해두지 않으면 모든 응답이 이 검사에 잘못 걸리게 됩니다.
 //
 // groundingText는 뉴스 섹션에서만 의미가 있습니다(날씨/환율은 빈 문자열을
-// 넘깁니다) — isGroundedSportsRoundNumber가 스포츠 라운드 예외를
-// 판별하는 데만 사용하며, 그 외의 숫자 검증 로직에는 영향을 주지
-// 않습니다.
+// 넘깁니다) — isGroundedSportsRoundNumber/extractEnglishUnitNumbers가
+// 각각의 예외를 판별하는 데만 사용하며, 그 외의 숫자 검증 로직에는
+// 영향을 주지 않습니다.
 func findUngroundedNumber(text, groundingText string, allowedNumbers []float64) (float64, bool) {
+	unitNumbers := extractEnglishUnitNumbers(groundingText)
 	for _, found := range extractNumbers(text) {
 		matched := false
 		for _, allowed := range allowedNumbers {
 			if numbersMatch(found, allowed) {
 				matched = true
 				break
+			}
+		}
+		if !matched {
+			for _, unitNum := range unitNumbers {
+				if numbersMatch(found, unitNum) {
+					matched = true
+					break
+				}
 			}
 		}
 		if !matched && isGroundedSportsRoundNumber(found, groundingText) {

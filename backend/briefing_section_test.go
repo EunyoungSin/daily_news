@@ -727,6 +727,42 @@ func TestFindUngroundedNumberAllowsSportsRoundTranslation(t *testing.T) {
 	}
 }
 
+// TestFindUngroundedNumberAllowsCurrencyUnitTranslation은 실제 보고된
+// 사례를 회귀 테스트로 고정한다: 정상적인 흐름에서는 annotateNumericUnits가
+// "£25bn"을 이미 "250억 파운드"로 바꿔둔 뒤라 groundingText/allowedNumbers
+// 양쪽 다 "250억"을 알고 있어야 하지만(첫 번째 케이스), description이
+// 잘리며 단위 글자가 통째로 날아가는 등 어떤 이유로 원문 그대로("£25bn")
+// groundingText에 남아있더라도(두 번째 케이스), 생성문의 "250억"을 여전히
+// 근거 있는 값으로 인정해야 한다 — extractEnglishUnitNumbers가 이 이중
+// 방어선 역할을 한다.
+func TestFindUngroundedNumberAllowsCurrencyUnitTranslation(t *testing.T) {
+	annotatedInput := toBriefingNewsInput(&NewsData{Items: []NewsItem{
+		{ID: "1", Title: "UK unveils £25bn infrastructure plan"},
+	}})
+	annotatedGrounding := newsGroundingText(annotatedInput)
+	allowed := allowedNewsNumbers(annotatedInput)
+	if num, found := findUngroundedNumber("영국이 250억 파운드 규모의 인프라 계획을 발표했습니다.", annotatedGrounding, allowed); found {
+		t.Errorf("expected the correctly converted 250억 to be grounded via the pre-annotated title, got flagged number %v", num)
+	}
+
+	rawGrounding := "UK unveils £25bn infrastructure plan"
+	if num, found := findUngroundedNumber("영국이 250억 파운드 규모의 인프라 계획을 발표했습니다.", rawGrounding, nil); found {
+		t.Errorf("expected 250억 to be grounded by the raw £25bn left in groundingText, got flagged number %v", num)
+	}
+
+	// 잘못 계산된 값(10배 과다, "2500억")은 여전히 걸러져야 한다 —
+	// 단위 예외가 아무 숫자에나 면죄부를 주는 게 아니라, 실제로 원문의
+	// £25bn을 정확히 환산한 값(250억)만 인정해야 한다.
+	if _, found := findUngroundedNumber("영국이 2500억 파운드 규모의 인프라 계획을 발표했습니다.", rawGrounding, nil); !found {
+		t.Error("expected the miscalculated 2500억(10x too large) to still be flagged as ungrounded")
+	}
+
+	// 목록에 없는 진짜 근거 없는 숫자는 여전히 걸러져야 한다.
+	if _, found := findUngroundedNumber("영국이 90억 파운드를 추가로 지원하기로 했습니다.", rawGrounding, nil); !found {
+		t.Error("expected a fabricated amount unrelated to £25bn to still be flagged as ungrounded")
+	}
+}
+
 func TestAllowedWeatherNumbersIncludesFixedHourLabels(t *testing.T) {
 	input := &briefingWeatherInput{
 		Current: briefingCurrentWeather{TemperatureC: 33.2},

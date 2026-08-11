@@ -15,6 +15,19 @@ func TestAnnotateNumericUnits(t *testing.T) {
 		{"raised $500M in Series B", "raised 5억 달러 in Series B"},
 		{"no numbers here", "no numbers here"},
 		{"a 3D model viewer", "a 3D model viewer"}, // "3D"는 단위로 매치되면 안 됨
+
+		// 실제 보고된 사례: "£25bn"이 예전 패턴(대문자 K/M/B, $ 전용)에
+		// 안 걸려 원문 그대로 모델에 전달됐고, 모델이 직접 계산하다
+		// "2500억"(10배 과다)으로 틀렸다.
+		{"UK unveils £25bn infrastructure plan", "UK unveils 250억 파운드 infrastructure plan"},
+		{"a £2.5bn deal", "a 25억 파운드 deal"},
+		{"raises $6.6bn in new funding", "raises 66억 달러 in new funding"},
+		{"a €1.2bn acquisition", "a 12억 유로 acquisition"},
+		{"invests $25 million in the project", "invests 2500만 달러 in the project"},
+		{"donated 500 thousand meals", "donated 50만 meals"},
+		// 소문자 단일 글자는 여전히 매치되면 안 된다 — "100m"이 100미터를
+		// 뜻할 수도 있는데 무조건 1억으로 바꾸면 안 되기 때문이다.
+		{"ran the 100m sprint in 9.8 seconds", "ran the 100m sprint in 9.8 seconds"},
 	}
 
 	for _, tc := range cases {
