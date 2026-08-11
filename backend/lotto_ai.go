@@ -24,6 +24,18 @@ import (
 // 그대로 넣어 그 형태를 따르게 한다. 그래도 모델이 습관적으로
 // disclaimer를 다시 붙일 가능성에 대비해 getLottoAIInsight에서
 // stripLeakedDisclaimer로 한 번 더 걸러낸다.
+
+// insightPromptVersion은 lottoAISystemPrompt의 내용을 식별하는 버전
+// 문자열이다 — getLottoAIInsight의 캐시 조회/저장 키에 포함되어, 통계
+// 입력(data_hash)과 회차(latest_drw_no)가 그대로라도 프롬프트가 바뀌면
+// 캐시를 무효화하고 Groq를 다시 호출하게 만든다. **system prompt(바로
+// 아래 lottoAISystemPrompt)의 내용을 바꿀 때마다 이 문자열도 반드시
+// 함께 올려야 한다** — 안 그러면 예전 프롬프트로 생성된 캐시 텍스트가
+// 새 프롬프트 배포 후에도 그대로 서빙된다(2026-08 발생한 실제 사고:
+// 3문장 고정 규칙으로 프롬프트를 바꿨는데 캐시 키에 버전이 없어서
+// 예전 4문장짜리 캐시가 계속 나갔다).
+const insightPromptVersion = "v3"
+
 const lottoAISystemPrompt = `당신은 로또 당첨 데이터의 통계적 특징을 재미로 설명하는 어시스턴트입니다. 아래 내용으로 정확히 3문장만 작성하세요.
 
 1문장: 최근 50회 데이터에서 가장 많이 출현한 번호(공동 1위가 있으면 모두 포함)와 그 횟수
@@ -61,7 +73,8 @@ func getLottoAIInsight(ctx context.Context, conn *sql.DB, latestDrwNo int, frequ
 	var cachedText string
 	var cachedAt time.Time
 	scanErr := conn.QueryRowContext(ctx,
-		`SELECT insight_text, generated_at FROM ai_insight_cache WHERE latest_drw_no = ? AND data_hash = ?`, latestDrwNo, dataHash,
+		`SELECT insight_text, generated_at FROM ai_insight_cache WHERE latest_drw_no = ? AND data_hash = ? AND prompt_version = ?`,
+		latestDrwNo, dataHash, insightPromptVersion,
 	).Scan(&cachedText, &cachedAt)
 
 	if scanErr == nil {
@@ -91,10 +104,10 @@ func getLottoAIInsight(ctx context.Context, conn *sql.DB, latestDrwNo int, frequ
 
 	generatedAt = time.Now()
 	_, execErr := conn.ExecContext(ctx, `
-		INSERT INTO ai_insight_cache (latest_drw_no, insight_text, data_hash, generated_at)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(latest_drw_no) DO UPDATE SET insight_text = excluded.insight_text, data_hash = excluded.data_hash, generated_at = excluded.generated_at`,
-		latestDrwNo, content, dataHash, generatedAt,
+		INSERT INTO ai_insight_cache (latest_drw_no, insight_text, data_hash, prompt_version, generated_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(latest_drw_no) DO UPDATE SET insight_text = excluded.insight_text, data_hash = excluded.data_hash, prompt_version = excluded.prompt_version, generated_at = excluded.generated_at`,
+		latestDrwNo, content, dataHash, insightPromptVersion, generatedAt,
 	)
 	if execErr != nil {
 		log.Printf("로또: AI 인사이트 캐시 저장 실패: %v", execErr)

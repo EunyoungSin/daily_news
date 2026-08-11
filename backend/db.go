@@ -253,6 +253,7 @@ CREATE TABLE IF NOT EXISTS ai_insight_cache (
 	latest_drw_no INTEGER PRIMARY KEY,
 	insight_text TEXT NOT NULL,
 	data_hash TEXT NOT NULL DEFAULT '',
+	prompt_version TEXT NOT NULL DEFAULT '',
 	generated_at TEXT DEFAULT CURRENT_TIMESTAMP
 )`
 
@@ -546,6 +547,13 @@ func migrate(conn *sql.DB) error {
 		return fmt.Errorf("create ai_insight_cache: %w", err)
 	}
 	if err := ensureColumnExists(conn, "ai_insight_cache", "data_hash", "data_hash TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrate ai_insight_cache: %w", err)
+	}
+	// 기존 행은 이 ALTER로 prompt_version = ''을 갖게 되는데, 이는
+	// lotto_ai.go의 insightPromptVersion(현재 "v3")과 항상 다르므로
+	// system prompt를 바꾼 뒤 처음 배포될 때 기존 캐시가 자동으로
+	// 무효화되어 재생성된다(수동으로 캐시 행을 지울 필요가 없다).
+	if err := ensureColumnExists(conn, "ai_insight_cache", "prompt_version", "prompt_version TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("migrate ai_insight_cache: %w", err)
 	}
 	if _, err := conn.Exec(createBriefingSectionCacheTable); err != nil {

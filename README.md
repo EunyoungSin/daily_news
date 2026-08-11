@@ -384,12 +384,20 @@ GitHub 소스가 계속 실패하면 아래 "관리자 API"로 수동 입력할 
 
 - 통계(번호별 출현 횟수, 최근 10회 출현 번호)는 Go가 아니라 DB의
   `UNION ALL` + `GROUP BY`로 집계합니다.
-- AI 인사이트는 `ai_insight_cache` 테이블에 `(latest_drw_no, data_hash)`
-  기준으로 캐싱되어, 새 회차가 추가되거나 기존 회차 데이터가 정정돼
-  통계 입력이 바뀌기 전까지는 Groq를 다시 호출하지 않습니다. 프롬프트는
-  정확히 3문장(최다 출현 번호/최소 출현 번호/최근 10회 특이 번호)만
-  요구하고 disclaimer나 마무리 문장은 붙이지 않습니다 — 그래도 모델이
-  습관적으로 disclaimer성 문장을 다시 붙이는 경우에 대비해
+- AI 인사이트는 `ai_insight_cache` 테이블에 `(latest_drw_no, data_hash,
+  prompt_version)` 기준으로 캐싱되어, 새 회차가 추가되거나 기존 회차
+  데이터가 정정돼 통계 입력이 바뀌기 전까지는 Groq를 다시 호출하지
+  않습니다. `prompt_version`(`backend/lotto_ai.go`의
+  `insightPromptVersion` 상수, 현재 `"v3"`)이 캐시 키에 포함된 이유는,
+  회차/통계가 그대로인 상태에서 system prompt 문구만 바꿔도 캐시가
+  자동으로 무효화되어야 하기 때문입니다 — 이 컬럼이 없던 시절에는
+  프롬프트를 "정확히 3문장, disclaimer 금지"로 고쳤는데도 이미 저장된
+  예전 4문장짜리 캐시가 계속 서빙되는 사고가 실제로 있었습니다.
+  **system prompt 내용을 바꿀 때마다 `insightPromptVersion` 문자열도
+  반드시 함께 올려야** 이 문제가 재발하지 않습니다. 프롬프트는 정확히
+  3문장(최다 출현 번호/최소 출현 번호/최근 10회 특이 번호)만 요구하고
+  disclaimer나 마무리 문장은 붙이지 않습니다 — 그래도 모델이 습관적으로
+  disclaimer성 문장을 다시 붙이는 경우에 대비해
   `stripLeakedDisclaimer`(`backend/lotto_ai.go`)가 캐시 히트/신규 생성
   양쪽 모두에서 "※"나 "통계적 재미"가 든 문장을 한 번 더 걸러냅니다.
 
@@ -407,7 +415,9 @@ CREATE TABLE lotto_draws (
 
 CREATE TABLE ai_insight_cache (
   latest_drw_no INTEGER PRIMARY KEY,
-  insight_text TEXT,
+  insight_text TEXT NOT NULL,
+  data_hash TEXT NOT NULL DEFAULT '',
+  prompt_version TEXT NOT NULL DEFAULT '',
   generated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
