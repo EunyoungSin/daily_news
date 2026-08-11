@@ -25,9 +25,18 @@ func TestAnnotateNumericUnits(t *testing.T) {
 		{"a €1.2bn acquisition", "a 12억 유로 acquisition"},
 		{"invests $25 million in the project", "invests 2500만 달러 in the project"},
 		{"donated 500 thousand meals", "donated 50만 meals"},
-		// 소문자 단일 글자는 여전히 매치되면 안 된다 — "100m"이 100미터를
-		// 뜻할 수도 있는데 무조건 1억으로 바꾸면 안 되기 때문이다.
+		// 소문자 단일 글자는 통화 기호가 없으면 여전히 매치되면 안 된다 —
+		// "100m"이 100미터를 뜻할 수도 있는데 무조건 1억으로 바꾸면 안
+		// 되기 때문이다.
 		{"ran the 100m sprint in 9.8 seconds", "ran the 100m sprint in 9.8 seconds"},
+
+		// 실제 보고된 재발 사례: "£25bn"(bn)은 예외 처리했지만 "£16m"(소문자
+		// 단일 글자 m)은 빠뜨려서 근거 없는 숫자로 오탐이 재발했다. £/$/€
+		// 같은 통화 기호가 앞에 붙어 있으면 소문자 단일 글자라도 "100m"
+		// 같은 단위와 헷갈릴 여지가 없으므로 안전하게 변환해야 한다.
+		{"UK invests £16m in the scheme", "UK invests 1600만 파운드 in the scheme"},
+		{"a $2.5m deal", "a 250만 달러 deal"},
+		{"a €900k grant", "a 90만 유로 grant"},
 	}
 
 	for _, tc := range cases {

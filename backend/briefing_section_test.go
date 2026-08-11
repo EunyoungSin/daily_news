@@ -286,15 +286,47 @@ func TestFindUngroundedProperNoun_RegressesTheReportedHallucination(t *testing.T
 	})
 
 	hallucinated := "두산에너빌리티가 노블리스 오일 앤 가스와 계약을 체결했다고 밝혔습니다."
-	if match, found := findUngroundedProperNoun(hallucinated, grounding); !found {
+	if match, viaCounterparty, found := findUngroundedProperNoun(hallucinated, grounding); !found {
 		t.Error("expected the fabricated '노블리스 오일 앤 가스' counterparty to be flagged as ungrounded")
 	} else {
+		if !viaCounterparty {
+			t.Errorf("expected the fabricated counterparty to be flagged via the counterparty pattern (not eligible for the core-noun leniency), got viaCounterparty=%v", viaCounterparty)
+		}
 		t.Logf("correctly flagged fabricated proper noun: %q", match)
 	}
 
 	faithful := "두산에너빌리티가 국내외에서 원전과 가스터빈 수주를 잇따라 확보했다고 밝혔습니다."
-	if match, found := findUngroundedProperNoun(faithful, grounding); found {
+	if match, _, found := findUngroundedProperNoun(faithful, grounding); found {
 		t.Errorf("expected no ungrounded proper noun in a faithful sentence, got %q", match)
+	}
+}
+
+// TestHasGroundedCoreProperNoun는 실제 보고된 사례를 회귀 테스트로
+// 고정한다: 원문에 등장한 "Panthers"가 NFL 소속이라는 상식적인 보충
+// 설명은 "Panthers" 자체가 응답에 남아있으므로 완화 대상이 되어야
+// 하고, 원문 핵심 개체 자체가 통째로 다른 이름으로 대체된 경우(두산
+// 에너빌리티 사례)는 완화 대상이 아니어야 한다.
+func TestHasGroundedCoreProperNoun(t *testing.T) {
+	panthersGrounding := "Panthers extend winning streak heading into playoffs"
+	if !hasGroundedCoreProperNoun("Panthers가 NFL 소속 팀으로서 좋은 성적을 거두고 있습니다.", panthersGrounding) {
+		t.Error("expected 'Panthers' (grounded in the source) to satisfy the core-noun leniency check")
+	}
+
+	doosanGrounding := "두산에너빌리티 원전·가스터빈 수주"
+	if hasGroundedCoreProperNoun("완전히 새로운 회사 이야기입니다.", doosanGrounding) {
+		t.Error("expected no grounded core noun when the generated text drops the source's real entity entirely")
+	}
+	// "두산에너빌리티" 자체는 여전히 남아있을 수 있다는 점이 중요하다 —
+	// 이 함수 하나만으로는 계약 상대방 날조를 구분하지 못하므로,
+	// validateSectionOutput이 lenientIfCoreNounSurvives를 계약 상대방
+	// 실패에는 애초에 false로 고정해 이 leniency 자체가 적용되지 않게
+	// 막는다(TestValidateSectionOutputPrecedence 참고).
+	if !hasGroundedCoreProperNoun("두산에너빌리티가 노블리스 오일 앤 가스와 계약을 체결했습니다.", doosanGrounding) {
+		t.Error("expected '두산에너빌리티' itself to still be found as a grounded core noun (the guard against this case lives in validateSectionOutput, not here)")
+	}
+
+	if hasGroundedCoreProperNoun("아무 관련 없는 문장입니다.", "") {
+		t.Error("expected empty groundingText to never be considered grounded")
 	}
 }
 
@@ -457,10 +489,10 @@ func TestValidateSectionOutputPerField_AvoidsSimpleDetailedOverlapFalsePositive(
 		t.Fatal("sanity check failed: expected the old combined-string check to demonstrate the false positive")
 	}
 
-	if reason, _, _ := validateSectionOutput(simple, []float64{1, 1452.35}, ""); reason != "" {
+	if reason, _, _, _ := validateSectionOutput(simple, []float64{1, 1452.35}, ""); reason != "" {
 		t.Errorf("simple alone should not fail validation, got %q", reason)
 	}
-	if reason, _, _ := validateSectionOutput(detailed, []float64{1, 1452.35, 7, 1.4}, ""); reason != "" {
+	if reason, _, _, _ := validateSectionOutput(detailed, []float64{1, 1452.35, 7, 1.4}, ""); reason != "" {
 		t.Errorf("detailed alone should not fail validation, got %q", reason)
 	}
 }
@@ -491,7 +523,7 @@ func TestFindUngroundedProperNoun(t *testing.T) {
 			if tc.name == "empty grounding text skips the check entirely" {
 				g = ""
 			}
-			_, found := findUngroundedProperNoun(tc.text, g)
+			_, _, found := findUngroundedProperNoun(tc.text, g)
 			if found != tc.wantFail {
 				t.Errorf("findUngroundedProperNoun(%q) found=%v, want %v", tc.text, found, tc.wantFail)
 			}
@@ -796,6 +828,32 @@ func TestFindUngroundedNumberAllowsCurrencyUnitTranslation(t *testing.T) {
 	}
 }
 
+// TestFindUngroundedNumberAllowsMillionUnitTranslation은 실제 재발한
+// 사례를 회귀 테스트로 고정한다: bn(billion) 단위는 예외 처리했지만
+// m(million) 단위를 빠뜨려서 "£16m → 1600만"처럼 정확히 환산된 값까지
+// 다시 근거 없는 숫자로 오탐했다. numericUnitPattern/parseNumericUnitMatch
+// 하나로 k/m/b를 함께 관리하도록 정리한 뒤로는 재발하지 않아야 한다.
+func TestFindUngroundedNumberAllowsMillionUnitTranslation(t *testing.T) {
+	annotatedInput := toBriefingNewsInput(&NewsData{Items: []NewsItem{
+		{ID: "1", Title: "UK invests £16m in the scheme"},
+	}})
+	annotatedGrounding := newsGroundingText(annotatedInput)
+	allowed := allowedNewsNumbers(annotatedInput)
+	if num, found := findUngroundedNumber("영국이 이 사업에 1600만 파운드를 투자했습니다.", annotatedGrounding, allowed); found {
+		t.Errorf("expected the correctly converted 1600만 to be grounded via the pre-annotated title, got flagged number %v", num)
+	}
+
+	rawGrounding := "UK invests £16m in the scheme"
+	if num, found := findUngroundedNumber("영국이 이 사업에 1600만 파운드를 투자했습니다.", rawGrounding, nil); found {
+		t.Errorf("expected 1600만 to be grounded by the raw £16m left in groundingText, got flagged number %v", num)
+	}
+
+	// 잘못 계산된 값이나 무관한 금액은 여전히 걸러져야 한다.
+	if _, found := findUngroundedNumber("영국이 이 사업에 1억6000만 파운드를 투자했습니다.", rawGrounding, nil); !found {
+		t.Error("expected the miscalculated amount to still be flagged as ungrounded")
+	}
+}
+
 func TestAllowedWeatherNumbersIncludesFixedHourLabels(t *testing.T) {
 	input := &briefingWeatherInput{
 		Current: briefingCurrentWeather{TemperatureC: 33.2},
@@ -904,6 +962,7 @@ func TestValidateSectionOutputPrecedence(t *testing.T) {
 		wantFailure  bool
 		wantHard     bool
 		wantFallback bool
+		wantLenient  bool
 	}{
 		{
 			name:        "clean text passes",
@@ -949,13 +1008,36 @@ func TestValidateSectionOutputPrecedence(t *testing.T) {
 			wantFallback: true,
 		},
 		{
-			name:         "ungrounded proper noun is hard with fallback",
+			// 계약 상대방 날조는 lenientIfCoreNounSurvives가 항상 false다 —
+			// "두산에너빌리티"라는 원문 핵심 개체 자체는 응답에 남아있지만,
+			// 그와 거래했다는 "노블리스 오일 앤 가스"는 완전히 지어낸
+			// 별개의 회사이므로 hasGroundedCoreProperNoun 완화 대상이 되면
+			// 안 된다.
+			name:         "fabricated contract counterparty is hard with fallback, not lenient",
 			text:         "두산에너빌리티가 노블리스 오일 앤 가스와 계약을 체결했다는 소식이 전해졌습니다.",
 			allowed:      []float64{},
 			grounding:    "두산에너빌리티 원전·가스터빈 수주",
 			wantFailure:  true,
 			wantHard:     true,
 			wantFallback: true,
+			wantLenient:  false,
+		},
+		{
+			// 실제 보고된 사례: 원문에 등장한 "Panthers"가 NFL 소속이라는
+			// 것은 상식적인 보충 설명이지 지어낸 사실이 아닌데도, 원문에
+			// literal한 "NFL"이 없다는 이유만으로 hallucination 취급됐다.
+			// 계약 상대방 패턴이 아니라 일반 고유명사 루프에서 걸리므로
+			// lenientIfCoreNounSurvives는 true여야 한다 — 실제 완화 여부는
+			// hasGroundedCoreProperNoun(생성문에 "Panthers"가 남아있는지)이
+			// generateSectionText 단계에서 추가로 판단한다.
+			name:         "ungrounded league affiliation is hard with fallback, but lenient",
+			text:         "Panthers가 NFL 소속 팀으로서 이번 시즌 좋은 성적을 거두고 있다는 소식이 전해졌습니다.",
+			allowed:      []float64{},
+			grounding:    "Panthers extend winning streak heading into playoffs",
+			wantFailure:  true,
+			wantHard:     true,
+			wantFallback: true,
+			wantLenient:  true,
 		},
 		{
 			name:        "informal/기사체 sentence ending is hard",
@@ -975,7 +1057,7 @@ func TestValidateSectionOutputPrecedence(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			reason, hard, fallback := validateSectionOutput(tc.text, tc.allowed, tc.grounding)
+			reason, hard, fallback, lenient := validateSectionOutput(tc.text, tc.allowed, tc.grounding)
 			if (reason != "") != tc.wantFailure {
 				t.Fatalf("failure = %v (reason=%q), want %v", reason != "", reason, tc.wantFailure)
 			}
@@ -987,6 +1069,9 @@ func TestValidateSectionOutputPrecedence(t *testing.T) {
 			}
 			if fallback != tc.wantFallback {
 				t.Errorf("useFallback = %v, want %v", fallback, tc.wantFallback)
+			}
+			if lenient != tc.wantLenient {
+				t.Errorf("lenientIfCoreNounSurvives = %v, want %v", lenient, tc.wantLenient)
 			}
 		})
 	}

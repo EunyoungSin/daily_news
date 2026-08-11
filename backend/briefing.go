@@ -712,22 +712,32 @@ var newsContractCounterpartyPattern = regexp.MustCompile(
 // 의미가 있으며, 호출하는 쪽에서 빈 groundingText를 넘기면 이 검사
 // 자체를 건너뜁니다(날씨/환율에는 애초에 "원본 텍스트"라는 개념이
 // 없습니다).
-func findUngroundedProperNoun(text, groundingText string) (string, bool) {
+// viaCounterparty가 true면 newsContractCounterpartyPattern(계약 상대방
+// 전용 패턴)이 잡아낸 것이고, false면 newsProperNounPattern(일반 고유명사
+// 후보) 쪽입니다 — 호출자(validateSectionOutput)가 이 둘을 다르게
+// 취급합니다. 계약 상대방 날조(예: "두산에너빌리티 → 노블리스 오일 앤
+// 가스")는 원본에 있던 회사가 원본에 없는 새 회사와 거래했다고 지어내는,
+// 사실관계 자체를 조작하는 실패라 완화 대상이 될 수 없습니다. 반면
+// 일반 고유명사 후보는 "Panthers가 NFL 소속"처럼 원문의 실제 개체에
+// 상식적인 소속 정보를 보충한 경우까지 걸러낼 수 있어(생성문에
+// findGroundedCoreProperNoun으로 원문의 핵심 개체가 여전히 남아있는지
+// 확인해) 완화 여지를 둡니다.
+func findUngroundedProperNoun(text, groundingText string) (match string, viaCounterparty bool, found bool) {
 	if groundingText == "" {
-		return "", false
+		return "", false, false
 	}
 
-	for _, match := range newsProperNounPattern.FindAllString(text, -1) {
-		if allowedLatinAbbreviations[strings.ToLower(match)] {
+	for _, m := range newsProperNounPattern.FindAllString(text, -1) {
+		if allowedLatinAbbreviations[strings.ToLower(m)] {
 			continue
 		}
-		if newsProperNounExemptions[match] {
+		if newsProperNounExemptions[m] {
 			continue
 		}
-		if strings.Contains(groundingText, match) {
+		if strings.Contains(groundingText, m) {
 			continue
 		}
-		return match, true
+		return m, false, true
 	}
 
 	for _, m := range newsContractCounterpartyPattern.FindAllStringSubmatch(text, -1) {
@@ -735,10 +745,41 @@ func findUngroundedProperNoun(text, groundingText string) (string, bool) {
 		if counterparty == "" || strings.Contains(groundingText, counterparty) {
 			continue
 		}
-		return counterparty, true
+		return counterparty, true, true
 	}
 
-	return "", false
+	return "", false, false
+}
+
+// hasGroundedCoreProperNoun은 groundingText(원문)에서 뽑아낸 고유명사
+// 후보 중 적어도 하나가 생성문에 그대로 남아있는지 확인합니다 —
+// findUngroundedProperNoun이 재시도 후에도 실패했을 때(단, 계약 상대방
+// 날조가 아닌 일반 고유명사 실패에 한해), 완전히 새로운 이름을 지어낸
+// 경우와 원문의 실제 개체에 상식적인 소속 정보를 보충했을 뿐인 경우를
+// 구분하는 최소한의 기준으로 쓰입니다. 실제 보고된 사례: 원문에 등장한
+// "Panthers"가 NFL 소속이라는 것은 일반 상식 수준의 보충 설명이지 없는
+// 사실을 지어낸 게 아닌데도, 원문에 "NFL"이라는 리그명이 literal하게
+// 없다는 이유만으로 hallucination 취급되어 재시도를 반복하다 폐기됐다.
+//
+// 완벽한 판별은 아니다 — 원문의 실제 개체 하나가 살아남아 있다는 것이
+// "그 문장의 다른 모든 내용도 사실"이라는 보장은 아니다. 하지만
+// 화이트리스트를 관리하는 비용보다 훨씬 저렴하고, 실제로 위험한 유형
+// (원문의 핵심 개체 자체가 다른 이름으로 통째로 대체되는 경우)은
+// findUngroundedProperNoun의 두 번째 루프(계약 상대방 패턴)가 여전히
+// 걸러낸다 — 그 실패에는 이 완화가 적용되지 않는다.
+func hasGroundedCoreProperNoun(generated, groundingText string) bool {
+	if groundingText == "" {
+		return false
+	}
+	for _, candidate := range newsProperNounPattern.FindAllString(groundingText, -1) {
+		if allowedLatinAbbreviations[strings.ToLower(candidate)] {
+			continue
+		}
+		if strings.Contains(generated, candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 // topicTokenPattern은 findTopicMismatch가 비교할 "명사성" 토큰 후보를
@@ -979,9 +1020,11 @@ func isGroundedSportsRoundNumber(num float64, groundingText string) bool {
 
 // extractEnglishUnitNumbers는 groundingText(원문 영어 헤드라인/description)에서
 // numericUnitPattern으로 잡히는 "숫자+단위" 표현("£25bn", "$6.6bn", "25
-// million")을 찾아, annotateNumericUnits와 같은 배수를 적용한 값으로
+// million", "£16m")을 찾아, parseNumericUnitMatch(news_number_annotate.go)로
+// annotateNumericUnits와 완전히 같은 배수·예외 규칙을 적용한 값으로
 // 반환합니다 — 사전 변환 단계와 똑같은 계산을 검증 단계에서 원문을
-// 대상으로 한 번 더 수행하는 것입니다.
+// 대상으로 한 번 더 수행하는 것입니다. 두 곳이 같은 함수를 공유하므로,
+// "bn은 예외 처리했는데 m은 빠뜨림" 같은 재발이 구조적으로 어렵습니다.
 //
 // 정상적인 흐름이라면 briefingNewsInput.Items는 이미 annotateNumericUnits를
 // 거친 뒤라 groundingText에는 "bn"/"million" 같은 원문 단위 표기가 전혀
@@ -998,16 +1041,11 @@ func extractEnglishUnitNumbers(groundingText string) []float64 {
 	}
 	var result []float64
 	for _, m := range numericUnitPattern.FindAllStringSubmatch(groundingText, -1) {
-		numStr, unitText := m[2], strings.ToLower(m[3])
-		multiplier, ok := numericUnitMultipliers[unitText]
+		value, _, ok := parseNumericUnitMatch(m)
 		if !ok {
 			continue
 		}
-		num, err := strconv.ParseFloat(numStr, 64)
-		if err != nil {
-			continue
-		}
-		result = append(result, num*multiplier)
+		result = append(result, value)
 	}
 	return result
 }
@@ -1212,35 +1250,44 @@ const maxSectionRegenerations = 1
 // 분류합니다.
 // useFallback은 (뉴스 전용) 주제 불일치/퍼센트 조작/고유명사 검사에서만
 // true가 됩니다 — generateSectionText 참고.
-func validateSectionOutput(combined string, allowedNumbers []float64, groundingText string) (reason string, hardFailure, useFallback bool) {
+// lenientIfCoreNounSurvives는 오직 findUngroundedProperNoun이 계약
+// 상대방 패턴이 아니라 일반 고유명사 후보 루프에서 실패를 잡아냈을
+// 때만 true입니다 — generateSectionText가 재시도까지 소진한 뒤,
+// hasGroundedCoreProperNoun으로 원문의 핵심 개체가 생성문에 남아있는지
+// 추가로 확인해 완화 여부를 결정하는 데 씁니다(그 함수의 문서 주석
+// 참고). 계약 상대방 날조는 이 값이 항상 false라 완화 대상이 아닙니다.
+func validateSectionOutput(combined string, allowedNumbers []float64, groundingText string) (reason string, hardFailure, useFallback, lenientIfCoreNounSurvives bool) {
 	if match, found := findForeignCJK(combined); found {
-		return fmt.Sprintf("한자/CJK 문자 감지(%q)", match), true, false
+		return fmt.Sprintf("한자/CJK 문자 감지(%q)", match), true, false, false
 	}
 	if match, found := findLeakedEnglish(combined); found {
-		return fmt.Sprintf("번역되지 않은 영어(%q) 감지", match), true, false
+		return fmt.Sprintf("번역되지 않은 영어(%q) 감지", match), true, false, false
 	}
 	if phrase, found := findRepeatedPhrase(combined); found {
-		return fmt.Sprintf("반복되는 구절(%q) 감지(생성 루프 의심)", phrase), true, false
+		return fmt.Sprintf("반복되는 구절(%q) 감지(생성 루프 의심)", phrase), true, false, false
 	}
 	if num, found := findUngroundedNumber(combined, groundingText, allowedNumbers); found {
-		return fmt.Sprintf("근거 없는 숫자 감지(%v)", num), true, false
+		return fmt.Sprintf("근거 없는 숫자 감지(%v)", num), true, false, false
 	}
 	if ratio, found := findTopicMismatch(combined, groundingText); found {
-		return fmt.Sprintf("원문과 무관한 주제로 생성된 것으로 의심됨(토큰 중복도 %.0f%%)", ratio*100), true, true
+		return fmt.Sprintf("원문과 무관한 주제로 생성된 것으로 의심됨(토큰 중복도 %.0f%%)", ratio*100), true, true, false
 	}
 	if match, found := findFabricatedPercentage(combined, groundingText); found {
-		return fmt.Sprintf("원문에 없는 퍼센트(%q) 감지(hallucination 의심)", match), true, true
+		return fmt.Sprintf("원문에 없는 퍼센트(%q) 감지(hallucination 의심)", match), true, true, false
 	}
-	if match, found := findUngroundedProperNoun(combined, groundingText); found {
-		return fmt.Sprintf("원문에 없는 고유명사(%q) 감지(hallucination 의심)", match), true, true
+	if match, viaCounterparty, found := findUngroundedProperNoun(combined, groundingText); found {
+		if viaCounterparty {
+			return fmt.Sprintf("원문에 없는 계약 상대방(%q) 감지(hallucination 의심)", match), true, true, false
+		}
+		return fmt.Sprintf("원문에 없는 고유명사(%q) 감지(hallucination 의심 — 원문 핵심 개체가 남아있으면 완화됨)", match), true, true, true
 	}
 	if ending, found := findInformalSentenceEnding(combined); found {
-		return fmt.Sprintf("존댓말이 아닌 문장 종결(%q) 감지 — 원문 기사체를 그대로 따라간 것으로 의심됨", ending), true, false
+		return fmt.Sprintf("존댓말이 아닌 문장 종결(%q) 감지 — 원문 기사체를 그대로 따라간 것으로 의심됨", ending), true, false, false
 	}
 	if phrase, softViolated := findBannedPhrase(combined); softViolated {
-		return fmt.Sprintf("금칙어 감지(%q)", phrase), false, false
+		return fmt.Sprintf("금칙어 감지(%q)", phrase), false, false, false
 	}
-	return "", false, false
+	return "", false, false, false
 }
 
 // generateSectionText는 단일 섹션에 대해 model(호출자가 고른 저렴하고
@@ -1323,7 +1370,7 @@ func generateSectionText(ctx context.Context, name, model, systemPrompt, userCon
 			return "", fmt.Errorf("%s briefing response was empty", name)
 		}
 
-		reason, hardFailure, useFallback := validateSectionOutput(text, allowedNumbers, groundingText)
+		reason, hardFailure, useFallback, lenientIfCoreNounSurvives := validateSectionOutput(text, allowedNumbers, groundingText)
 		if reason == "" {
 			return text, nil
 		}
@@ -1336,6 +1383,16 @@ func generateSectionText(ctx context.Context, name, model, systemPrompt, userCon
 
 		if attempt >= maxSectionRegenerations {
 			if hardFailure {
+				if lenientIfCoreNounSurvives && hasGroundedCoreProperNoun(text, groundingText) {
+					// 원문에 없는 고유명사가 감지됐지만, 계약 상대방 날조가
+					// 아니고(lenientIfCoreNounSurvives) 원문의 핵심 개체가
+					// 응답에 그대로 남아있다 — "Panthers가 NFL 소속"처럼
+					// 상식적인 소속 정보를 보충했을 가능성이 새 이름을 통째로
+					// 지어냈을 가능성보다 높다고 보고, 재시도 후 마지막
+					// 결과를 안전 문구로 대체하는 대신 그대로 사용한다.
+					log.Printf("브리핑(%s): 재시도 후에도 %s이지만, 원문 핵심 개체가 응답에 남아있어 부분적으로 신뢰 가능하다고 보고 그대로 사용합니다", name, reason)
+					return text, nil
+				}
 				if useFallback && hallucinationFallback != "" {
 					log.Printf("브리핑(%s): 재시도 후에도 %s, 제목 기반 안전 문구로 대체", name, reason)
 					return hallucinationFallback, nil
@@ -1354,6 +1411,10 @@ func generateSectionText(ctx context.Context, name, model, systemPrompt, userCon
 		if groqEscalationCountToday() >= maxDailyGroqEscalations {
 			log.Printf("브리핑(%s): %s, 그러나 오늘 70B 승격 횟수가 안전 한도(%d회)에 도달해 승격 없이 마지막 결과를 사용합니다", name, reason, maxDailyGroqEscalations)
 			if hardFailure {
+				if lenientIfCoreNounSurvives && hasGroundedCoreProperNoun(text, groundingText) {
+					log.Printf("브리핑(%s): 승격 한도 도달 상태에서도 원문 핵심 개체가 응답에 남아있어 그대로 사용합니다", name)
+					return text, nil
+				}
 				if useFallback && hallucinationFallback != "" {
 					return hallucinationFallback, nil
 				}
