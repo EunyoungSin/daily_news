@@ -303,6 +303,44 @@ func truncateRunes(s string, maxRunes int) string {
 	return string(runes[:maxRunes])
 }
 
+// truncateForPrompt는 truncateRunes와 같은 rune 안전한 하드컷을 하되,
+// 실제로 잘라낸 경우에는 마지막 단어 경계(공백)까지 되돌아가서 자르고
+// 말줄임표(…)를 붙인다. title/description을 그냥 truncateRunes로 자르면
+// 단어나 절 한가운데서 뚝 끊긴 조각이 남는데, 모델이 이 조각을 완결된
+// 문장처럼 취급해 억지로 문법을 짜맞추려다 실제로는 무관한 사실을 하나로
+// 뒤섞어 붙이는 사례가 보고됐다(예: "…총으로 쏘려고 시도하여 17년에서
+// 무기징역을" 같은 비문). 잘렸다는 표시를 명시적으로 남기면, 적어도 그
+// 조각이 온전한 문장이 아니라는 신호는 모델에게 전달된다.
+func truncateForPrompt(s string, maxRunes int) string {
+	if len([]rune(s)) <= maxRunes {
+		return s
+	}
+	// 말줄임표(…) 한 글자가 들어갈 자리를 남겨둬서, 잘라낸 결과가 전체적으로
+	// maxRunes를 넘지 않게 한다.
+	limit := maxRunes - 1
+	if limit < 1 {
+		limit = maxRunes
+	}
+	cut := []rune(truncateRunes(s, limit))
+	// 잘린 지점이 단어 중간이면 마지막 공백까지 되돌아간다 — 다만 공백이
+	// 너무 앞쪽에만 있다면(예: 첫 단어 자체가 maxRunes보다 길다) 오히려
+	// 잘라내는 분량이 너무 많아지므로, 그럴 때는 되돌아가지 않고 원래
+	// 하드컷 지점을 그대로 쓴다.
+	if idx := lastRuneIndex(cut, ' '); idx > len(cut)/2 {
+		cut = cut[:idx]
+	}
+	return strings.TrimRight(string(cut), " ") + "…"
+}
+
+func lastRuneIndex(runes []rune, target rune) int {
+	for i := len(runes) - 1; i >= 0; i-- {
+		if runes[i] == target {
+			return i
+		}
+	}
+	return -1
+}
+
 func toBriefingNewsInput(news *NewsData) *briefingNewsInput {
 	if news == nil {
 		return nil
@@ -315,8 +353,8 @@ func toBriefingNewsInput(news *NewsData) *briefingNewsInput {
 	for i, it := range items {
 		result[i] = briefingNewsItem{
 			ID:          it.ID,
-			Title:       annotateNumericUnits(truncateRunes(it.Title, briefingNewsTitleMaxRunes)),
-			Description: annotateNumericUnits(truncateRunes(it.Description, briefingNewsDescriptionMaxRunes)),
+			Title:       annotateNumericUnits(truncateForPrompt(it.Title, briefingNewsTitleMaxRunes)),
+			Description: annotateNumericUnits(truncateForPrompt(it.Description, briefingNewsDescriptionMaxRunes)),
 		}
 	}
 	return &briefingNewsInput{Items: result}
@@ -411,13 +449,23 @@ func hashNewsInput(input *briefingNewsInput) string {
 	return hashJSON(sorted)
 }
 
-// informalSentenceEndingPattern은 문장 경계("다"/"함"/"임" 뒤에 문장부호나
-// 공백, 문자열 끝이 옴)를 찾되, 그 어미 바로 앞 글자도 캡처 그룹으로 함께
-// 잡는다 — Go regexp(RE2)는 lookbehind를 지원하지 않으므로, "다"로 끝나는
-// 어미가 정중한 합쇼체("~니다")인지는 매칭 이후 findInformalSentenceEnding이
-// Go 코드에서 직접 비교해서 판단한다. "다"/"함"/"임" 뒤에 경계가 와야만
-// 매칭되므로 "다양한", "다른"처럼 단어 중간에 있는 "다"는 걸리지 않는다.
-var informalSentenceEndingPattern = regexp.MustCompile(`([가-힣])(다|함|임)[.!?]?(\s|$)`)
+// informalSentenceEndingPattern은 문장 경계("다"/"함"/"임" 바로 뒤에
+// 문장부호가 오거나, 문자열이 거기서 끝남)를 찾되, 그 어미 바로 앞 글자도
+// 캡처 그룹으로 함께 잡는다 — Go regexp(RE2)는 lookbehind를 지원하지
+// 않으므로, "다"로 끝나는 어미가 정중한 합쇼체("~니다")인지는 매칭 이후
+// findInformalSentenceEnding이 Go 코드에서 직접 비교해서 판단한다. "다"/
+// "함"/"임" 뒤에 경계가 와야만 매칭되므로 "다양한", "다른"처럼 단어
+// 중간에 있는 "다"는 걸리지 않는다.
+//
+// 경계를 "문장부호(.!?) 다음" 또는 "문자열 끝"으로만 한정하고, 예전처럼
+// 그냥 공백(\s)이 뒤따르는 것만으로는 경계로 보지 않는다 — "바다"(sea)처럼
+// "다"로 끝나는 평범한 명사가 문장 중간에서 공백 앞에 오는 경우(예: "…분쟁이
+// 있는 바다 곳곳에서 위협받고 있습니다")까지 문장 종결로 오인해, 실제
+// 문장은 "…있습니다"로 정상적인 합쇼체인데도 반말/기사체로 오탐하는 사례가
+// 실제로 보고됐다. 문장부호나 문자열 끝을 요구하면 이런 하위 절/구 중간의
+// "다"는 걸리지 않으면서도, 실제 문장 종결(마침표 뒤 또는 텍스트 맨 끝)은
+// 그대로 잡아낸다.
+var informalSentenceEndingPattern = regexp.MustCompile(`([가-힣])(다|함|임)([.!?](\s|$)|$)`)
 
 // findInformalSentenceEnding은 문장이 존댓말(합쇼체 — "~습니다/~합니다/
 // ~입니다"처럼 예외 없이 "니다"로 끝나는 어미)이 아니라 반말/기사체 어미
@@ -1101,6 +1149,12 @@ func validateSectionOutput(combined string, allowedNumbers []float64, groundingT
 //     약간 어색한 문장이라도 브리핑이 아예 없는 것보다는 낫기
 //     때문입니다.
 //
+// 강한 실패로 errBriefingValidationFailed를 반환할 때는 text에도 마지막
+// 시도의(검증에 실패한) 원문을 그대로 채워 함께 돌려준다 — err != nil이면
+// text를 쓰지 않는 대부분의 호출자에는 영향이 없지만,
+// generateNewsSectionText는 이 원문을 보고 어느 헤드라인이 문제였는지
+// 추정해 그 항목만 제외한 재시도를 한 번 더 시도한다.
+//
 // groundingText/hallucinationFallback은 뉴스 섹션에서만 의미가
 // 있습니다 — groundingText가 비어 있으면 고유명사 검사 자체를 건너뜁니다
 // (날씨/환율은 빈 문자열 ""을 넘깁니다).
@@ -1163,10 +1217,11 @@ func generateSectionText(ctx context.Context, name, model, systemPrompt, userCon
 			return text, nil
 		}
 
-		// 검증 실패의 원문 전체를 로그로 남깁니다 — reason에는 매칭된 짧은
-		// 구절만 담기므로, 반복이 정확히 어느 지점부터 시작됐는지 보려면
-		// 전체 텍스트가 필요합니다.
-		log.Printf("브리핑(%s) 시도 %d/%d 검증 실패: %s\n전체 응답: %s", name, attempt+1, maxSectionRegenerations+1, reason, text)
+		// 검증 실패의 입력과 원문 전체를 로그로 남깁니다 — reason에는 매칭된
+		// 짧은 구절만 담기므로, 반복이 정확히 어느 지점부터 시작됐는지, 그리고
+		// (해외 모드처럼) 원문 헤드라인/description 자체가 이미 뒤섞이거나
+		// 잘려서 문제였는지 보려면 입력과 출력 전체가 함께 필요합니다.
+		log.Printf("브리핑(%s) 시도 %d/%d 검증 실패: %s\n입력: %s\n전체 응답: %s", name, attempt+1, maxSectionRegenerations+1, reason, userContent, text)
 
 		if attempt >= maxSectionRegenerations {
 			if hardFailure {
@@ -1174,7 +1229,12 @@ func generateSectionText(ctx context.Context, name, model, systemPrompt, userCon
 					log.Printf("브리핑(%s): 재시도 후에도 %s, 제목 기반 안전 문구로 대체", name, reason)
 					return hallucinationFallback, nil
 				}
-				return "", fmt.Errorf("%s: %w (%s 반복 감지)", name, errBriefingValidationFailed, reason)
+				// text에는 검증에 실패한 마지막 응답을 그대로 담아 반환한다 —
+				// generateNewsSectionText가 이 실패 원문을 보고 어느 헤드라인이
+				// 문제였는지 추정해 그 항목만 제외한 재시도를 시도할 수 있게
+				// 하기 위해서다. 다른 호출자들은 err != nil이면 text를 쓰지
+				// 않으므로 기존 동작에는 영향이 없다.
+				return text, fmt.Errorf("%s: %w (%s 반복 감지)", name, errBriefingValidationFailed, reason)
 			}
 			log.Printf("브리핑(%s): 재시도 후에도 %s — 마지막 결과를 그대로 사용합니다", name, reason)
 			return text, nil
@@ -1186,7 +1246,7 @@ func generateSectionText(ctx context.Context, name, model, systemPrompt, userCon
 				if useFallback && hallucinationFallback != "" {
 					return hallucinationFallback, nil
 				}
-				return "", fmt.Errorf("%s: %w (%s, 승격 한도 도달)", name, errBriefingValidationFailed, reason)
+				return text, fmt.Errorf("%s: %w (%s, 승격 한도 도달)", name, errBriefingValidationFailed, reason)
 			}
 			return text, nil
 		}
@@ -1200,6 +1260,85 @@ func generateSectionText(ctx context.Context, name, model, systemPrompt, userCon
 	// 도달 불가능한 코드: 위의 attempt == maxSectionRegenerations 분기
 	// 안에서 루프가 항상 return하므로 여기까지 오지 않습니다.
 	return text, nil
+}
+
+// pickNewsItemToExclude는 8B와 70B 모두에서 강한 검증 실패로 끝난 뉴스
+// 생성 결과(failedText)를 보고, 후보 헤드라인 items 중 어느 것이 그 결과의
+// 소재였을 가능성이 가장 높은지 추정한다 — generateNewsSectionText가 그
+// 항목 하나만 제외하고 재시도하는 데 쓴다.
+//
+// 완벽한 판별은 불가능하다. 형태소 분석기 없이, 그리고 언어에 무관하게
+// (해외 모드는 원문이 영어라 한국어 명사 토큰 중복도 같은 방법을 쓸 수
+// 없다 — findTopicMismatch가 해외 모드를 건너뛰는 이유와 같다) 동작해야
+// 하므로, 번역을 거쳐도 그대로 남는 숫자를 단서로 쓴다: 생성문에 등장한
+// 숫자와 가장 많이 겹치는 헤드라인을 "모델이 실제로 다루려 했던" 항목으로
+// 보고 제외 대상으로 삼는다. 겹치는 숫자가 전혀 없어 판별할 수 없으면,
+// newsSectionSystemPrompt가 "숫자·명칭이 있는 항목을 우선 고르세요"라고
+// 우선순위를 매겨두었으므로 우선순위가 가장 낮은 마지막 항목을 기본값으로
+// 제외한다.
+func pickNewsItemToExclude(failedText string, items []briefingNewsItem) int {
+	failedNumbers := extractNumbers(failedText)
+	bestIdx := len(items) - 1
+	bestScore := 0
+	for i, item := range items {
+		itemNumbers := extractNumbers(item.Title + " " + item.Description)
+		score := 0
+		for _, fn := range failedNumbers {
+			for _, in := range itemNumbers {
+				if numbersMatch(fn, in) {
+					score++
+					break
+				}
+			}
+		}
+		if score > bestScore {
+			bestScore = score
+			bestIdx = i
+		}
+	}
+	return bestIdx
+}
+
+// generateNewsSectionText는 generateSectionText를 감싸서 뉴스 섹션에만
+// 해당하는 마지막 폴백 하나를 추가한다: 8B로 시작해 70B로 승격까지 했는데도
+// 강한 검증(CJK 오염, 새어나온 영어, 반말/기사체 어미 등)에 실패했다면,
+// 같은 헤드라인 3개를 다시 굴리는 대신(입력이 그대로면 같은 실패가 반복될
+// 가능성이 높다) pickNewsItemToExclude로 추정한 문제 항목 하나를 빼고
+// 나머지 헤드라인만으로 딱 한 번 더 생성을 시도한다. 이 재시도는 다시
+// frequentGroqModel()(8B)에서 시작하는데, 항목이 줄어든 더 쉬운 입력이라
+// 굳이 비싼 70B로 바로 가지 않아도 되고, 그래도 실패하면
+// generateSectionText가 내부적으로 다시 한번 승격을 시도한다.
+//
+// 항목이 하나뿐이면(더 뺄 게 없다) 시도하지 않고 원래 오류를 그대로
+// 돌려준다 — 그래야 호출자(resolveBriefingSection)가 기존처럼
+// stale_fallback으로 넘어간다. 이 재시도마저 실패해도 마찬가지로 원래
+// 오류를 돌려준다 — 여기서 더 시도하면 사용자가 겪는 지연과 Groq 쿼터
+// 소모만 늘어날 뿐이다.
+func generateNewsSectionText(ctx context.Context, name, model, systemPrompt, userContent string, allowedNumbers []float64, groundingText, hallucinationFallback string, newsInput *briefingNewsInput) (string, error) {
+	text, err := generateSectionText(ctx, name, model, systemPrompt, userContent, allowedNumbers, groundingText, hallucinationFallback)
+	if err == nil || !errors.Is(err, errBriefingValidationFailed) {
+		return text, err
+	}
+	if newsInput == nil || len(newsInput.Items) < 2 {
+		return text, err
+	}
+
+	excludeIdx := pickNewsItemToExclude(text, newsInput.Items)
+	reduced := &briefingNewsInput{
+		Items: append(append([]briefingNewsItem{}, newsInput.Items[:excludeIdx]...), newsInput.Items[excludeIdx+1:]...),
+	}
+	reducedJSON, _ := json.Marshal(reduced)
+	reducedUserContent := fmt.Sprintf("[뉴스 데이터]: %s\n\n위 데이터를 바탕으로 한국어 뉴스 브리핑 문장을 작성하세요.", reducedJSON)
+	log.Printf("브리핑(%s): 승격 재시도 후에도 검증 실패(%v) — 문제로 의심되는 항목(id=%q) 제외하고 나머지 %d개 헤드라인으로 재생성 시도",
+		name, err, newsInput.Items[excludeIdx].ID, len(reduced.Items))
+
+	retryText, retryErr := generateSectionText(ctx, name, frequentGroqModel(), systemPrompt, reducedUserContent, allowedNewsNumbers(reduced), newsGroundingText(reduced), hallucinationFallback)
+	if retryErr != nil {
+		log.Printf("브리핑(%s): 문제 항목 제외 후에도 생성 실패 — stale_fallback으로 넘어갑니다", name)
+		return text, err
+	}
+	log.Printf("브리핑(%s): 문제 항목 제외 후 재생성 성공", name)
+	return retryText, nil
 }
 
 // trimSurroundingQuotes는 모델이 "응답은 문장 텍스트만 그대로 출력하라"는
@@ -1298,7 +1437,13 @@ type briefingSectionOutput struct {
 // stale_fallback으로 명확히 마킹해서, 프론트엔드가 "방금 생성된 것"과
 // "실패해서 어쩔 수 없이 대체된 것"을 구분해 사용자에게 알릴 수 있게
 // 합니다.
-func resolveBriefingSection(ctx context.Context, section, model, hash, systemPrompt, userContent string, allowedNumbers []float64, groundingText, hallucinationFallback string) briefingSectionOutput {
+//
+// newsInput은 뉴스 작업에서만 nil이 아니며, 그 경우 generateSectionText
+// 대신 generateNewsSectionText를 사용해 "8B/70B 모두 실패하면 문제로
+// 의심되는 헤드라인 하나만 제외하고 재시도"하는 뉴스 전용 폴백을 태웁니다
+// — 날씨/환율은 제외할 "항목"이라는 개념 자체가 없으므로 nil을 넘겨
+// 기존과 동일하게 동작합니다.
+func resolveBriefingSection(ctx context.Context, section, model, hash, systemPrompt, userContent string, allowedNumbers []float64, groundingText, hallucinationFallback string, newsInput *briefingNewsInput) briefingSectionOutput {
 	cached, found := lookupBriefingSectionCache(ctx, db, section)
 	if found && cached.dataHash == hash {
 		recordGroqCacheHit()
@@ -1312,7 +1457,13 @@ func resolveBriefingSection(ctx context.Context, section, model, hash, systemPro
 		log.Printf("브리핑(%s): 캐시 없음, Groq 최초 호출 (모델: %s)", section, model)
 	}
 
-	text, err := generateSectionText(ctx, section, model, systemPrompt, userContent, allowedNumbers, groundingText, hallucinationFallback)
+	var text string
+	var err error
+	if newsInput != nil {
+		text, err = generateNewsSectionText(ctx, section, model, systemPrompt, userContent, allowedNumbers, groundingText, hallucinationFallback, newsInput)
+	} else {
+		text, err = generateSectionText(ctx, section, model, systemPrompt, userContent, allowedNumbers, groundingText, hallucinationFallback)
+	}
 	if err != nil {
 		reason := classifyBriefingFailureReason(err)
 		log.Printf("브리핑(%s): 생성 실패(사유: %s): %v", section, reason, err)
@@ -1395,10 +1546,12 @@ func getBriefing(ctx context.Context, weather *WeatherData, exchange *ExchangeDa
 		systemPrompt   string
 		userContent    string
 		allowedNumbers []float64
-		// groundingText/hallucinationFallback은 뉴스 작업에서만 설정됩니다 —
-		// findUngroundedProperNoun과 generateSectionText의 문서 주석 참고.
+		// groundingText/hallucinationFallback/newsInput은 뉴스 작업에서만
+		// 설정됩니다 — findUngroundedProperNoun과 generateSectionText/
+		// generateNewsSectionText의 문서 주석 참고.
 		groundingText         string
 		hallucinationFallback string
+		newsInput             *briefingNewsInput
 	}
 	// 세 섹션 모두 첫 시도에는 frequentGroqModel()(저렴하고 쿼터가 넉넉한
 	// 모델)을 사용합니다 — 브리핑 섹션은 캐시가 미스될 때마다(도시 전환,
@@ -1450,6 +1603,7 @@ func getBriefing(ctx context.Context, weather *WeatherData, exchange *ExchangeDa
 			allowedNumbers:        allowedNewsNumbers(newsInput),
 			groundingText:         newsGroundingText(newsInput),
 			hallucinationFallback: newsHallucinationFallback(news),
+			newsInput:             newsInput,
 		},
 	}
 	for _, j := range jobs {
@@ -1469,7 +1623,7 @@ func getBriefing(ctx context.Context, weather *WeatherData, exchange *ExchangeDa
 	for i, j := range jobs {
 		go func(i int, j job) {
 			defer wg.Done()
-			outputs[i] = resolveBriefingSection(ctx, j.name, j.model, j.hash, j.systemPrompt, j.userContent, j.allowedNumbers, j.groundingText, j.hallucinationFallback)
+			outputs[i] = resolveBriefingSection(ctx, j.name, j.model, j.hash, j.systemPrompt, j.userContent, j.allowedNumbers, j.groundingText, j.hallucinationFallback, j.newsInput)
 		}(i, j)
 	}
 	wg.Wait()

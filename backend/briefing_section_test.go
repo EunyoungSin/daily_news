@@ -85,6 +85,21 @@ func TestFindInformalSentenceEnding(t *testing.T) {
 	if _, found := findInformalSentenceEnding("다양한 분야에서 다른 성과를 보였습니다."); found {
 		t.Error("expected mid-word '다' (다양한/다른) not to be flagged")
 	}
+
+	// 실제 보고된 오탐: "바다"(sea)처럼 "다"로 끝나는 평범한 명사가 문장
+	// 중간에서 공백 앞에 오면, 정규식이 문장부호나 문자열 끝을 요구하지
+	// 않던 예전 버전에서는 이를 문장 종결로 오인해 반말/기사체로 잘못
+	// 판정했다 — 실제 문장은 "…위협받고 있습니다"로 끝나는 정상적인
+	// 합쇼체였는데도 말이다.
+	politeWithMidSentenceNoun := []string{
+		"일본과 중국이 영유권을 놓고 갈등을 벌이는 바다 곳곳에서 무력 충돌 위협이 커지고 있습니다.",
+		"이 지역은 여러 나라가 얽힌 바다 한가운데 있어 안보가 위협받고 있습니다.",
+	}
+	for _, s := range politeWithMidSentenceNoun {
+		if ending, found := findInformalSentenceEnding(s); found {
+			t.Errorf("expected mid-sentence noun '바다' not to be misdetected as an informal ending, but got ending=%q in %q", ending, s)
+		}
+	}
 }
 
 func TestHashJSONDeterministic(t *testing.T) {
@@ -518,6 +533,68 @@ func TestTruncateRunesIsMultiByteSafe(t *testing.T) {
 	// 제한보다 짧은 경우: 변경 없이 그대로 반환된다.
 	if got := truncateRunes("짧음", 10); got != "짧음" {
 		t.Errorf("expected a short string to pass through unchanged, got %q", got)
+	}
+}
+
+// TestTruncateForPromptCutsAtWordBoundary는 실제 보고된 hallucination
+// 사례("…총으로 쏘려고 시도하여 17년에서 무기징역을" 같은 비문)에 대한
+// 수정 사항을 검증한다: 단어 중간에서 뚝 끊는 대신 마지막 공백까지
+// 되돌아가고, 잘렸다는 신호로 말줄임표를 남긴다.
+func TestTruncateForPromptCutsAtWordBoundary(t *testing.T) {
+	s := "A man attempted to shoot the driver and was sentenced to seventeen years"
+	got := truncateForPrompt(s, 40)
+
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("expected truncated text to end with an ellipsis marker, got %q", got)
+	}
+	if strings.HasSuffix(strings.TrimSuffix(got, "…"), " ") {
+		t.Errorf("expected trailing space before the ellipsis to be trimmed, got %q", got)
+	}
+	// 자른 지점 바로 앞이 공백이었어야 한다(원문에서 그 단어가 온전히
+	// 남아있는지 확인) — 단어 중간에서 끊겼다면 원문에 그 조각이 실제
+	// 단어로 나타나지 않는다.
+	body := strings.TrimSuffix(got, "…")
+	if body != "" && !strings.Contains(s, body+" ") && body != s {
+		t.Errorf("expected cut to land on a word boundary, got body=%q", body)
+	}
+	if got := []rune(got); len(got) > 40 {
+		t.Errorf("expected truncated result (including ellipsis) to be at most 40 runes, got %d", len(got))
+	}
+
+	// 원문이 제한보다 짧으면 손대지 않고 그대로 반환한다.
+	if got := truncateForPrompt("짧은 설명", 80); got != "짧은 설명" {
+		t.Errorf("expected short text to pass through unchanged, got %q", got)
+	}
+
+	// 공백이 전혀 없는 텍스트(단어 하나가 제한보다 긴 경우)는 단어 경계로
+	// 되돌아갈 수 없으므로 하드컷 지점 그대로 말줄임표만 붙인다 — 그래도
+	// 전체 길이가 제한을 넘어서는 안 된다.
+	noSpace := strings.Repeat("가", 100)
+	if got := []rune(truncateForPrompt(noSpace, 80)); len(got) > 80 {
+		t.Errorf("expected no-space truncation (including ellipsis) to be at most 80 runes, got %d", len(got))
+	}
+}
+
+// TestPickNewsItemToExclude는 8B/70B 모두 실패한 뉴스 생성 결과가 주어졌을
+// 때, generateNewsSectionText가 어떤 항목을 제외 대상으로 고르는지
+// 검증한다.
+func TestPickNewsItemToExclude(t *testing.T) {
+	items := []briefingNewsItem{
+		{ID: "1", Title: "한 스타트업이 5000만 달러 투자를 유치했다", Description: ""},
+		{ID: "2", Title: "한 남성이 17년형을 선고받았다", Description: "무기징역으로 변경됨"},
+		{ID: "3", Title: "환경 규제가 강화됐다", Description: ""},
+	}
+
+	// 실패한 생성문에 등장한 숫자(17)가 items[1]의 숫자와 겹치므로 그
+	// 항목을 제외 대상으로 골라야 한다.
+	if idx := pickNewsItemToExclude("운전자를 위협하여 17년에서 무기징역을 선고받았다", items); idx != 1 {
+		t.Errorf("expected item index 1 (matching number 17) to be picked, got %d", idx)
+	}
+
+	// 겹치는 숫자가 전혀 없으면(판별 불가) 우선순위가 가장 낮은 마지막
+	// 항목을 기본값으로 제외한다.
+	if idx := pickNewsItemToExclude("아무 숫자도 없는 이상한 문장입니다", items); idx != len(items)-1 {
+		t.Errorf("expected fallback to the last (lowest-priority) item when no number overlaps, got %d", idx)
 	}
 }
 
