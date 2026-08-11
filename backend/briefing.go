@@ -615,21 +615,74 @@ func findLeakedEnglish(text string) (string, bool) {
 // 그대로 반복된 사례가 관측되었습니다.
 const repeatedPhraseMinRunes = 10
 
-// findRepeatedPhrase는 text 안에서 두 번 이상 등장하는, 길이
-// repeatedPhraseMinRunes 이상인 부분 문자열 중 첫 번째를 보고합니다 —
-// "모델이 루프에 빠져 문장이 망가지고 있다"를 감지하는 범용 검사기로,
-// 여기 있는 다른 검사들과 달리 뉴스 섹션 전용이 아니며(날씨/환율 브리핑
-// 텍스트도 루프에 빠질 수 있습니다) grounding 텍스트도 필요하지
-// 않습니다.
+// repeatedPhraseMaxGapRunes는 같은 부분 문자열의 두 번째 등장이 첫 번째가
+// 끝난 지점으로부터 이 안에서 시작해야만 "생성 루프"로 판정하는 최대
+// 간격입니다. 실제 보고된 오탐: "Mesa Laboratories" 같은 회사명이 서로
+// 다른 두 문장에서 각각 한 번씩 자연스럽게 언급됐을 뿐인데도(두 등장
+// 사이에 수십 자 분량의 실제 내용이 있음), 순전히 길이만 보는 예전
+// 검사는 이를 반복 루프와 구분하지 못했습니다. 반면 실제 생성 루프
+// (예: "60.42%의 지분을 보유한 60.42%의 지분을 보유한")는 같은 구절이
+// 사이에 아무 내용 없이 바로 이어 붙어 등장합니다 — 실측 결과 이런
+// 경우 간격은 (반복 구절 길이 - repeatedPhraseMinRunes) 수준으로 한
+// 자릿수에 불과합니다. 그래서 길이 대신(또는 길이와 별개로) "얼마나
+// 가까이 붙어 반복되는가"를 기준으로 삼으면, 자연스러운 재언급과 진짜
+// 루프를 훨씬 안정적으로 구분할 수 있습니다.
+const repeatedPhraseMaxGapRunes = 8
+
+// sentenceSplitPattern은 findRepeatedSentence가 문장 단위 비교를 위해
+// 텍스트를 나누는 데 쓰는, 한국어/영어 공용 문장 종결 부호입니다.
+var sentenceSplitPattern = regexp.MustCompile(`[.!?]+`)
+
+// repeatedSentenceMinRunes는 findRepeatedSentence가 "반복된 문장"으로
+// 취급할 최소 길이입니다 — 마지막 문장 뒤의 빈 문자열이나 감탄사 하나
+// 같은 사소한 조각까지 반복으로 잡지 않기 위함입니다.
+const repeatedSentenceMinRunes = 8
+
+// findRepeatedSentence는 마침표/느낌표/물음표로 구분한 완전한 문장이
+// 그대로 두 번 이상 등장하는지 확인합니다 — findRepeatedPhrase의 부분
+// 문자열 방식과 달리 문장 전체 단위이므로, 회사명 같은 고유명사가 여러
+// 문장에 걸쳐 자연스럽게 반복 언급되는 것과는 애초에 겹치지 않습니다
+// (그 경우 각 문장은 서로 다르니까요). 완전히 동일한 문장 자체가
+// 반복된다면(예: 8B 모델이 사실상 같은 문장을 두 번 만들어내는 경우)
+// 그 자체로 명백한 생성 결함입니다.
+func findRepeatedSentence(text string) (string, bool) {
+	seen := make(map[string]bool)
+	for _, s := range sentenceSplitPattern.Split(text, -1) {
+		trimmed := strings.TrimSpace(s)
+		if len([]rune(trimmed)) < repeatedSentenceMinRunes {
+			continue
+		}
+		if seen[trimmed] {
+			return trimmed, true
+		}
+		seen[trimmed] = true
+	}
+	return "", false
+}
+
+// findRepeatedPhrase는 "모델이 루프에 빠져 문장이 망가지고 있다"를
+// 감지하는 범용 검사기로, 여기 있는 다른 검사들과 달리 뉴스 섹션
+// 전용이 아니며(날씨/환율 브리핑 텍스트도 루프에 빠질 수 있습니다)
+// grounding 텍스트도 필요하지 않습니다. 두 단계로 판정합니다:
+//  1. findRepeatedSentence — 완전히 동일한 문장이 통째로 반복되는 경우.
+//  2. 길이 repeatedPhraseMinRunes 이상인 부분 문자열이 repeatedPhraseMaxGapRunes
+//     이내의 간격을 두고 다시 등장하는 경우 — 같은 구절이 바로 이어
+//     붙어 반복되는 "말더듬" 패턴만 잡고, 회사명 등 고유명사가 서로
+//     멀리 떨어진 문장에서 자연스럽게 재언급되는 경우는 걸러내지
+//     않습니다.
 func findRepeatedPhrase(text string) (string, bool) {
+	if phrase, found := findRepeatedSentence(text); found {
+		return phrase, true
+	}
+
 	runes := []rune(text)
-	seen := make(map[string]bool, len(runes))
+	lastEnd := make(map[string]int, len(runes))
 	for i := 0; i+repeatedPhraseMinRunes <= len(runes); i++ {
 		phrase := string(runes[i : i+repeatedPhraseMinRunes])
-		if seen[phrase] {
+		if prevEnd, ok := lastEnd[phrase]; ok && i-prevEnd <= repeatedPhraseMaxGapRunes {
 			return phrase, true
 		}
-		seen[phrase] = true
+		lastEnd[phrase] = i + repeatedPhraseMinRunes
 	}
 	return "", false
 }
@@ -1221,6 +1274,7 @@ const newsSectionSystemPrompt = briefingCommonRules + `
 1. 원문에 없는 사건·인물·회사명·계약 상대방을 지어내거나 숫자를 다른 단위(예: %)로 바꿔치기하지 마세요.
 2. 구체적 사실(숫자·명칭) 1개 이상 포함 — "다양한 논의가 진행 중입니다" 같은 빈 문장 금지. K/M/B는 이미 한국어로 환산되어 있으니 그대로 쓰세요.
 3. 원문이 기사체("~했다")여도 반드시 합니다체로 재작성하세요.
+4. 영어 고유명사(회사명·제품명)는 외래어 표기법에 맞는 한글이나 영어 원문 그대로만 쓰세요 — 일본어·중국어식 음차 금지.
 
 예시: 한 스타트업이 5000만 달러 투자를 유치했습니다.`
 

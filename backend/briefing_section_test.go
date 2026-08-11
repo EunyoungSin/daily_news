@@ -471,6 +471,38 @@ func TestFindRepeatedPhrase_RegressesTheMercantileBankRepetitionLoop(t *testing.
 	}
 }
 
+// TestFindRepeatedPhrase_AllowsNaturalCrossSentenceMention은 실제 보고된
+// 오탐을 회귀 테스트로 고정한다: "Mesa Laboratories" 같은 회사명이 서로
+// 다른 두 문장에서 각각 한 번씩 자연스럽게 언급된 것을, 순전히 부분
+// 문자열 길이만 보던 예전 검사는 반복 루프로 오판했다. 두 등장 사이에
+// 실제 내용(수십 자)이 있으면 반복 루프가 아니라 정상적인 재언급으로
+// 봐야 한다.
+func TestFindRepeatedPhrase_AllowsNaturalCrossSentenceMention(t *testing.T) {
+	natural := "Mesa Laboratories가 3분기 매출 전망을 하향 조정했다고 밝혔습니다. Mesa Laboratories의 주가는 이 소식에 하락했습니다."
+	if phrase, found := findRepeatedPhrase(natural); found {
+		t.Errorf("expected a company name mentioned naturally across two different sentences not to be flagged as a repetition loop, got %q", phrase)
+	}
+
+	// 진짜 생성 루프(완전히 동일한 문장이 그대로 반복)는 여전히 걸러져야
+	// 한다 — findRepeatedSentence가 이 케이스를 담당한다.
+	sentenceLoop := "환율은 1 USD당 1452.35 KRW입니다. 환율은 1 USD당 1452.35 KRW입니다."
+	if _, found := findRepeatedPhrase(sentenceLoop); !found {
+		t.Error("expected a fully repeated sentence to still be flagged as a generation loop")
+	}
+}
+
+func TestFindRepeatedSentence(t *testing.T) {
+	if _, found := findRepeatedSentence("환율은 1 USD당 1452.35 KRW입니다. 환율은 1 USD당 1452.35 KRW입니다."); !found {
+		t.Error("expected an identical sentence repeated verbatim to be flagged")
+	}
+	if _, found := findRepeatedSentence("Mesa Laboratories가 실적을 발표했습니다. 주가는 소폭 하락했습니다."); found {
+		t.Error("expected two distinct sentences not to be flagged")
+	}
+	if _, found := findRepeatedSentence("맑습니다."); found {
+		t.Error("expected a single short sentence not to be flagged")
+	}
+}
+
 // TestValidateSectionOutputPerField_AvoidsSimpleDetailedOverlapFalsePositive는
 // 실제 운영 중 발견된 오탐을 회귀 테스트로 고정한다: briefingCommonRules는
 // detailed의 첫 문장이 simple과 동일하도록 요구하므로, 두 필드를 이어붙인
