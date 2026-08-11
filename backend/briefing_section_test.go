@@ -673,13 +673,57 @@ func TestFindUngroundedNumber_RegressesTheObservedHallucination(t *testing.T) {
 	})
 
 	hallucinated := "90억 오픈소스 모델에 1200만 달러를 투입해 파인튜닝한 결과, 최상위 모델을 제쳤습니다."
-	if _, found := findUngroundedNumber(hallucinated, allowed); !found {
+	if _, found := findUngroundedNumber(hallucinated, "", allowed); !found {
 		t.Error("expected the hallucinated 1200만 달러 figure to be flagged as ungrounded")
 	}
 
 	faithful := "90억 오픈소스 모델에 500달러를 투입해 파인튜닝한 결과, 최상위 모델을 제쳤습니다."
-	if num, found := findUngroundedNumber(faithful, allowed); found {
+	if num, found := findUngroundedNumber(faithful, "", allowed); found {
 		t.Errorf("expected no ungrounded number in a faithful sentence, got %v", num)
+	}
+}
+
+// TestFindUngroundedNumberAllowsSportsRoundTranslation은 실제 보고된
+// 사례를 회귀 테스트로 고정한다: 영어 원문 "reach Montreal quarters"에는
+// literal한 숫자가 없지만, "몬트리올 8강에 진출"은 정확한 번역이므로
+// 근거 없는 숫자로 오탐해서는 안 된다.
+func TestFindUngroundedNumberAllowsSportsRoundTranslation(t *testing.T) {
+	groundingText := "Shelton sweeps Fonseca to reach Montreal quarters"
+
+	cases := []struct {
+		generated     string
+		groundingText string
+	}{
+		{"셸턴이 폰세카를 완파하고 몬트리올 8강에 진출했습니다.", groundingText},
+		{"두 선수 모두 승리해 4강에 진출했습니다.", "Both players advanced to the semifinals"},
+		{"이변 없이 16강에 진출했습니다.", "The defending champion advanced to the round of 16"},
+	}
+	for _, c := range cases {
+		if num, found := findUngroundedNumber(c.generated, c.groundingText, nil); found {
+			t.Errorf("expected sports round number in %q to be grounded by %q, got flagged number %v", c.generated, c.groundingText, num)
+		}
+	}
+
+	// 원문에 해당 라운드 용어가 전혀 없으면(예: round of 16 언급이 없는데
+	// "16강"이라고 지어낸 경우), 숫자가 8/4/16/32와 우연히 같더라도 그
+	// 라운드 예외를 적용해서는 안 된다 — 실제로 그 대회 라운드를 가리키는
+	// 근거가 원문에 있는지가 핵심이다.
+	unrelatedGrounding := "The company announced quarterly earnings today"
+	if num, found := findUngroundedNumber("이 팀은 16강에 진출했습니다.", unrelatedGrounding, nil); !found {
+		t.Errorf("expected '16강' without a matching round-of-16 mention in the source to still be flagged, got num=%v found=%v", num, found)
+	}
+
+	// 목록에 없는 진짜 근거 없는 숫자(원문에 없는 임의의 수치)는 여전히
+	// 걸러져야 한다 — 스포츠 표현이 아닌 지어낸 숫자에는 예외가 적용되지
+	// 않는지 확인한다.
+	fabricated := []string{
+		"셸턴이 3연승을 거두며 몬트리올 8강에 진출했습니다.",
+		"셸턴이 개인 통산 5번째 우승을 차지했습니다.",
+	}
+	for _, s := range fabricated {
+		if _, found := findUngroundedNumber(s, groundingText, nil); !found {
+			t.Errorf("expected fabricated number in %q not covered by sportsRoundExceptions to still be flagged as ungrounded", s)
+		}
 	}
 }
 
@@ -693,7 +737,7 @@ func TestAllowedWeatherNumbersIncludesFixedHourLabels(t *testing.T) {
 	}
 
 	sentence := "오전 8시엔 26.8도, 오후 2시엔 32.4도이며 맑은 하늘이 이어집니다."
-	if num, found := findUngroundedNumber(sentence, allowedWeatherNumbers(input)); found {
+	if num, found := findUngroundedNumber(sentence, "", allowedWeatherNumbers(input)); found {
 		t.Errorf("expected the fixed '8시'/'2시' hour labels to be pre-allowed, got flagged number %v", num)
 	}
 }
@@ -706,7 +750,7 @@ func TestAllowedExchangeNumbersIncludesFixedSevenDays(t *testing.T) {
 	})
 
 	sentence := "1 USD당 1470.11 KRW입니다. 지난 7일간 0.6% 하락해 KRW 강세를 보이고 있습니다."
-	if num, found := findUngroundedNumber(sentence, allowedExchangeNumbers(input)); found {
+	if num, found := findUngroundedNumber(sentence, "", allowedExchangeNumbers(input)); found {
 		t.Errorf("expected rate/changePercent/fixed '7일' to be allowed, got flagged number %v", num)
 	}
 }

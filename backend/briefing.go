@@ -919,21 +919,72 @@ func numbersMatch(a, b float64) bool {
 	return larger > 0 && diff/larger < 0.02
 }
 
+// sportsRoundExceptions는 영어 원문에서는 숫자 없이("quarters",
+// "semifinals" 등) 표현되지만 한국어에서는 관용적으로 숫자를 붙여
+// 옮기는("8강", "4강") 스포츠 대회 라운드 용어를 매핑합니다 —
+// findUngroundedNumber가 이런 정당한 번역까지 "지어낸 숫자"로 오탐하지
+// 않도록 하기 위한 예외 목록입니다. 실제 사례: 원문 "Shelton sweeps
+// Fonseca to reach Montreal quarters"를 "몬트리올 8강에 진출"로 정확히
+// 번역했는데도, 원문에 literal한 "8"이 없다는 이유로 근거 없는 숫자로
+// 판정되어 재시도만 반복하다 결국 생성 실패로 처리됐다.
+//
+// groundingText(원문)에 영어 키워드 중 하나라도 등장하면, 생성문의
+// 대응하는 한국어 숫자는 근거 있는 것으로 간주합니다. "결승"(final/
+// finals)은 애초에 숫자를 쓰지 않는 표현이라 이 검사와 무관하므로
+// (참고용으로만 언급) 목록에 넣지 않습니다.
+var sportsRoundExceptions = []struct {
+	englishTerms []string
+	koreanNumber float64
+}{
+	{englishTerms: []string{"quarterfinal", "quarters"}, koreanNumber: 8},
+	{englishTerms: []string{"semifinal", "semis"}, koreanNumber: 4},
+	{englishTerms: []string{"round of 16"}, koreanNumber: 16},
+	{englishTerms: []string{"round of 32"}, koreanNumber: 32},
+}
+
+// isGroundedSportsRoundNumber는 num이 sportsRoundExceptions에 등록된
+// 라운드 숫자이면서, 그 라운드를 가리키는 영어 용어가 groundingText(원문)에
+// 실제로 등장하는지 확인합니다 — 원문과 무관하게 아무 숫자에나 면죄부를
+// 주지 않도록, 반드시 원문에 해당 용어가 있어야만 근거 있는 것으로
+// 인정합니다.
+func isGroundedSportsRoundNumber(num float64, groundingText string) bool {
+	if groundingText == "" {
+		return false
+	}
+	lower := strings.ToLower(groundingText)
+	for _, ex := range sportsRoundExceptions {
+		if !numbersMatch(num, ex.koreanNumber) {
+			continue
+		}
+		for _, term := range ex.englishTerms {
+			if strings.Contains(lower, term) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // findUngroundedNumber는 text에 언급된 숫자 중, allowedNumbers 안의
-// 어떤 숫자와도 (numbersMatch의 오차 범위 내에서) 대응되지 않는 첫
-// 번째 숫자를 반환합니다 — 즉, 모델이 주어진 데이터에서 가져온 게
-// 아니라 지어낸 것으로 보이는 수치입니다. 이 검사는 예를 들어 헤드라인의
-// 평범한 "$500"이 "1200만 달러"로 둔갑해 돌아오는 경우를 잡아냅니다:
-// 여기엔 annotateNumericUnits가 처리할 K/M/B 축약 자체가 없으므로, 이
-// 검사가 모델이 숫자를 그냥 잘못 읽거나 지어내는 것을 막는 마지막
-// 방어선입니다.
+// 어떤 숫자와도 (numbersMatch의 오차 범위 내에서) 대응되지 않고
+// sportsRoundExceptions에도 해당하지 않는 첫 번째 숫자를 반환합니다 —
+// 즉, 모델이 주어진 데이터에서 가져온 게 아니라 지어낸 것으로 보이는
+// 수치입니다. 이 검사는 예를 들어 헤드라인의 평범한 "$500"이 "1200만
+// 달러"로 둔갑해 돌아오는 경우를 잡아냅니다: 여기엔 annotateNumericUnits가
+// 처리할 K/M/B 축약 자체가 없으므로, 이 검사가 모델이 숫자를 그냥 잘못
+// 읽거나 지어내는 것을 막는 마지막 방어선입니다.
 //
 // allowedNumbers에는 각 섹션이 다루는 데이터 값뿐 아니라 그 섹션의
 // 프롬프트 문구 자체에 고정으로 박혀 있는 숫자도 포함되어야 합니다 —
 // 예를 들어 날씨 프롬프트는 항상 "오전 8시"/"오후 2시"를 언급하고
 // 환율 프롬프트는 항상 "지난 7일간"을 언급하므로, 8, 2, 7을 미리
 // 허용해두지 않으면 모든 응답이 이 검사에 잘못 걸리게 됩니다.
-func findUngroundedNumber(text string, allowedNumbers []float64) (float64, bool) {
+//
+// groundingText는 뉴스 섹션에서만 의미가 있습니다(날씨/환율은 빈 문자열을
+// 넘깁니다) — isGroundedSportsRoundNumber가 스포츠 라운드 예외를
+// 판별하는 데만 사용하며, 그 외의 숫자 검증 로직에는 영향을 주지
+// 않습니다.
+func findUngroundedNumber(text, groundingText string, allowedNumbers []float64) (float64, bool) {
 	for _, found := range extractNumbers(text) {
 		matched := false
 		for _, allowed := range allowedNumbers {
@@ -941,6 +992,9 @@ func findUngroundedNumber(text string, allowedNumbers []float64) (float64, bool)
 				matched = true
 				break
 			}
+		}
+		if !matched && isGroundedSportsRoundNumber(found, groundingText) {
+			matched = true
 		}
 		if !matched {
 			return found, true
@@ -1111,7 +1165,7 @@ func validateSectionOutput(combined string, allowedNumbers []float64, groundingT
 	if phrase, found := findRepeatedPhrase(combined); found {
 		return fmt.Sprintf("반복되는 구절(%q) 감지(생성 루프 의심)", phrase), true, false
 	}
-	if num, found := findUngroundedNumber(combined, allowedNumbers); found {
+	if num, found := findUngroundedNumber(combined, groundingText, allowedNumbers); found {
 		return fmt.Sprintf("근거 없는 숫자 감지(%v)", num), true, false
 	}
 	if ratio, found := findTopicMismatch(combined, groundingText); found {
