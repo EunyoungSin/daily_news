@@ -194,6 +194,39 @@ func TestBriefingSectionCacheNilDB(t *testing.T) {
 	}
 }
 
+// TestResolveBriefingSectionSkipsGroqWhenDataMissing은 실제 보고된 버그에
+// 대한 수정을 검증한다: NewsData.io 조회가 실패해 news가 nil인 채로
+// getBriefing에 전달되면, 예전에는 "[뉴스 데이터]: null"이라는 의미 없는
+// 프롬프트를 그대로 Groq에 보냈다. hasData=false일 때 Groq를 아예
+// 호출하지 않는지는, GROQ_API_KEY를 비워서 확인한다 — 만약 가드가
+// 깨져서 generateSectionText까지 호출이 새어나갔다면 실패 사유가
+// "missing_api_key"로 나왔을 것이고, 가드가 제대로 동작하면 Groq
+// 호출 자체가 없으므로 "data_missing"으로 나와야 한다.
+func TestResolveBriefingSectionSkipsGroqWhenDataMissing(t *testing.T) {
+	t.Setenv("GROQ_API_KEY", "")
+
+	dataMissingMessage := "⚠️ 뉴스 데이터를 가져오지 못해 브리핑을 생성할 수 없습니다"
+	out := resolveBriefingSection(context.Background(), "test:news-missing", "some-model", "somehash", "system", "user", nil, "", "", nil, false, dataMissingMessage)
+
+	if out.FailureReason != "data_missing" {
+		t.Errorf("expected failure reason %q (proving Groq was never called), got %q", "data_missing", out.FailureReason)
+	}
+	if out.Status != briefingStatusFailed {
+		t.Errorf("expected status %q when data is missing and no prior cache exists, got %q", briefingStatusFailed, out.Status)
+	}
+	if out.Text != dataMissingMessage {
+		t.Errorf("expected the caller-provided dataMissingMessage as Text, got %q", out.Text)
+	}
+
+	// hasData=true인 정상 경로는 여전히 Groq를 시도해야 한다(그리고 키가
+	// 없으므로 missing_api_key로 실패해야 한다) — hasData 가드가 데이터가
+	// 있는 경우까지 조용히 건너뛰는 과잉 차단이 아닌지 확인한다.
+	normalOut := resolveBriefingSection(context.Background(), "test:news-present", "some-model", "somehash", "system", "user", nil, "", "", nil, true, dataMissingMessage)
+	if normalOut.FailureReason != "missing_api_key" {
+		t.Errorf("expected hasData=true to still attempt generation (failing with missing_api_key), got reason %q", normalOut.FailureReason)
+	}
+}
+
 func TestToBriefingNewsInputCapsAtHeadlineCount(t *testing.T) {
 	items := make([]NewsItem, 8)
 	for i := range items {

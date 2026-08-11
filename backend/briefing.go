@@ -861,6 +861,18 @@ func findTopicMismatch(generated, groundingText string) (float64, bool) {
 // 섹션을 조용히 생략하는 대신 명시적으로 "⚠️ 생성 실패"를 표시합니다.
 var errBriefingValidationFailed = errors.New("briefing section failed content validation")
 
+// errBriefingDataMissing은 섹션의 원본 데이터(WeatherData/ExchangeData/
+// NewsData)가 애초에 없거나(nil) 비어있어서(뉴스는 Items가 0개) Groq를
+// 호출할 근거 자체가 없는 상태를 표시합니다 — resolveBriefingSection은
+// 이 경우 Groq를 아예 호출하지 않고 곧바로 errBriefingValidationFailed와
+// 동일한 방식(되돌아갈 캐시가 있으면 stale_fallback, 없으면 명시적 실패
+// 문구)으로 처리합니다. 실제로 보고된 사례: NewsData.io 조회가 context
+// deadline exceeded로 실패해 news가 nil인 채로 getBriefing에 전달됐는데,
+// 이 가드가 없어서 "[뉴스 데이터]: null"이라는 무의미한 프롬프트가 그대로
+// Groq에 전달되고, groundingText가 비어 hallucination 검사기들마저
+// 무력화된 상태로 의미 없는 응답을 만들어냈다.
+var errBriefingDataMissing = errors.New("briefing section source data unavailable")
+
 // koreanMagnitudeUnits는 한국어가 큰 수를 자릿수별로 묶을 때 쓰는
 // 접미사입니다(서양식 천 단위 콤마 표기와 대응됩니다) — "1200만"
 // (12,000,000)이나 "90억"(9,000,000,000) 같은 표기를 비교 가능한
@@ -1510,6 +1522,9 @@ func classifyBriefingFailureReason(err error) string {
 	if errors.Is(err, errBriefingValidationFailed) {
 		return "validation_failed"
 	}
+	if errors.Is(err, errBriefingDataMissing) {
+		return "data_missing"
+	}
 	if msg := strings.ToLower(err.Error()); strings.Contains(msg, "rate limit") || strings.Contains(msg, "tokens per minute") || strings.Contains(msg, "(tpm)") {
 		return "rate_limit"
 	}
@@ -1542,7 +1557,17 @@ type briefingSectionOutput struct {
 // 의심되는 헤드라인 하나만 제외하고 재시도"하는 뉴스 전용 폴백을 태웁니다
 // — 날씨/환율은 제외할 "항목"이라는 개념 자체가 없으므로 nil을 넘겨
 // 기존과 동일하게 동작합니다.
-func resolveBriefingSection(ctx context.Context, section, model, hash, systemPrompt, userContent string, allowedNumbers []float64, groundingText, hallucinationFallback string, newsInput *briefingNewsInput) briefingSectionOutput {
+//
+// hasData는 이 섹션의 원본 데이터(WeatherData/ExchangeData/NewsData)가
+// 실제로 있는지를 나타냅니다. false면 Groq를 아예 호출하지 않고
+// errBriefingDataMissing으로 바로 아래의 실패 처리 분기(캐시가 있으면
+// stale_fallback, 없으면 dataMissingMessage를 담은 명시적 실패)로
+// 넘어갑니다 — 원본 데이터가 없는 채로 "[뉴스 데이터]: null" 같은 의미
+// 없는 프롬프트를 Groq에 보내 hallucination만 유발하던 문제를 막기
+// 위해서입니다. dataMissingMessage는 hasData가 false일 때만 쓰이며,
+// 섹션마다("⚠️ 날씨/환율/뉴스 데이터를 가져오지 못해...") 다른 문구를
+// 쓸 수 있도록 호출자가 정합니다.
+func resolveBriefingSection(ctx context.Context, section, model, hash, systemPrompt, userContent string, allowedNumbers []float64, groundingText, hallucinationFallback string, newsInput *briefingNewsInput, hasData bool, dataMissingMessage string) briefingSectionOutput {
 	cached, found := lookupBriefingSectionCache(ctx, db, section)
 	if found && cached.dataHash == hash {
 		recordGroqCacheHit()
@@ -1550,18 +1575,22 @@ func resolveBriefingSection(ctx context.Context, section, model, hash, systemPro
 		return briefingSectionOutput{Text: cached.text, Cached: true, GeneratedAt: cached.generatedAt, Status: briefingStatusCached}
 	}
 
-	if found {
-		log.Printf("브리핑(%s): 입력 데이터 변경 감지, Groq 재호출 (모델: %s)", section, model)
-	} else {
-		log.Printf("브리핑(%s): 캐시 없음, Groq 최초 호출 (모델: %s)", section, model)
-	}
-
 	var text string
 	var err error
-	if newsInput != nil {
-		text, err = generateNewsSectionText(ctx, section, model, systemPrompt, userContent, allowedNumbers, groundingText, hallucinationFallback, newsInput)
+	if !hasData {
+		err = errBriefingDataMissing
+		log.Printf("브리핑(%s): 원본 데이터를 가져오지 못해 Groq 호출을 생략합니다", section)
 	} else {
-		text, err = generateSectionText(ctx, section, model, systemPrompt, userContent, allowedNumbers, groundingText, hallucinationFallback)
+		if found {
+			log.Printf("브리핑(%s): 입력 데이터 변경 감지, Groq 재호출 (모델: %s)", section, model)
+		} else {
+			log.Printf("브리핑(%s): 캐시 없음, Groq 최초 호출 (모델: %s)", section, model)
+		}
+		if newsInput != nil {
+			text, err = generateNewsSectionText(ctx, section, model, systemPrompt, userContent, allowedNumbers, groundingText, hallucinationFallback, newsInput)
+		} else {
+			text, err = generateSectionText(ctx, section, model, systemPrompt, userContent, allowedNumbers, groundingText, hallucinationFallback)
+		}
 	}
 	if err != nil {
 		reason := classifyBriefingFailureReason(err)
@@ -1572,6 +1601,9 @@ func resolveBriefingSection(ctx context.Context, section, model, hash, systemPro
 				Text: cached.text, Cached: true, GeneratedAt: cached.generatedAt,
 				Status: briefingStatusStaleFallback, FailureReason: reason,
 			}
+		}
+		if errors.Is(err, errBriefingDataMissing) {
+			return briefingSectionOutput{Text: dataMissingMessage, GeneratedAt: time.Now(), Status: briefingStatusFailed, FailureReason: reason}
 		}
 		if errors.Is(err, errBriefingValidationFailed) {
 			// 조용히 대체할 오래된 캐시가 없고, 재시도 후에도 이 섹션이 여전히
@@ -1651,6 +1683,10 @@ func getBriefing(ctx context.Context, weather *WeatherData, exchange *ExchangeDa
 		groundingText         string
 		hallucinationFallback string
 		newsInput             *briefingNewsInput
+		// hasData/dataMissingMessage는 세 섹션 모두에 적용됩니다 —
+		// resolveBriefingSection의 문서 주석 참고.
+		hasData            bool
+		dataMissingMessage string
 	}
 	// 세 섹션 모두 첫 시도에는 frequentGroqModel()(저렴하고 쿼터가 넉넉한
 	// 모델)을 사용합니다 — 브리핑 섹션은 캐시가 미스될 때마다(도시 전환,
@@ -1678,20 +1714,24 @@ func getBriefing(ctx context.Context, weather *WeatherData, exchange *ExchangeDa
 
 	jobs := [3]job{
 		{
-			name:           weatherBriefingCacheKey(weatherCity),
-			model:          briefingModel,
-			hash:           hashJSON(weatherInput),
-			systemPrompt:   weatherSectionSystemPrompt,
-			userContent:    fmt.Sprintf("[날씨 데이터]: %s\n\n위 데이터를 바탕으로 한국어 날씨 브리핑 문장을 작성하세요.", weatherJSON),
-			allowedNumbers: allowedWeatherNumbers(weatherInput),
+			name:               weatherBriefingCacheKey(weatherCity),
+			model:              briefingModel,
+			hash:               hashJSON(weatherInput),
+			systemPrompt:       weatherSectionSystemPrompt,
+			userContent:        fmt.Sprintf("[날씨 데이터]: %s\n\n위 데이터를 바탕으로 한국어 날씨 브리핑 문장을 작성하세요.", weatherJSON),
+			allowedNumbers:     allowedWeatherNumbers(weatherInput),
+			hasData:            weather != nil,
+			dataMissingMessage: "⚠️ 날씨 데이터를 가져오지 못해 브리핑을 생성할 수 없습니다",
 		},
 		{
-			name:           exchangeBriefingCacheKey(exchangeFrom, exchangeTo),
-			model:          briefingModel,
-			hash:           hashJSON(exchangeInput),
-			systemPrompt:   exchangeSectionSystemPrompt,
-			userContent:    fmt.Sprintf("[환율 데이터]: %s\n\n위 데이터를 바탕으로 한국어 환율 브리핑 문장을 작성하세요.", exchangeJSON),
-			allowedNumbers: allowedExchangeNumbers(exchangeInput),
+			name:               exchangeBriefingCacheKey(exchangeFrom, exchangeTo),
+			model:              briefingModel,
+			hash:               hashJSON(exchangeInput),
+			systemPrompt:       exchangeSectionSystemPrompt,
+			userContent:        fmt.Sprintf("[환율 데이터]: %s\n\n위 데이터를 바탕으로 한국어 환율 브리핑 문장을 작성하세요.", exchangeJSON),
+			allowedNumbers:     allowedExchangeNumbers(exchangeInput),
+			hasData:            exchange != nil,
+			dataMissingMessage: "⚠️ 환율 데이터를 가져오지 못해 브리핑을 생성할 수 없습니다",
 		},
 		{
 			name:                  newsBriefingCacheKey(newsRegion, newsCategory),
@@ -1703,6 +1743,8 @@ func getBriefing(ctx context.Context, weather *WeatherData, exchange *ExchangeDa
 			groundingText:         newsGroundingText(newsInput),
 			hallucinationFallback: newsHallucinationFallback(news),
 			newsInput:             newsInput,
+			hasData:               news != nil && len(news.Items) > 0,
+			dataMissingMessage:    "⚠️ 뉴스 데이터를 가져오지 못해 브리핑을 생성할 수 없습니다",
 		},
 	}
 	for _, j := range jobs {
@@ -1722,7 +1764,7 @@ func getBriefing(ctx context.Context, weather *WeatherData, exchange *ExchangeDa
 	for i, j := range jobs {
 		go func(i int, j job) {
 			defer wg.Done()
-			outputs[i] = resolveBriefingSection(ctx, j.name, j.model, j.hash, j.systemPrompt, j.userContent, j.allowedNumbers, j.groundingText, j.hallucinationFallback, j.newsInput)
+			outputs[i] = resolveBriefingSection(ctx, j.name, j.model, j.hash, j.systemPrompt, j.userContent, j.allowedNumbers, j.groundingText, j.hallucinationFallback, j.newsInput, j.hasData, j.dataMissingMessage)
 		}(i, j)
 	}
 	wg.Wait()

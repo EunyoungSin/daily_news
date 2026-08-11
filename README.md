@@ -90,6 +90,17 @@ Groq가 생성한 문장을 그대로 내보내지 않고, `validateSectionOutpu
 `stale_fallback`(남아있는 캐시나 안내 문구로 대체)으로 처리합니다. **softFailure**는 재시도해도
 계속 검출되면 결과를 그대로 내보냅니다 — 현재는 금칙어 검사만 이 등급입니다.
 
+이 콘텐츠 검증은 생성된 텍스트를 사후에 검사하는 것이고, 그 이전에 `resolveBriefingSection`의
+`hasData` 가드가 애초에 원본 데이터(`WeatherData`/`ExchangeData`/`NewsData`)가 있을 때만 Groq를
+호출하도록 세 섹션 모두에 동일하게 적용되어 있습니다(날씨는 `weather != nil`, 환율은
+`exchange != nil`, 뉴스는 `news != nil && len(news.Items) > 0`). 실제 보고된 사례: NewsData.io
+조회가 타임아웃으로 실패해 `news`가 `nil`인 채로 `getBriefing`에 전달됐는데 이 가드가 없어서,
+`nil`이 JSON으로 직렬화된 `"[뉴스 데이터]: null"`이라는 의미 없는 프롬프트가 그대로 Groq에
+전달되고 `groundingText`가 비어 있어 환각 검사기들마저 스스로 건너뛰는 최악의 조합으로 의미
+없는 응답이 나왔습니다. 데이터가 없으면 Groq를 아예 호출하지 않고, 되돌아갈 캐시가 있으면
+`stale_fallback`으로, 없으면 섹션별 안내 문구("⚠️ 뉴스 데이터를 가져오지 못해 브리핑을 생성할
+수 없습니다" 등)로 즉시 처리합니다.
+
 뉴스 섹션은 에스컬레이션 재시도까지 실패했을 때 한 단계를 더 거칩니다: 곧바로
 `stale_fallback`으로 넘어가는 대신, `generateNewsSectionText`가 `pickNewsItemToExclude`로
 (생성문에 남은 숫자와 후보 헤드라인들의 숫자를 대조해) 문제로 의심되는 헤드라인 하나를
