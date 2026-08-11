@@ -104,7 +104,7 @@ export default function NewsCard({
         </div>
 
         <div className="news__content">
-        {loading && !section && (
+        {loading && (
           <div className="news__skeleton" aria-label="뉴스 불러오는 중">
             {[0, 1, 2, 3, 4].map((i) => (
               <div className="skeleton-news-row" key={i}>
@@ -124,9 +124,9 @@ export default function NewsCard({
           </div>
         )}
 
-        {section?.notice && <p className="news__notice">ℹ️ {section.notice}</p>}
+        {!loading && section?.notice && <p className="news__notice">ℹ️ {section.notice}</p>}
 
-        {section?.data && (
+        {!loading && section?.data && (
           <ol className="news__list">
             {section.data.items.map((item, index) => {
               const mode = itemOverrides[item.id] ?? 'ko'
