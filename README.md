@@ -191,6 +191,28 @@ misses"처럼 영어 문장과 이미 계산된 한글 숫자 표기를 의도�
 `newsSectionSystemPrompt`에 "영어 고유명사는 외래어 표기법에 맞는 한글이나 영어 원문 그대로만
 쓰고, 일본어·중국어식 음차는 금지"라는 규칙을 추가해 애초에 생성 단계에서 막습니다.
 
+위 "일본어 음차" 대응은 고유명사(회사명 등)를 소리 나는 대로 옮기려다 가나/한자가 섞이는
+경우를 막기 위한 것이었는데, 이와는 다른 새 유형의 재발 사례가 있었습니다: "belly size beats
+BMI at predicting heart attacks" 헤드라인을 다루다가 "배圍"(한글 "배" + 한자 "圍"가 뒤섞인,
+어느 언어에도 존재하지 않는 표현)가 생성됐습니다. 이번엔 고유명사가 아니라 "배 둘레"의 한자어
+표현인 腹圍(복위)처럼, 흔히 한자로도 표기되는 일반/전문 용어(의학·과학·법률 등)를 모델이
+무리하게 정확히 옮기려다 생긴 실패였습니다. `findForeignCJK`가 사후에 이미 이 출력을
+걸러냈지만, 검증만으로는 재시도 후에도 같은 헤드라인이 다시 선택되면 같은 실패가 반복될 수
+있어(`pickNewsItemToExclude`가 매번 정확히 이 헤드라인을 제외 대상으로 골라준다는 보장이
+없습니다), `newsSectionSystemPrompt`에 규칙 5번("의학·과학·법률 등 전문 용어도 한자를 섞지
+말고 한글로만 쓰세요... 한글로 옮기기 애매하면 억지로 옮기지 말고 쉬운 말로 풀어 쓰세요")을
+추가했습니다. 헤드라인 번역(`news_translation.go`의 `newsTranslationSystemPrompt`)도 영어
+원문을 한국어로 옮기는 별개의 Groq 호출이라 똑같은 실패가 날 수 있어, 두 프롬프트는 상수를
+공유하지 않지만 같은 문구를 양쪽에 동일하게 반영했습니다 — `TestNewsSectionSystemPromptCoversTechnicalTermHanjaMixing`/
+`TestNewsTranslationSystemPromptCoversTechnicalTermHanjaMixing`(`briefing_section_test.go`/
+`news_translation_test.go`)이 두 프롬프트 모두에 이 규칙이 실제로 존재하는지 회귀 테스트로
+고정합니다. 이 규칙 추가로 `newsSectionSystemPrompt`가 늘어나 프롬프트 토큰 예산 테스트
+(`TestNewsBriefingPromptFitsWithinTokenBudget`)가 기존 예산(1500)을 넘어섰는데, 이미 문구를
+최대한 압축한 상태였고 늘어난 뒤에도 실제 6,000 TPM 한도까지는 여전히 여유가 있어
+`briefingNewsPromptTokenBudget`을 1650으로 올렸습니다 — 실제 Groq API로 5회 반복 생성해
+매번 "배 둘레가 BMI보다 심장 질환 예측에 더 정확합니다"류의 순수 한글 문장이 나오는 것을
+확인했습니다.
+
 - **존댓말 강제** (hardFailure): 날씨/환율/뉴스 공통 프롬프트 규칙("항상 합니다체로 작성하세요")에
   더해, 뉴스 문단은 원문(NewsData.io)이 기사체(~했다)라도 반드시 합니다체로 재작성하라는 전용
   규칙이 추가돼 있습니다. `findInformalSentenceEnding`이 반말/기사체 종결을 정규식으로

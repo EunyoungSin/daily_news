@@ -1166,8 +1166,15 @@ func TestExchangeBriefingPromptFitsWithinTokenBudget(t *testing.T) {
 // 2,464토큰까지 커져 llama-3.1-8b-instant의 분당 한도(6,000 TPM)를 단일
 // 요청만으로 위협하는 문제가 반복적으로 발생했다 — 이 값은 "다음에 규칙을
 // 하나 더 추가했을 때 예산을 넘었는지"를 사람이 매번 로그를 보고 계산하지
-// 않고도 CI/로컬 테스트에서 바로 잡아내기 위한 것이다.
-const briefingNewsPromptTokenBudget = 1500
+// 않고도 CI/로컬 테스트에서 바로 잡아내기 위한 것이다. 의학/과학/법률
+// 전문 용어의 한자 혼입을 막는 규칙(newsSectionSystemPrompt 5번, "belly
+// size" → "배圍" 실제 사례)을 추가하며 1500에서 1650으로 올렸다 — 이미
+// 최대한 압축한 문구인데도 이 값을 넘어섰고, 늘어난 뒤에도(실측 약
+// 1,573) 6,000 TPM 한도까지는 여전히 큰 여유가 있다. 새 규칙이 실제
+// 실패를 막는 데 필요한 만큼, 이 상수도 그 필요를 반영해 함께 올리는
+// 것이 맞다고 판단했다 — 다만 다음에 규칙을 추가할 때는 이 값을 또
+// 올리기보다, 정말 프롬프트 문구가 필요한지부터 검토해야 한다.
+const briefingNewsPromptTokenBudget = 1650
 
 // TestNewsBriefingPromptFitsWithinTokenBudget은 뉴스 브리핑 프롬프트가
 // briefingNewsPromptTokenBudget을 넘지 않는지 검증한다. 헤드라인 3개
@@ -1235,5 +1242,30 @@ func TestNewsSectionSystemPromptBansCJKAsTopPriorityRule(t *testing.T) {
 	}
 	if !strings.HasPrefix(newsSectionSystemPrompt, briefingCommonRules) {
 		t.Error("expected newsSectionSystemPrompt to start with the shared briefingCommonRules (the single source of the CJK-ban rule for both domestic and international)")
+	}
+}
+
+// TestNewsSectionSystemPromptCoversTechnicalTermHanjaMixing은 실제 보고된
+// 사례를 회귀 테스트로 고정한다: "belly size beats BMI at predicting heart
+// attacks" 헤드라인을 다루다가 "배圍"(한글 "배" + 한자 "圍"가 섞인, 어느
+// 언어에도 존재하지 않는 표현)가 생성됐다. 기존의 "일본어·중국어식 음차
+// 금지" 규칙(4번)은 회사명 등 고유명사를 소리 나는 대로 옮기다 가나/한자가
+// 섞이는 것을 막기 위한 규칙이라 이 실패를 커버하지 못했다 — 이번 실패는
+// 고유명사가 아니라 "배 둘레"의 한자어 표현인 腹圍(복위)처럼, 흔히
+// 한자로도 표기되는 일반/전문 용어를 무리하게 정확히 옮기려다 생긴
+// 것이기 때문이다. findForeignCJK가 사후에 이미 이런 출력을 걸러내고
+// 있었지만(validateSectionOutput), 생성 단계에서부터 이런 시도 자체를
+// 막고 실패 시 쉬운 말로 풀어 쓰도록 유도하는 전용 규칙이 있어야
+// 재시도 후에도 같은 헤드라인이 다시 선택될 때 같은 실패가 반복되는
+// 것을 줄일 수 있다.
+func TestNewsSectionSystemPromptCoversTechnicalTermHanjaMixing(t *testing.T) {
+	if !strings.Contains(newsSectionSystemPrompt, "전문 용어") {
+		t.Fatal("expected newsSectionSystemPrompt to contain guidance about technical/professional terminology")
+	}
+	if !strings.Contains(newsSectionSystemPrompt, "belly size") {
+		t.Error("expected the concrete regressed example (\"belly size\") to remain in the prompt as a guiding example")
+	}
+	if !strings.Contains(newsSectionSystemPrompt, "쉬운 말로 풀어") {
+		t.Error("expected guidance to paraphrase into simpler wording when a term is hard to render in pure Hangul, not just a bare CJK prohibition")
 	}
 }

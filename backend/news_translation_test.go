@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -48,5 +49,23 @@ func TestTranslationFailureCooldown(t *testing.T) {
 	clearTranslationFailure(articleID)
 	if recentlyFailedTranslation(articleID) {
 		t.Fatal("성공(clearTranslationFailure)한 뒤에는 쿨다운이 남아있으면 안 된다")
+	}
+}
+
+// TestNewsTranslationSystemPromptCoversTechnicalTermHanjaMixing은
+// briefing.go의 TestNewsSectionSystemPromptCoversTechnicalTermHanjaMixing과
+// 같은 이유로 존재한다: 이 번역 프롬프트는 newsSectionSystemPrompt와
+// 상수를 공유하지 않는 완전히 독립된 문자열이라, 같은 종류의 규칙("belly
+// size" → "배圍" 같은 전문 용어 한자 혼입 방지)을 한쪽에만 추가하고
+// 다른 쪽에 반영하는 것을 잊어버리는 회귀가 있을 수 있다.
+func TestNewsTranslationSystemPromptCoversTechnicalTermHanjaMixing(t *testing.T) {
+	if !strings.Contains(newsTranslationSystemPrompt, "전문 용어") {
+		t.Fatal("expected newsTranslationSystemPrompt to contain guidance about technical/professional terminology")
+	}
+	if !strings.Contains(newsTranslationSystemPrompt, "belly size") {
+		t.Error("expected the concrete regressed example (\"belly size\") to remain in the prompt as a guiding example")
+	}
+	if !strings.Contains(newsTranslationSystemPrompt, "쉬운 말로 풀어") {
+		t.Error("expected guidance to paraphrase into simpler wording when a term is hard to render in pure Hangul, not just a bare CJK prohibition")
 	}
 }
