@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -59,6 +60,48 @@ func lookupNewsTranslation(ctx context.Context, conn *sql.DB, articleID string) 
 	return title, true
 }
 
+// newsTranslationFailureCooldown은 번역이 실패(API 오류 또는 검증 실패로
+// 빈 문자열이 된 경우)한 기사를 다시 시도하기까지 기다리는 최소 간격이다.
+// 실패는 news_translation_cache(DB)에 저장하지 않는다 — 실패 상태를
+// DB에 영구히 남기면 그 기사가 노출되는 동안 계속 "번역 실패"로
+// 고정되기 때문이다. 대신 실패 시각만 프로세스 메모리에 짧게 기록해서,
+// 같은 기사가 쿨다운 안에 다시 요청되면 Groq를 또 호출하지 않고 즉시
+// 원문 표시로 폴백하고, 쿨다운이 지나면 자동으로 재시도한다. 서버가
+// 재시작되면 이 기록도 사라지는데, 그러면 재시도가 더 빨라질 뿐이라
+// 안전하다(DB 캐시처럼 "성공했던 번역을 잃어버리는" 문제가 아니다).
+const newsTranslationFailureCooldown = 5 * time.Minute
+
+var (
+	newsTranslationFailuresMu sync.Mutex
+	newsTranslationFailures   = map[string]time.Time{}
+)
+
+func recentlyFailedTranslation(articleID string) bool {
+	newsTranslationFailuresMu.Lock()
+	defer newsTranslationFailuresMu.Unlock()
+	failedAt, ok := newsTranslationFailures[articleID]
+	if !ok {
+		return false
+	}
+	if time.Since(failedAt) >= newsTranslationFailureCooldown {
+		delete(newsTranslationFailures, articleID)
+		return false
+	}
+	return true
+}
+
+func recordTranslationFailure(articleID string) {
+	newsTranslationFailuresMu.Lock()
+	defer newsTranslationFailuresMu.Unlock()
+	newsTranslationFailures[articleID] = time.Now()
+}
+
+func clearTranslationFailure(articleID string) {
+	newsTranslationFailuresMu.Lock()
+	defer newsTranslationFailuresMu.Unlock()
+	delete(newsTranslationFailures, articleID)
+}
+
 func upsertNewsTranslation(conn *sql.DB, articleID, translatedTitle string) {
 	if conn == nil {
 		return
@@ -99,11 +142,14 @@ func translateNewsItems(ctx context.Context, items []NewsItem) {
 
 	toTranslate := make([]NewsItem, 0, len(items))
 	cacheHits := 0
+	cooldownSkips := 0
 
 	for i := range items {
 		if cached, ok := lookupNewsTranslation(ctx, db, items[i].ID); ok {
 			items[i].TranslatedTitle = cached
 			cacheHits++
+		} else if recentlyFailedTranslation(items[i].ID) {
+			cooldownSkips++
 		} else {
 			toTranslate = append(toTranslate, items[i])
 		}
@@ -115,6 +161,9 @@ func translateNewsItems(ctx context.Context, items []NewsItem) {
 		}
 		log.Printf("[캐시 재사용] 뉴스 번역: %d개 항목 캐시 재사용, %d개 신규 번역 필요", cacheHits, len(toTranslate))
 	}
+	if cooldownSkips > 0 {
+		log.Printf("뉴스 번역: 최근 실패한 %d개 항목은 재시도 쿨다운(%s) 중이라 원문 표시로 폴백", cooldownSkips, newsTranslationFailureCooldown)
+	}
 
 	if len(toTranslate) == 0 {
 		return
@@ -123,6 +172,9 @@ func translateNewsItems(ctx context.Context, items []NewsItem) {
 	translated, err := fetchNewsTranslation(ctx, toTranslate)
 	if err != nil {
 		log.Printf("뉴스: 번역 실패: %v", err)
+		for _, it := range toTranslate {
+			recordTranslationFailure(it.ID)
+		}
 		return
 	}
 
@@ -131,8 +183,18 @@ func translateNewsItems(ctx context.Context, items []NewsItem) {
 		byID[t.ID] = t.TranslatedTitle
 	}
 
-	for id, title := range byID {
-		upsertNewsTranslation(db, id, title)
+	// 성공(비어 있지 않은 번역)만 DB 캐시에 저장한다 — 검증 실패로 빈
+	// 문자열이 된 항목이나 모델 응답에서 통째로 빠진 항목은 실패
+	// 쿨다운만 기록하고 DB에는 남기지 않아서, 쿨다운이 지나면 다음
+	// 요청에서 다시 번역을 시도할 수 있다.
+	for _, it := range toTranslate {
+		title, ok := byID[it.ID]
+		if !ok || title == "" {
+			recordTranslationFailure(it.ID)
+			continue
+		}
+		clearTranslationFailure(it.ID)
+		upsertNewsTranslation(db, it.ID, title)
 	}
 
 	for i := range items {

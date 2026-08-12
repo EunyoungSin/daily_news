@@ -531,6 +531,18 @@ CREATE TABLE IF NOT EXISTS news_translation_cache (
 const deleteOldNewsTranslationCache = `
 DELETE FROM news_translation_cache WHERE cached_at < datetime('now', '-30 days')`
 
+// deleteEmptyNewsTranslationCache는 일회성 정리 쿼리다. news_translation.go가
+// 예전에는 검증 실패(CJK/영어 혼입) 항목을 빈 문자열("")로 캐시에 그대로
+// 저장했는데, 그러면 이후 lookupNewsTranslation이 "행이 존재하니 캐시
+// 성공"으로 잘못 판단해서 해당 기사가 노출되는 동안 계속 "번역 실패"(원문
+// 표시)로 고정되는 문제가 있었다. translateNewsItems가 이제는 빈 결과를
+// 캐시에 쓰지 않도록 고쳐졌으니, 이 마이그레이션이 배포되는 순간 이미
+// 박혀 있던 빈 문자열 행들을 지워서 다음 요청부터 새 쿨다운 로직으로
+// 재시도되게 한다. CREATE TABLE IF NOT EXISTS처럼 매 시작마다 실행해도
+// 안전하다 — 지울 빈 문자열 행이 없으면 그냥 0행 삭제로 끝난다.
+const deleteEmptyNewsTranslationCache = `
+DELETE FROM news_translation_cache WHERE translated_title = ''`
+
 // migrate는 로또/브리핑/캐시 관련 테이블이 없으면 생성한다. 매 시작마다
 // 실행해도 안전하다(CREATE TABLE IF NOT EXISTS). MySQL 시절에 있던
 // widenBriefingSectionCacheColumn/makeSimpleTextNullable/
@@ -594,6 +606,9 @@ func migrate(conn *sql.DB) error {
 	}
 	if _, err := conn.Exec(deleteOldNewsTranslationCache); err != nil {
 		return fmt.Errorf("clean up old news_translation_cache rows: %w", err)
+	}
+	if _, err := conn.Exec(deleteEmptyNewsTranslationCache); err != nil {
+		return fmt.Errorf("clean up empty news_translation_cache rows: %w", err)
 	}
 	return nil
 }
