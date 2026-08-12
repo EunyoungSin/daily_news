@@ -4,6 +4,7 @@ import { usePulseOnChange } from '../hooks/usePulseOnChange'
 import { splitSentences } from '../utils/sentenceSplit'
 import LottoBall from './lotto/LottoBall'
 import LottoRecommendation from './lotto/LottoRecommendation'
+import LottoPreviousResult from './lotto/LottoPreviousResult'
 import CollectionToggle from './lotto/CollectionToggle'
 
 // 회차 목록(최대 50행)과 히트맵(45칸)은 스크롤을 내려야 보이고 데이터도
@@ -162,6 +163,10 @@ export default function LottoCard({
               onModeChange={onRecommendationModeChange}
               pending={recommendationPending}
             />
+
+            {section.data.previousRecommendationResult && (
+              <LottoPreviousResult results={section.data.previousRecommendationResult} />
+            )}
 
             <div className="lotto__section">
               <h3 className="lotto__section-title">최근 10회 출현 번호</h3>

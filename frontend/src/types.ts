@@ -265,6 +265,23 @@ export interface LottoRecommendation {
   nextAvailableAt?: string
 }
 
+// LottoRecommendationMatch는 "지난주 추천 결과 보기"의 항목 하나다 —
+// 지난 사이클에 이 모드가 추천했던 세트(numbers)와, 그 사이클이 기다리던
+// 실제 당첨 회차(actualDrwNo/actualNumbers, 보너스 제외)를 대조한
+// 결과다. isRetroactive가 true면 사용자가 그 주에 실제로 이 모드를
+// 조회한 적이 없어서, 나중에(새 회차가 저장된 시점에) "그때 조회했다면
+// 무엇이 나왔을지"를 사후 계산했다는 뜻이다 — 실제 그 주의 추천
+// 대상이었던 것처럼 혼동되지 않도록 화면에 별도로 안내해야 한다.
+export interface LottoRecommendationMatch {
+  mode: LottoRecommendationMode
+  numbers: number[]
+  matchedCount: number
+  matchedNumbers: number[]
+  isRetroactive: boolean
+  actualDrwNo: number
+  actualNumbers: number[]
+}
+
 export interface LottoData {
   latest: LottoDraw
   // 최근 회차부터 최신순으로 정렬.
@@ -275,6 +292,12 @@ export interface LottoData {
   recentAppeared: number[]
   aiInsight: LottoAIInsight
   recommendation: LottoRecommendation
+  // 지난 사이클(오늘 기준 정확히 한 주기 전)의 trend/regression/uniform
+  // 3개 모드 결과 — 사용자가 그 주에 실제로 조회했던 모드와 무관하게
+  // 항상 3개 모두, 그리고 항상 이 고정 순서(trend -> regression ->
+  // uniform)로 채워진다. "지난주"가 아직 없으면(예: 1회차만 있을 때)
+  // undefined다.
+  previousRecommendationResult?: LottoRecommendationMatch[]
 }
 
 export interface LottoSection extends SectionMeta {

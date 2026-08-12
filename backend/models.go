@@ -293,6 +293,27 @@ type LottoRecommendation struct {
 	NextAvailableAt string                  `json:"nextAvailableAt,omitempty"`
 }
 
+// LottoRecommendationMatch는 "지난주 추천 결과 보기"의 항목 하나다 —
+// lotto_recommendation_history.go 참고. 지난 사이클에 trend/regression/
+// uniform 각 모드가 추천했던 세트(Numbers)와, 그 사이클이 기다리던 실제
+// 당첨 회차(ActualDrwNo/ActualNumbers, 보너스 제외)를 대조한 결과다.
+// IsRetroactive가 true면 사용자가 그 주에 실제로 그 모드를 조회한 적이
+// 없어서, 새 회차가 저장된 시점에(또는 이 결과를 처음 조회하는 시점에)
+// "그때 조회했다면 무엇이 나왔을지"를 사후 계산했다는 뜻이다 — 프론트엔드는
+// 이 값으로 "참고용으로 사후에 계산됨" 안내를 붙인다. 세 모드는 항상
+// trend -> regression -> uniform 고정 순서로만 제공되며, 일치 개수로
+// 재정렬되지 않는다(어떤 모드가 "더 우수했다"는 인상을 주지 않기 위한
+// 의도적인 설계다).
+type LottoRecommendationMatch struct {
+	Mode           string `json:"mode"`
+	Numbers        []int  `json:"numbers"`
+	MatchedCount   int    `json:"matchedCount"`
+	MatchedNumbers []int  `json:"matchedNumbers"`
+	IsRetroactive  bool   `json:"isRetroactive"`
+	ActualDrwNo    int    `json:"actualDrwNo"`
+	ActualNumbers  []int  `json:"actualNumbers"`
+}
+
 type LottoData struct {
 	Latest LottoDraw `json:"latest"`
 	// History는 최근 회차들을 최신순으로 담고 있다.
@@ -303,6 +324,12 @@ type LottoData struct {
 	RecentAppeared []int               `json:"recentAppeared"`
 	AIInsight      LottoAIInsight      `json:"aiInsight"`
 	Recommendation LottoRecommendation `json:"recommendation"`
+	// PreviousRecommendationResult는 지난 사이클(오늘 기준 정확히 한 주기
+	// 전)의 3개 모드 결과를 담는다 — 사용자가 그 주에 실제로 조회했던
+	// 모드와 무관하게 항상 3개 모두 포함된다(getLottoPreviousRecommendationResult
+	// 참고). "지난주"가 아직 없는 경우(예: 1회차만 있을 때)는 nil이라
+	// omitempty로 필드 자체가 응답에서 빠진다.
+	PreviousRecommendationResult []LottoRecommendationMatch `json:"previousRecommendationResult,omitempty"`
 }
 
 type LottoSection struct {

@@ -607,6 +607,52 @@ GitHub 소스가 계속 실패하면 아래 "관리자 API"로 수동 입력할 
 `GET /api/lotto?mode={uniform|trend|regression}`로 원하는 모드를 지정할 수
 있고, 값이 없거나 잘못된 값이면 `uniform`으로 대체됩니다.
 
+### 5. 지난주 추천 결과 — 재미용 사후 비교, 순위가 아님
+
+새 회차(다음 주 실제 당첨번호)가 저장되면(자동 수집 성공 또는 관리자
+수동 입력, `backend/lotto_recommendation_history.go`), 그 회차가 속한
+직전 사이클에 대해 `trend`/`regression`/`uniform` **세 모드 모두**의
+추천 번호가 실제 당첨번호와 몇 개 겹쳤는지 계산해 저장합니다.
+
+- 사용자가 지난주에 실제로 조회한 모드가 하나(예: uniform)뿐이었어도,
+  나머지 두 모드는 그 시점의 데이터로 4단계 파이프라인을 그대로
+  재사용해 사후 계산합니다(`ensureLottoRecommendationForPastCycle`) —
+  `computeNumberStats`/`generateRecommendationSet`이 "현재 시각"을
+  하드코딩하지 않고 frequency/history를 파라미터로 받는 순수 함수라
+  가능한 일입니다. 이렇게 사후 계산된 행은 `is_retroactive=1`로
+  표시됩니다.
+- `GET /api/lotto` 응답의 `previousRecommendationResult` 배열은 항상
+  `trend → regression → uniform` **고정 순서**로 옵니다. 일치 개수가
+  큰 순서로 정렬하지 않습니다 — 이 순서 고정 자체가 "어떤 방식이 더
+  우수하다"는 인상을 주지 않기 위한 설계입니다. 프론트엔드
+  (`LottoPreviousResult.tsx`)도 이 순서를 그대로 렌더링할 뿐 절대
+  재정렬하지 않습니다.
+- 겹친 번호 개수는 보너스 번호를 제외한 순수 6개 대 6개 교집합입니다.
+- 문구는 의도적으로 "적중률"/"명중률" 같은 성적표 표현이나 다른 모드와
+  비교하는 문장을 쓰지 않습니다("N개 일치했네요 🎉" / "이번엔 하나도 안
+  맞았어요 😅" 정도의 담백한 톤). 화면 하단에는 항상 "일치 개수는
+  순전히 우연이며 세 방식 모두 당첨 확률에 차이가 없다"는 disclaimer가
+  붙습니다. `lottoAISystemPrompt`(`backend/lotto_ai.go`)에도 이 일치
+  결과를 근거로 "어떤 방식이 더 잘 맞았다"는 식의 비교 문장을 생성하지
+  말라는 금지 규칙이 있습니다 — 현재는 AI 인사이트 프롬프트에 이 데이터
+  자체를 넘기지 않지만, 나중에 참고 자료로 추가되더라도 이 규칙이
+  먼저 막아줍니다.
+- **레거시 포맷 자가 치유 시 주의(실제로 겪은 버그)**: `numbers`
+  컬럼은 JSON 배열 인코딩이 도입되기 전에 저장된 행이 일부 남아있어
+  순수 CSV("1,5,8,20,21,30")로 저장된 경우가 있습니다. 이런 행은
+  `decodeRecommendationSet`이 실패해 `lookupLottoRecommendation`이
+  `found=true, set=nil`을 반환합니다 — 처음에는 이 경우를 "행이
+  없음"과 똑같이 취급해 `INSERT OR IGNORE`로 사후 계산 결과를 저장하려
+  했는데, 행이 이미 있어 PK 충돌로 조용히 무시되고 아무것도 고쳐지지
+  않아 매 요청마다 새로 계산한(uniform처럼 무작위성이 있는 모드는 매번
+  다른) 세트를 반환하는 버그가 실제 운영 DB에서 발생했습니다. 지금은
+  `found` 여부로 분기해, 행이 이미 있으면 `reencodeLottoRecommendation`
+  으로 실제 `UPDATE`를 하고(이때 `is_retroactive`는 원래 값을 그대로
+  보존 — 사후 계산을 다시 했다고 실제 사용자 조회 기록이 사후 계산으로
+  둔갑하면 안 됩니다), 이제 막 numbers가 바뀌었으니 기존
+  `matched_count`/`matched_numbers`도 함께 NULL로 리셋해 다음 조회 때
+  새 numbers 기준으로 재계산되게 합니다.
+
 ### 그 외
 
 - 통계(번호별 출현 횟수, 최근 10회 출현 번호)는 Go가 아니라 DB의
@@ -651,7 +697,12 @@ CREATE TABLE ai_insight_cache (
 -- (cycle_start_date, mode) 복합 기본키 — 사이클마다, 그리고 그 사이클
 -- 안에서 선택된 모드마다 정확히 한 행만 존재한다. numbers/stats_json은
 -- 세트 1개(번호 6개와 그 통계)를 담는다. number_groups는 예전 방식의
--- 흔적으로 더 이상 쓰지 않지만 컬럼 자체는 남아있다.
+-- 흔적으로 더 이상 쓰지 않지만 컬럼 자체는 남아있다. matched_count/
+-- matched_numbers는 다음 회차 발표 후 "지난주 추천 결과"에서 몇 개
+-- 일치했는지 계산해 채워진다(위 "5. 지난주 추천 결과" 참고) — 아직 대조
+-- 전이면 NULL이다. is_retroactive는 이 행이 사용자가 실제로 조회해서
+-- 생겼는지(0), 다른 모드를 보는 사이 뒤늦게 사후 계산으로 채워졌는지(1)
+-- 를 구분한다.
 CREATE TABLE lotto_recommendation (
   cycle_start_date TEXT NOT NULL,
   mode TEXT NOT NULL DEFAULT 'uniform',
@@ -661,6 +712,9 @@ CREATE TABLE lotto_recommendation (
   number_groups TEXT NOT NULL DEFAULT '',
   stats_json TEXT NOT NULL DEFAULT '{}',
   generated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  matched_count INTEGER,
+  matched_numbers TEXT,
+  is_retroactive INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (cycle_start_date, mode)
 );
 
@@ -895,6 +949,12 @@ AI 브리핑 카드만 스켈레톤 상태로 대기시킵니다.
   `mode`(요청받은 가중치 정책)와 `set: { numbers, stats }`가 채워집니다 —
   `stats`는 `{ oddEvenRatio, sum, bandDistribution, overlapWithPrevious }`
   형태입니다(위 "이번 주 추천 번호" 참고).
+- `previousRecommendationResult?`: 직전 사이클(지난주)의 세 모드 결과
+  배열, 항상 `trend → regression → uniform` 고정 순서입니다(위 "5.
+  지난주 추천 결과" 참고). 각 항목은
+  `{ mode, numbers, matchedCount, matchedNumbers, isRetroactive,
+  actualDrwNo, actualNumbers }` 형태이며, 대조할 과거 데이터 자체가
+  없는 아주 이른 회차에서는 필드 자체가 생략됩니다.
 
 `GET /healthz`는 DB/외부 API를 전혀 건드리지 않고 프로세스가 요청을 받을 수
 있으면 즉시 200을 반환합니다 — Render 등 플랫폼 헬스체크 전용이며(위

@@ -152,6 +152,15 @@ func lottoManualEntryHandler(w http.ResponseWriter, r *http.Request) {
 		savedCount = -1
 	}
 
+	// 자동 수집 경로(checkForNewLottoRound)와 동일하게, 이 회차가 실제
+	// 결과로 확정하는 직전 주기의 3개 모드 추천을 확보하고 일치 결과를
+	// 계산한다. r.Context()가 아니라 별도 컨텍스트를 쓰는 이유도
+	// 같다 — 응답을 보내기 전 마지막 단계인데, 클라이언트가 그 사이
+	// 연결을 끊어도 이 후속 계산 자체는 끝까지 완료되어야 한다.
+	matchCtx, matchCancel := context.WithTimeout(context.Background(), lottoInsertTimeout)
+	defer matchCancel()
+	processRetroactivePreviousCycleRecommendations(matchCtx, db, input.DrwNo, input.DrwDate)
+
 	log.Printf("로또(관리자 수동 입력): %d회차 저장/갱신됨(현재 총 %d회차)", input.DrwNo, savedCount)
 	json.NewEncoder(w).Encode(map[string]any{
 		"success":    true,

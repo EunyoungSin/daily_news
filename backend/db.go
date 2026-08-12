@@ -321,6 +321,17 @@ CREATE TABLE IF NOT EXISTS briefing_section_cache (
 // 컬럼만 안전하게 지울 방법이 마땅치 않아(NOT NULL 제약을 다른 방식으로
 // 되돌리는 등 번거로움만 있고 이득은 없다) 컬럼 자체는 남겨두되, 새로
 // 쓰는 행에는 항상 빈 문자열을 넣는다.
+// matched_count/matched_numbers/is_retroactive는 "지난주 추천 결과 보기"
+// 기능(lotto_recommendation_history.go)이 쓴다. matched_count가 NULL이면
+// 아직 실제 당첨번호와 대조해본 적이 없다는 뜻이고(그 사이클이 아직
+// 진행 중이거나, 새 회차 저장 훅이 아직 한 번도 안 탄 경우), 값이
+// 채워지면 그 회차의 실제 당첨번호(보너스 제외)와 몇 개나 겹쳤는지를
+// 뜻한다. matched_numbers는 그 겹친 번호를 "5,17" 형태로 담는다.
+// is_retroactive는 사용자가 그 주에 실제로 그 모드를 조회해서 생긴 행이
+// 아니라, 나중에(새 회차가 저장된 시점에) "그때 조회했다면 무엇이
+// 나왔을지"를 사후 계산해 채운 행이라는 뜻이다 — 실제 그 주의 추천
+// 대상이었던 것처럼 혼동되지 않도록 프론트엔드가 이 값으로 구분해
+// 안내 문구를 붙인다.
 const createLottoRecommendationTable = `
 CREATE TABLE IF NOT EXISTS lotto_recommendation (
 	cycle_start_date TEXT NOT NULL,
@@ -331,6 +342,9 @@ CREATE TABLE IF NOT EXISTS lotto_recommendation (
 	number_groups TEXT NOT NULL DEFAULT '',
 	stats_json TEXT NOT NULL DEFAULT '{}',
 	generated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+	matched_count INTEGER,
+	matched_numbers TEXT,
+	is_retroactive INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY (cycle_start_date, mode)
 )`
 
@@ -602,6 +616,19 @@ func migrate(conn *sql.DB) error {
 	// 복사하므로, 그 컬럼들이 이미 존재해야 한다.
 	if err := migrateLottoRecommendationToCompositeKey(conn); err != nil {
 		return fmt.Errorf("migrate lotto_recommendation to composite key: %w", err)
+	}
+	// matched_count/matched_numbers/is_retroactive는 이 복합키 마이그레이션이
+	// 만드는 lotto_recommendation_new에는 포함되어 있지 않으므로(그
+	// 마이그레이션은 그 시점의 예전 컬럼만 그대로 복사한다), 반드시 이
+	// 마이그레이션 뒤에 확인해야 레거시 DB에서도 확실히 추가된다.
+	if err := ensureColumnExists(conn, "lotto_recommendation", "matched_count", "matched_count INTEGER"); err != nil {
+		return fmt.Errorf("migrate lotto_recommendation: %w", err)
+	}
+	if err := ensureColumnExists(conn, "lotto_recommendation", "matched_numbers", "matched_numbers TEXT"); err != nil {
+		return fmt.Errorf("migrate lotto_recommendation: %w", err)
+	}
+	if err := ensureColumnExists(conn, "lotto_recommendation", "is_retroactive", "is_retroactive INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("migrate lotto_recommendation: %w", err)
 	}
 	if _, err := conn.Exec(createWeatherSlotCacheTable); err != nil {
 		return fmt.Errorf("create weather_slot_cache: %w", err)

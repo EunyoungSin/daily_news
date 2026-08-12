@@ -111,22 +111,28 @@ func decodeRecommendationSet(numbersJSON, statsJSON string) (LottoRecommendation
 // set=nil)로 표현해야 getLottoRecommendation이 "찾았지만 낡았다" 분기
 // (UPDATE 사용, 기존 based_on_data_hash를 WHERE 조건으로 덮어쓸 수 있다)를
 // 타서 실제로 새 형식으로 갱신된다.
-func lookupLottoRecommendation(ctx context.Context, conn *sql.DB, cycleStartDate, mode string) (set *LottoRecommendationSet, basedOnDrwNo int, basedOnDataHash string, generatedAt time.Time, found bool) {
+// isRetroactive는 이 행이 사용자가 그 사이클에 실제로 조회해서 생긴
+// 정상 캐시가 아니라, 나중에(새 회차 저장 시점에) "그때 조회했다면
+// 무엇이 나왔을지"를 사후 계산해 채운 행인지를 나타낸다 —
+// lotto_recommendation_history.go 참고. getLottoRecommendation(현재
+// 사이클 조회)은 이 값을 쓰지 않지만, 지난주 추천 결과 조회 경로는 이
+// 값으로 안내 문구를 붙일지 결정한다.
+func lookupLottoRecommendation(ctx context.Context, conn *sql.DB, cycleStartDate, mode string) (set *LottoRecommendationSet, basedOnDrwNo int, basedOnDataHash string, generatedAt time.Time, isRetroactive bool, found bool) {
 	var numbersJSON, statsJSON string
 	err := conn.QueryRowContext(ctx,
-		`SELECT numbers, stats_json, based_on_drw_no, based_on_data_hash, generated_at FROM lotto_recommendation WHERE cycle_start_date = ? AND mode = ?`,
+		`SELECT numbers, stats_json, based_on_drw_no, based_on_data_hash, generated_at, is_retroactive FROM lotto_recommendation WHERE cycle_start_date = ? AND mode = ?`,
 		cycleStartDate, mode,
-	).Scan(&numbersJSON, &statsJSON, &basedOnDrwNo, &basedOnDataHash, &generatedAt)
+	).Scan(&numbersJSON, &statsJSON, &basedOnDrwNo, &basedOnDataHash, &generatedAt, &isRetroactive)
 	if err != nil {
-		return nil, 0, "", time.Time{}, false
+		return nil, 0, "", time.Time{}, false, false
 	}
 
 	decoded, decodeErr := decodeRecommendationSet(numbersJSON, statsJSON)
 	if decodeErr != nil {
 		log.Printf("로또: 추천번호 캐시(cycle=%s, mode=%s) 디코딩 실패, 낡은 캐시로 취급해 재계산합니다: %v", cycleStartDate, mode, decodeErr)
-		return nil, basedOnDrwNo, basedOnDataHash, generatedAt, true
+		return nil, basedOnDrwNo, basedOnDataHash, generatedAt, isRetroactive, true
 	}
-	return &decoded, basedOnDrwNo, basedOnDataHash, generatedAt, true
+	return &decoded, basedOnDrwNo, basedOnDataHash, generatedAt, isRetroactive, true
 }
 
 // insertLottoRecommendationIfAbsent는 `INSERT OR IGNORE`를 사용한다
@@ -236,7 +242,7 @@ func getLottoRecommendation(ctx context.Context, conn *sql.DB, history []LottoDr
 	// "행은 있지만 디코딩에 실패한(예: 예전 형식) 낡은 캐시"를 뜻하며
 	// (lookupLottoRecommendation 문서 주석 참고), 이 경우도 데이터 해시
 	// 불일치와 똑같이 재계산 대상이다.
-	cached, basedOnDrwNo, basedOnDataHash, generatedAt, found := lookupLottoRecommendation(ctx, conn, cycleStart, mode)
+	cached, basedOnDrwNo, basedOnDataHash, generatedAt, _, found := lookupLottoRecommendation(ctx, conn, cycleStart, mode)
 	if found && cached != nil && basedOnDataHash == dataHash {
 		return toLottoRecommendation(cycleStart, mode, *cached, generatedAt)
 	}
@@ -263,7 +269,7 @@ func getLottoRecommendation(ctx context.Context, conn *sql.DB, history []LottoDr
 	// 우리의 write가 경쟁에서 이겼는지 여부와 무관하게 다시 읽는다. 그래야
 	// 경쟁에서 진 동시 요청도 자신이 로컬에서 우연히 뽑은 세트가 아니라
 	// 실제로 저장된 세트를 반환하게 된다.
-	if cachedSet, _, _, cachedGeneratedAt, found := lookupLottoRecommendation(ctx, conn, cycleStart, mode); found && cachedSet != nil {
+	if cachedSet, _, _, cachedGeneratedAt, _, found := lookupLottoRecommendation(ctx, conn, cycleStart, mode); found && cachedSet != nil {
 		return toLottoRecommendation(cycleStart, mode, *cachedSet, cachedGeneratedAt)
 	}
 

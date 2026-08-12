@@ -460,6 +460,15 @@ func checkForNewLottoRound(ctx context.Context, conn *sql.DB) {
 	lottoCollectionState.lastCollectedAt = time.Now()
 	lottoCollectionState.mu.Unlock()
 	log.Printf("로또: %d회차 저장 완료", nextDrwNo)
+
+	// 새 회차가 저장됐으니, 이 회차가 "실제 결과"로 확정하는 직전 주기의
+	// trend/regression/uniform 3개 모드 추천을 확보하고 일치 결과를
+	// 계산한다 — insertCtx는 이미 취소된 짧은 컨텍스트라 재사용하지 않고
+	// 새 컨텍스트를 쓴다(lottoInsertTimeout 문서 주석과 같은 이유:
+	// 저장/후속 계산을 STOP 요청 등으로 인한 상위 ctx 취소와 분리해둔다).
+	matchCtx, matchCancel := context.WithTimeout(context.Background(), lottoInsertTimeout)
+	defer matchCancel()
+	processRetroactivePreviousCycleRecommendations(matchCtx, conn, nextDrwNo, data.DrwNoDate)
 }
 
 // insertLottoDraw는 자동 점검 전용 저장 경로다. drwNoDate를 time.Parse로
@@ -490,10 +499,31 @@ func insertLottoDraw(ctx context.Context, conn *sql.DB, d *dhlotteryResponse) er
 	return err
 }
 
+// queryLottoHistory는 항상 DB에 저장된 현재 최신 회차부터 거슬러 올라간
+// 최근 `limit`개를 반환한다 — queryLottoHistoryAsOf(limit, 0)의 얇은
+// 래퍼일 뿐이다.
 func queryLottoHistory(ctx context.Context, conn *sql.DB, limit int) ([]LottoDraw, error) {
-	rows, err := conn.QueryContext(ctx, `
-		SELECT drw_no, drw_date, num1, num2, num3, num4, num5, num6, bonus_no
-		FROM lotto_draws ORDER BY drw_no DESC LIMIT ?`, limit)
+	return queryLottoHistoryAsOf(ctx, conn, limit, 0)
+}
+
+// queryLottoHistoryAsOf는 queryLottoHistory와 같지만 maxDrwNo가 0보다 크면
+// drw_no <= maxDrwNo인 회차만 대상으로 한다 — "지난주 추천 결과" 사후
+// 계산(lotto_recommendation_history.go)이 "그 시점에 실제로 존재했던
+// 데이터만"으로 과거 추천을 재현하는 데 필요하다. 예를 들어 방금 저장된
+// N회차에 대한 지난 사이클의 추천을 사후 계산하려면, N회차 자체는 그
+// 사이클 동안 아직 발표되지 않았던 미래 정보이므로 maxDrwNo=N-1로
+// 걸러야 한다.
+func queryLottoHistoryAsOf(ctx context.Context, conn *sql.DB, limit, maxDrwNo int) ([]LottoDraw, error) {
+	query := `SELECT drw_no, drw_date, num1, num2, num3, num4, num5, num6, bonus_no FROM lotto_draws`
+	args := []any{}
+	if maxDrwNo > 0 {
+		query += ` WHERE drw_no <= ?`
+		args = append(args, maxDrwNo)
+	}
+	query += ` ORDER BY drw_no DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := conn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -517,22 +547,51 @@ func queryLottoHistory(ctx context.Context, conn *sql.DB, limit int) ([]LottoDra
 	return result, rows.Err()
 }
 
-// queryFrequency는 최근 `window`개 회차의 num1..num6 중 1~45 각 번호가 몇 번
-// 나왔는지 센다. WITH(CTE) + UNION ALL + GROUP BY를 써서 카운팅 자체를 Go가
-// 아니라 DB가 하도록 한다 — 이 문법은 표준 SQL이라 SQLite/libSQL에서도 MySQL과
-// 완전히 동일하게 동작한다. 한 번도 나오지 않은 번호도 count 0으로 맵에 그대로
-// 남겨서, 프론트엔드가 45개 슬롯을 전부 그릴 수 있게 한다.
+// queryLottoDrawNumbers는 특정 회차의 본번호 6개(보너스 제외)를 오름차순이
+// 아닌 추첨 순서 그대로 반환한다 — "지난주 추천 결과"가 실제 당첨번호와
+// 대조할 때 쓴다.
+func queryLottoDrawNumbers(ctx context.Context, conn *sql.DB, drwNo int) ([]int, error) {
+	var n1, n2, n3, n4, n5, n6 int
+	err := conn.QueryRowContext(ctx,
+		`SELECT num1, num2, num3, num4, num5, num6 FROM lotto_draws WHERE drw_no = ?`, drwNo,
+	).Scan(&n1, &n2, &n3, &n4, &n5, &n6)
+	if err != nil {
+		return nil, err
+	}
+	return []int{n1, n2, n3, n4, n5, n6}, nil
+}
+
+// queryFrequency는 항상 DB에 저장된 현재 최신 회차부터 거슬러 올라간 최근
+// `window`개 회차 기준으로 집계한다 — queryFrequencyAsOf(window, 0)의 얇은
+// 래퍼일 뿐이다.
 func queryFrequency(ctx context.Context, conn *sql.DB, window int) (map[int]int, error) {
+	return queryFrequencyAsOf(ctx, conn, window, 0)
+}
+
+// queryFrequencyAsOf는 queryFrequency와 같지만 maxDrwNo가 0보다 크면
+// drw_no <= maxDrwNo인 회차만 집계 대상으로 한다 — queryLottoHistoryAsOf와
+// 같은 이유(지난주 추천 결과 사후 계산)로 필요하다. WITH(CTE) + UNION ALL +
+// GROUP BY를 써서 카운팅 자체를 Go가 아니라 DB가 하도록 한다 — 이 문법은
+// 표준 SQL이라 SQLite/libSQL에서도 MySQL과 완전히 동일하게 동작한다. 한
+// 번도 나오지 않은 번호도 count 0으로 맵에 그대로 남겨서, 프론트엔드가
+// 45개 슬롯을 전부 그릴 수 있게 한다.
+func queryFrequencyAsOf(ctx context.Context, conn *sql.DB, window, maxDrwNo int) (map[int]int, error) {
 	freq := make(map[int]int, 45)
 	for n := 1; n <= 45; n++ {
 		freq[n] = 0
 	}
 
-	rows, err := conn.QueryContext(ctx, `
-		WITH recent AS (
-			SELECT num1, num2, num3, num4, num5, num6
-			FROM lotto_draws ORDER BY drw_no DESC LIMIT ?
-		),
+	recentQuery := `SELECT num1, num2, num3, num4, num5, num6 FROM lotto_draws`
+	args := []any{}
+	if maxDrwNo > 0 {
+		recentQuery += ` WHERE drw_no <= ?`
+		args = append(args, maxDrwNo)
+	}
+	recentQuery += ` ORDER BY drw_no DESC LIMIT ?`
+	args = append(args, window)
+
+	query := fmt.Sprintf(`
+		WITH recent AS (%s),
 		nums AS (
 			SELECT num1 AS num FROM recent
 			UNION ALL SELECT num2 FROM recent
@@ -541,7 +600,9 @@ func queryFrequency(ctx context.Context, conn *sql.DB, window int) (map[int]int,
 			UNION ALL SELECT num5 FROM recent
 			UNION ALL SELECT num6 FROM recent
 		)
-		SELECT num, COUNT(*) FROM nums GROUP BY num`, window)
+		SELECT num, COUNT(*) FROM nums GROUP BY num`, recentQuery)
+
+	rows, err := conn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
