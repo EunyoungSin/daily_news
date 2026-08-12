@@ -246,23 +246,50 @@ type groqChatResponse struct {
 // again in"과 "please try again in"이 혼재해 관측된다.
 var groqRetryAfterPattern = regexp.MustCompile(`(?i)try again in ([0-9]+(?:\.[0-9]+)?)s`)
 
-// maxGroqRateLimitRetryWait는 rate-limit 재시도를 위해 기다려줄 수 있는
-// 최대 시간이다. Groq 에러 메시지가 안내한 대기 시간이 이보다 길면
-// (초과 폭이 커서 실제로 몇 분을 기다려야 하는 경우) 재시도 없이 바로
-// 실패를 반환해 상위 호출부가 stale_fallback으로 넘어가게 한다 —
-// 사용자를 무리하게 오래 기다리게 하지 않기 위해서다. 짧은 초과 폭
-// (1~수 초)만 이 재시도로 복구를 시도한다.
-const maxGroqRateLimitRetryWait = 10 * time.Second
+// maxGroqRateLimitRetryWait는 rate-limit 재시도 한 번을 위해 기다려줄 수
+// 있는 최대 시간이다. Groq 에러 메시지가 안내한 대기 시간이 이보다 길면
+// (초과 폭이 커서 실제로 몇 분을 기다려야 하는 경우) 그 시점에서 더 이상
+// 재시도하지 않고 바로 실패를 반환해 상위 호출부가 stale_fallback으로
+// 넘어가게 한다 — 사용자를 무리하게 오래 기다리게 하지 않기 위해서다.
+// 짧은 초과 폭(1~수 초)만 이 재시도로 복구를 시도한다. var로 선언한
+// 이유는 groqCallGate의 같은 이유(테스트가 값을 줄여 빠르고 결정론적으로
+// 검증할 수 있게 하기 위함)와 동일하다.
+var maxGroqRateLimitRetryWait = 10 * time.Second
+
+// maxGroqRateLimitRetries는 rate-limit 재시도의 최대 횟수(최초 시도는
+// 포함하지 않음 — 총 시도 횟수는 이 값 + 1)다. 브리핑 3섹션(weather/
+// exchange/news)과 뉴스 번역이 거의 동시에 Groq를 호출해 TPM 예산을 두고
+// 경쟁하는 상황에서는, 재시도 시점에도 다른 호출들이 여전히 같은
+// 분(minute) 버킷의 토큰을 소비하고 있어 1회 재시도만으로는 재시도마저
+// 다시 rate limit에 걸릴 수 있다고 보고되었다. 재시도 횟수를 늘리되,
+// 아래 maxGroqRateLimitTotalWait로 전체 대기 시간에 상한을 둬서 사용자가
+// 무한정 기다리는 일은 없게 한다.
+var maxGroqRateLimitRetries = 3
+
+// maxGroqRateLimitTotalWait는 한 번의 callGroqChat 호출 안에서 모든
+// rate-limit 재시도에 걸쳐 누적으로 기다려줄 수 있는 최대 시간이다. 매
+// 재시도마다 maxGroqRateLimitRetryWait(10초) 이하인 대기라도, 여러 번
+// 이어지면 총합이 사용자 체감상 너무 길어질 수 있어 별도로 전체 예산을
+// 둔다. 다음 재시도의 대기 시간을 더하면 이 상한을 넘을 것으로 예상되면,
+// 그 대기를 기다리지 않고 즉시 실패를 반환해 stale_fallback으로 넘어가게
+// 한다.
+var maxGroqRateLimitTotalWait = 20 * time.Second
 
 // groqRateLimitRetryBuffer는 파싱한 대기 시간에 더하는 여유분이다 — Groq가
 // 안내한 시점에 정확히 맞춰 재요청하면 타이밍 오차로 다시 거부될 수 있어
 // 약간 더 기다린다.
-const groqRateLimitRetryBuffer = 500 * time.Millisecond
+var groqRateLimitRetryBuffer = 500 * time.Millisecond
 
 // parseGroqRetryAfterSeconds는 Groq rate-limit 에러 메시지(예: "Rate limit
 // reached for model ... Please try again in 1.2s.")에서 대기 시간을
 // time.Duration으로 추출한다. 메시지 형식이 다르거나(다른 종류의 에러) 숫자를
-// 파싱할 수 없으면 ok=false를 반환한다.
+// 파싱할 수 없으면 ok=false를 반환한다. 재시도 때마다 그 시점의 최신 에러
+// 메시지로 이 함수를 다시 호출해야 한다 — 여러 Groq 호출이 TPM 예산을
+// 두고 경쟁하는 상황에서는 재시도할 때마다 Groq가 안내하는 대기 시간
+// 자체가 매번 달라지므로(예: 1차 실패 때는 1.2초였다가, 다른 호출이 그
+// 사이 더 많은 토큰을 소비해 2차 실패 때는 4.5초로 늘어나는 식), 최초
+// 대기 시간을 재사용하면 실제로는 아직 부족한 시간만큼만 기다리고 다시
+// 시도하게 되어 재시도가 헛수고가 되기 쉽다.
 func parseGroqRetryAfterSeconds(errMsg string) (wait time.Duration, ok bool) {
 	match := groqRetryAfterPattern.FindStringSubmatch(errMsg)
 	if match == nil {
@@ -273,6 +300,81 @@ func parseGroqRetryAfterSeconds(errMsg string) (wait time.Duration, ok bool) {
 		return 0, false
 	}
 	return time.Duration(seconds * float64(time.Second)), true
+}
+
+// maxConcurrentGroqCalls는 동시에 실제 HTTP로 전송될 수 있는 Groq 호출의
+// 최대 개수다. 날씨/환율/뉴스 브리핑 3섹션(getBriefing이 goroutine으로
+// 병렬 실행)과 뉴스 헤드라인 번역이, 도시+통화+뉴스 카테고리를 한꺼번에
+// 바꾸는 등의 상황에서 거의 동시에 Groq를 호출할 수 있는데(최악의 경우
+// 최대 4개), 이 호출들이 전부 같은 순간에 나가면 서로 TPM(분당 토큰)
+// 예산을 두고 경쟁해 하나가 rate limit에 걸리면 나머지도 함께 걸리기
+// 쉬워진다. 2로 제한한 이유는 완전히 순차(1개씩)로 만들면 브리핑 3섹션의
+// 체감 응답 시간이 3배로 늘어나지만, 2개씩만 허용해도 "4개가 한 순간에
+// 몰리는" 최악의 경우를 피하기에는 충분하기 때문이다. var로 선언한 이유는
+// 테스트가 이 값을 낮춰(예: 1) 순서를 결정론적으로 검증할 수 있게
+// 하기 위해서다 — resetGroqCallGateForTest 참고.
+var maxConcurrentGroqCalls = 2
+
+// groqCallStagger는 Groq 호출들이 세마포어 슬롯을 얻더라도 시작 시각
+// 자체는 최소 이만큼 벌리기 위한 간격이다. 세마포어만으로는 슬롯이
+// 비어있는 순간 두 호출이 동시에 시작되는 것을 막지 못하는데, 사용자가
+// 체감하기 어려운 수준(200~300ms)으로 시작 시각을 벌리기만 해도 같은
+// 분(minute) 버킷 안에서 순간적으로 몰리는 토큰 소비량의 피크를 낮출 수
+// 있다. var로 선언한 이유는 groqCallStagger와 동일하다.
+var groqCallStagger = 250 * time.Millisecond
+
+// groqCallGate는 maxConcurrentGroqCalls/groqCallStagger를 실제로 강제하는
+// 세마포어(+시작 시각 기록)다. acquireGroqCallSlot을 통해서만 접근한다.
+type groqCallGateState struct {
+	sem       chan struct{}
+	mu        sync.Mutex
+	lastStart time.Time
+}
+
+func newGroqCallGate(maxConcurrent int) *groqCallGateState {
+	return &groqCallGateState{sem: make(chan struct{}, maxConcurrent)}
+}
+
+var groqCallGate = newGroqCallGate(maxConcurrentGroqCalls)
+
+// acquireGroqCallSlot은 동시 실행 중인 Groq 호출이 maxConcurrentGroqCalls를
+// 넘지 않도록 세마포어 슬롯을 확보하고, 슬롯을 얻은 뒤에도 직전 호출
+// 시작 이후 groqCallStagger가 지나지 않았으면 그만큼 추가로 대기한다.
+// ctx가 먼저 취소되면 대기를 포기하고 즉시 에러를 반환한다(세마포어
+// 슬롯을 확보한 뒤 취소된 경우 슬롯도 반납한다). 반환된 release 함수는
+// 성공 시 반드시 defer로 호출해야 한다.
+func acquireGroqCallSlot(ctx context.Context) (release func(), err error) {
+	select {
+	case groqCallGate.sem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	// 대기할 "내 순번" 시각을 락 안에서 원자적으로 예약한다 — 락 밖에서
+	// "직전 시작 시각과의 간격을 확인한 뒤 따로 sleep하고 그 다음에
+	// lastStart를 갱신"하는 방식은, 두 goroutine이 lastStart를 갱신하기
+	// 전에 동시에 간격을 확인해버리면 결국 둘 다 거의 같은 시각에
+	// 시작해버려 스태거링이 무력화되는 경쟁 상태가 생긴다. 예약 시각을
+	// 먼저 확정하고 lastStart를 그 값으로 즉시 전진시켜 두면, 그 이후
+	// 도착하는 goroutine은 항상 이미 예약된 시각 다음 슬롯부터 배정받는다.
+	groqCallGate.mu.Lock()
+	reserved := groqCallGate.lastStart.Add(groqCallStagger)
+	if now := time.Now(); reserved.Before(now) {
+		reserved = now
+	}
+	groqCallGate.lastStart = reserved
+	groqCallGate.mu.Unlock()
+
+	if wait := time.Until(reserved); wait > 0 {
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			<-groqCallGate.sem
+			return nil, ctx.Err()
+		}
+	}
+
+	return func() { <-groqCallGate.sem }, nil
 }
 
 // callGroqChat은 Groq에 chat-completion 요청을 보내고 첫 번째 choice의
@@ -312,40 +414,68 @@ func callGroqChat(ctx context.Context, apiKey, model string, messages []groqChat
 		return "", err
 	}
 
-	content, err := doGroqChatRequest(ctx, apiKey, model, bodyBytes, temperature, maxTokens)
-	if err == nil {
-		return content, nil
+	// 여러 Groq 호출(브리핑 3섹션 + 뉴스 번역)이 거의 동시에 시작되면 서로
+	// TPM 예산을 두고 경쟁해 rate limit이 발생하기 쉬워진다.
+	// acquireGroqCallSlot이 동시 실행 개수를 제한하고 호출 시작 시각도
+	// 최소 간격만큼 벌려서, 애초에 짧은 시간에 몰리는 것 자체를 완화한다
+	// — groqCallGate 문서 주석 참고. 재시도까지 포함한 이 함수 전체
+	// 동안 슬롯을 쥐고 있는다: 대기 중인 다른 호출이 있다면, 지금 이미
+	// rate limit에 걸려 백오프 중인 이 호출이 슬롯을 놓아줄 때까지
+	// 기다리는 편이 함께 더 많은 호출을 새로 쏴서 상황을 악화시키는
+	// 것보다 낫다.
+	release, err := acquireGroqCallSlot(ctx)
+	if err != nil {
+		return "", err
 	}
+	defer release()
 
 	// rate_limit 대기 재시도: 이는 generateSectionText/fetchNewsTranslation의
 	// "검증 실패 시 모델 승격" 재시도와는 완전히 별개의 로직이다 — 여기서는
-	// 같은 모델로 같은 요청을 아주 짧게 기다렸다가 딱 한 번 다시 보낼
-	// 뿐이며, 모델을 바꾸지 않는다. Groq 에러 메시지에서 "Please try again
-	// in {N}s" 형태의 대기 시간을 파싱할 수 있고 그 값이 충분히 짧을
-	// 때만(초과 폭이 작아 재시도로 복구될 가능성이 높을 때만) 시도한다.
-	// 대기 시간을 알 수 없거나(에러 형식이 다름) 너무 길면(초과 폭이 커서
-	// 몇 분을 기다려야 함) 재시도 없이 바로 에러를 반환해 상위 호출부가
-	// stale_fallback으로 넘어가게 한다 — 사용자를 오래 기다리게 하지
-	// 않기 위해서다.
-	wait, parsed := parseGroqRetryAfterSeconds(err.Error())
-	if !parsed || wait > maxGroqRateLimitRetryWait {
-		return "", err
-	}
-	wait += groqRateLimitRetryBuffer
+	// 같은 모델로 같은 요청을 아주 짧게 기다렸다가 다시 보낼 뿐이며,
+	// 모델을 바꾸지 않는다. 매 시도가 실패할 때마다 그 시점의 최신 에러
+	// 메시지에서 "Please try again in {N}s" 형태의 대기 시간을 다시
+	// 파싱한다 — parseGroqRetryAfterSeconds 문서 주석 참고. 대기 시간을
+	// 알 수 없거나(에러 형식이 다름) 한 번의 대기가 너무 길거나
+	// (maxGroqRateLimitRetryWait 초과), 누적 대기가 전체 예산
+	// (maxGroqRateLimitTotalWait)을 넘을 것으로 예상되거나, 재시도
+	// 횟수(maxGroqRateLimitRetries)를 모두 소진하면 그 시점에서 바로
+	// 에러를 반환해 상위 호출부가 stale_fallback으로 넘어가게 한다 —
+	// 사용자를 오래 기다리게 하지 않기 위해서다.
+	var totalWait time.Duration
+	for attempt := 0; ; attempt++ {
+		content, callErr := doGroqChatRequest(ctx, apiKey, model, bodyBytes, temperature, maxTokens)
+		if callErr == nil {
+			return content, nil
+		}
 
-	log.Printf("[Groq 호출] rate limit 감지(model=%s), %.1fs 대기 후 동일 요청 1회 재시도: %v", model, wait.Seconds(), err)
-	select {
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case <-time.After(wait):
-	}
+		if attempt >= maxGroqRateLimitRetries {
+			if attempt > 0 {
+				log.Printf("[Groq 호출] rate limit 재시도 %d회 모두 소진(model=%s, 누적 대기 %.1fs): %v", attempt, model, totalWait.Seconds(), callErr)
+			}
+			return "", callErr
+		}
 
-	retryContent, retryErr := doGroqChatRequest(ctx, apiKey, model, bodyBytes, temperature, maxTokens)
-	if retryErr != nil {
-		log.Printf("[Groq 호출] rate limit 재시도 후에도 실패(model=%s): %v", model, retryErr)
-		return "", retryErr
+		wait, parsed := parseGroqRetryAfterSeconds(callErr.Error())
+		if !parsed || wait > maxGroqRateLimitRetryWait {
+			return "", callErr
+		}
+		wait += groqRateLimitRetryBuffer
+
+		if totalWait+wait > maxGroqRateLimitTotalWait {
+			log.Printf("[Groq 호출] rate limit 재시도 총 대기 예산(%s) 초과 예상(model=%s, 이미 %.1fs 대기 + 추가 %.1fs 필요) — 재시도 중단: %v",
+				maxGroqRateLimitTotalWait, model, totalWait.Seconds(), wait.Seconds(), callErr)
+			return "", callErr
+		}
+		totalWait += wait
+
+		log.Printf("[Groq 호출] rate limit 감지(model=%s, 시도 %d/%d), %.1fs 대기 후 재시도(누적 대기 %.1fs): %v",
+			model, attempt+1, maxGroqRateLimitRetries+1, wait.Seconds(), totalWait.Seconds(), callErr)
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(wait):
+		}
 	}
-	return retryContent, nil
 }
 
 // doGroqChatRequest는 이미 직렬화된 요청 바디로 Groq에 HTTP POST 요청 1회를

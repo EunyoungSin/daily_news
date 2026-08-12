@@ -251,13 +251,24 @@ func fetchNewsTranslation(ctx context.Context, items []NewsItem) ([]newsTranslat
 	model := frequentGroqModel()
 
 	for attempt := 1; attempt <= maxNewsTranslationRetries+1; attempt++ {
-		// maxTokens=700은 헤드라인 최대 5개를 배치 번역할 때의 JSON 배열
-		// 출력(각 항목의 번역된 제목 하나씩)에 넉넉한 여유이면서도, 모델이
-		// 반복 생성 루프에 빠졌을 때 무한정 토큰을 소비하지 않도록 막는다.
+		// maxTokens=500: estimateTokenCount(groq.go)로 다소 긴 편에 속하는
+		// 실제 뉴스 제목 스타일 번역문 5개(각 35~40자) + NewsData.io 스타일
+		// article_id(32자)로 구성한 배치 출력 JSON을 측정해보면 약 330
+		// 토큰이었다 — 원래 700은 이 실제 필요량 대비 여유가 지나치게
+		// 커서, TPM(분당 토큰) 예산을 두고 다른 Groq 호출들과 경쟁하는
+		// 상황에서 불필요하게 큰 몫을 예약해두는 셈이었다. 500은 이
+		// 측정값 대비 약 50% 여유를 남기면서도(제목이 더 길어지거나
+		// 토크나이저가 이 추정치보다 다소 비효율적이어도 흡수할 수 있는
+		// 수준), 700 대비 상한을 낮춰 모델이 혹시라도 반복 생성 루프에
+		// 빠졌을 때의 최악의 토큰 소비도 함께 줄인다. 다만 max_tokens는
+		// 상한일 뿐 실제 소비량이 아니므로 — 정상적으로 성공하는
+		// 번역이라면 애초에 700이든 500이든 실제 사용 토큰은 거의
+		// 동일하다 — 이 조정의 효과는 주로 그 반복 루프/이례적으로 긴
+		// 응답 같은 예외 상황의 상한을 낮추는 데 있다.
 		content, callErr := callGroqChat(ctx, apiKey, model, []groqChatMessage{
 			{Role: "system", Content: newsTranslationSystemPrompt},
 			{Role: "user", Content: userContent},
-		}, 0.2, 700, 0, true)
+		}, 0.2, 500, 0, true)
 		if callErr != nil {
 			return nil, callErr
 		}
