@@ -8,11 +8,15 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
+	"strconv"
 	"sync"
 	"time"
 )
 
-const groqEndpoint = "https://api.groq.com/openai/v1/chat/completions"
+// groqEndpoint는 var로 선언되어 있다 — 테스트가 실제 Groq API를 두드리지
+// 않고 httptest 서버로 가리킬 수 있게 하기 위해서다.
+var groqEndpoint = "https://api.groq.com/openai/v1/chat/completions"
 
 var errGroqKeyMissing = errors.New("GROQ_API_KEY not set")
 
@@ -236,6 +240,41 @@ type groqChatResponse struct {
 	} `json:"error"`
 }
 
+// groqRetryAfterPattern은 Groq의 TPM(분당 토큰) rate-limit 에러 메시지에
+// 실려 오는 "Please try again in 1.234s" 형태의 대기 시간 안내를 추출한다.
+// (?i)로 대소문자를 가리지 않는다 — Groq 문서/실사용 사례에 "Please try
+// again in"과 "please try again in"이 혼재해 관측된다.
+var groqRetryAfterPattern = regexp.MustCompile(`(?i)try again in ([0-9]+(?:\.[0-9]+)?)s`)
+
+// maxGroqRateLimitRetryWait는 rate-limit 재시도를 위해 기다려줄 수 있는
+// 최대 시간이다. Groq 에러 메시지가 안내한 대기 시간이 이보다 길면
+// (초과 폭이 커서 실제로 몇 분을 기다려야 하는 경우) 재시도 없이 바로
+// 실패를 반환해 상위 호출부가 stale_fallback으로 넘어가게 한다 —
+// 사용자를 무리하게 오래 기다리게 하지 않기 위해서다. 짧은 초과 폭
+// (1~수 초)만 이 재시도로 복구를 시도한다.
+const maxGroqRateLimitRetryWait = 10 * time.Second
+
+// groqRateLimitRetryBuffer는 파싱한 대기 시간에 더하는 여유분이다 — Groq가
+// 안내한 시점에 정확히 맞춰 재요청하면 타이밍 오차로 다시 거부될 수 있어
+// 약간 더 기다린다.
+const groqRateLimitRetryBuffer = 500 * time.Millisecond
+
+// parseGroqRetryAfterSeconds는 Groq rate-limit 에러 메시지(예: "Rate limit
+// reached for model ... Please try again in 1.2s.")에서 대기 시간을
+// time.Duration으로 추출한다. 메시지 형식이 다르거나(다른 종류의 에러) 숫자를
+// 파싱할 수 없으면 ok=false를 반환한다.
+func parseGroqRetryAfterSeconds(errMsg string) (wait time.Duration, ok bool) {
+	match := groqRetryAfterPattern.FindStringSubmatch(errMsg)
+	if match == nil {
+		return 0, false
+	}
+	seconds, err := strconv.ParseFloat(match[1], 64)
+	if err != nil {
+		return 0, false
+	}
+	return time.Duration(seconds * float64(time.Second)), true
+}
+
 // callGroqChat은 Groq에 chat-completion 요청을 보내고 첫 번째 choice의
 // 원본 메시지 내용을 반환한다. jsonMode를 켜면 모델이 순수 JSON 객체로만
 // 응답하도록 강제하는데(simple/detailed 필드가 필요한 대시보드 브리핑에서
@@ -273,6 +312,46 @@ func callGroqChat(ctx context.Context, apiKey, model string, messages []groqChat
 		return "", err
 	}
 
+	content, err := doGroqChatRequest(ctx, apiKey, model, bodyBytes, temperature, maxTokens)
+	if err == nil {
+		return content, nil
+	}
+
+	// rate_limit 대기 재시도: 이는 generateSectionText/fetchNewsTranslation의
+	// "검증 실패 시 모델 승격" 재시도와는 완전히 별개의 로직이다 — 여기서는
+	// 같은 모델로 같은 요청을 아주 짧게 기다렸다가 딱 한 번 다시 보낼
+	// 뿐이며, 모델을 바꾸지 않는다. Groq 에러 메시지에서 "Please try again
+	// in {N}s" 형태의 대기 시간을 파싱할 수 있고 그 값이 충분히 짧을
+	// 때만(초과 폭이 작아 재시도로 복구될 가능성이 높을 때만) 시도한다.
+	// 대기 시간을 알 수 없거나(에러 형식이 다름) 너무 길면(초과 폭이 커서
+	// 몇 분을 기다려야 함) 재시도 없이 바로 에러를 반환해 상위 호출부가
+	// stale_fallback으로 넘어가게 한다 — 사용자를 오래 기다리게 하지
+	// 않기 위해서다.
+	wait, parsed := parseGroqRetryAfterSeconds(err.Error())
+	if !parsed || wait > maxGroqRateLimitRetryWait {
+		return "", err
+	}
+	wait += groqRateLimitRetryBuffer
+
+	log.Printf("[Groq 호출] rate limit 감지(model=%s), %.1fs 대기 후 동일 요청 1회 재시도: %v", model, wait.Seconds(), err)
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-time.After(wait):
+	}
+
+	retryContent, retryErr := doGroqChatRequest(ctx, apiKey, model, bodyBytes, temperature, maxTokens)
+	if retryErr != nil {
+		log.Printf("[Groq 호출] rate limit 재시도 후에도 실패(model=%s): %v", model, retryErr)
+		return "", retryErr
+	}
+	return retryContent, nil
+}
+
+// doGroqChatRequest는 이미 직렬화된 요청 바디로 Groq에 HTTP POST 요청 1회를
+// 보내고 응답을 파싱한다 — callGroqChat이 최초 시도와 rate_limit 재시도
+// 양쪽에서 재사용하는 실제 전송 로직이다.
+func doGroqChatRequest(ctx context.Context, apiKey, model string, bodyBytes []byte, temperature float64, maxTokens int) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, groqEndpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return "", err

@@ -1018,6 +1018,16 @@
   border-color: var(--panel-border-strong);
 }
 
+.news__category-pill:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.news__category-pill:disabled:hover {
+  color: var(--text-faint);
+  border-color: var(--panel-border);
+}
+
 .news__category-pill--active {
   background: color-mix(in srgb, var(--accent-news) 22%, var(--panel-alt));
   border-color: color-mix(in srgb, var(--accent-news) 45%, transparent);
@@ -1217,6 +1227,15 @@
 
 .briefing__tab:hover {
   color: var(--text);
+}
+
+.briefing__tab:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.briefing__tab:disabled:hover {
+  color: var(--text-faint);
 }
 
 .briefing__tab--active {

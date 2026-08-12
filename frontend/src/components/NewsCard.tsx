@@ -75,6 +75,7 @@ export default function NewsCard({
                 aria-selected={category === opt.value}
                 className={category === opt.value ? 'news__category-pill news__category-pill--active' : 'news__category-pill'}
                 onClick={() => onCategoryChange(opt.value)}
+                disabled={loading}
               >
                 {opt.label}
               </button>
@@ -88,6 +89,7 @@ export default function NewsCard({
               aria-selected={region === 'domestic'}
               className={region === 'domestic' ? 'briefing__tab briefing__tab--active' : 'briefing__tab'}
               onClick={() => onRegionChange('domestic')}
+              disabled={loading}
             >
               🇰🇷 국내
             </button>
@@ -97,6 +99,7 @@ export default function NewsCard({
               aria-selected={region === 'international'}
               className={region === 'international' ? 'briefing__tab briefing__tab--active' : 'briefing__tab'}
               onClick={() => onRegionChange('international')}
+              disabled={loading}
             >
               🌐 해외
             </button>
