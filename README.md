@@ -177,6 +177,29 @@ Groq가 생성한 문장을 그대로 내보내지 않고, `validateSectionOutpu
 최종 실패 사유에는 항상 이전 시도의 낡은 사유만 남아 진짜 원인을 알 수 없었습니다. 이제 이번
 시도의 결과(`retryText`/`retryErr`)를 반환하고, 로그에 두 실패 사유를 함께 남깁니다.
 
+`useFallback`이 켜지는 검증(주제 불일치·조작된 퍼센트·근거 없는 고유명사)이 재시도 후에도
+실패하면 `generateSectionText`는 `hallucinationFallback`(`newsHallucinationFallback`, "가장
+인기 있는 뉴스: {원문 제목}" 형태)을 **`err == nil`로** 반환합니다 — LLM이 생성한 문장을 아예
+쓰지 않고 원문 제목 그대로를 쓰므로 hallucination 여지 자체가 없다는 의도였지만, 이 `err ==
+nil`이 `resolveBriefingSection`에는 "정상 생성 성공"으로 보여서 다른 진짜 성공 결과와 구분
+없이 그대로 `briefing_section_cache`에 캐싱되는 버그가 있었습니다. `stale_fallback`(생성이
+실패해 *이전* 캐시를 대체 값으로 재사용 — 캐시에 새로 쓰지 않음)과 이 hallucination fallback
+(이번 생성이 안전 문구로 대체됐지만 `err`가 없어 *새 캐시 행으로 그대로 저장*됨)은 서로 다른
+개념인데, 코드는 후자를 전자와 똑같이 취급하지 않고 오히려 캐시를 오염시켰던 셈입니다. 실제로
+`news:international:science` 캐시 행에 "가장 인기 있는 뉴스: A 3.6-ton mirror three inches
+thick sits on a Maui volcano..."라는 영어 원문이 그대로 고정되어, 같은 헤드라인 집합이
+남아있는 동안(뉴스 원본 캐시 TTL 30분) 정상 생성을 다시 시도할 기회조차 주어지지 않는 것을
+실제 캐시 데이터로 확인했습니다. `generateSectionText`/`generateNewsSectionText`가 `isFallback
+bool`을 추가로 반환하도록 고치고, `briefing_section_cache`에 `is_fallback` 컬럼을 추가해
+캐싱 시점에 이 값을 함께 저장합니다. `resolveBriefingSection`은 `data_hash`가 일치해도
+`is_fallback`이 true인 행은 "재사용 가능한 캐시"로 보지 않고 매번 재생성을 다시 시도합니다 —
+재생성이 다시 실패하면 기존 `stale_fallback` 경로가 그대로 이 캐시 행(과 그 안의 폴백
+텍스트)을 대체 값으로 서빙하므로, 별도의 TTL을 두지 않고도 사실상 매 요청이 복구 기회가
+됩니다. 이 컬럼이 없던 기존 배포에는 `ensureColumnExists`(`db.go`)가 `ALTER TABLE ADD
+COLUMN`으로 추가하며, 기존 행은 `DEFAULT 0`(정상 결과 취급)으로 채워지므로 이미 고정되어 있던
+행은 자동으로 풀리지 않습니다 — 실제로 `news:international:science` 행은 배포 후 수동으로
+`is_fallback = 1`을 백필해 다음 요청부터 재생성이 시도되도록 했습니다.
+
 CJK(한자·중국어·일본어) 금지 규칙은 domestic/international이 완전히 같은
 `newsSectionSystemPrompt`(따라서 같은 `briefingCommonRules`)를 공유하므로 애초에 두 경로 모두에
 적용되어 있지만, 재발 사례가 있어 규칙 목록 맨 앞(최우선)으로 옮기고 문구를 강화했습니다.
@@ -623,12 +646,15 @@ CREATE TABLE lotto_recommendation (
 );
 
 -- 날씨/환율/뉴스 AI 브리핑 문단 캐시. section 값은 "weather", "exchange",
--- "news:{region}:{category}" 형태다.
+-- "news:{region}:{category}" 형태다. is_fallback은 detailed_text가
+-- hallucinationFallback(제목 기반 안전 문구)이었는지를 기록한다 — 위 "AI
+-- 브리핑 콘텐츠 검증" 단락 참고.
 CREATE TABLE briefing_section_cache (
   section TEXT PRIMARY KEY,
   data_hash TEXT NOT NULL,
   detailed_text TEXT NOT NULL,
-  generated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  generated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  is_fallback INTEGER NOT NULL DEFAULT 0
 );
 ```
 

@@ -266,12 +266,20 @@ CREATE TABLE IF NOT EXISTS ai_insight_cache (
 // (widenBriefingSectionCacheColumn/makeSimpleTextNullable 참고), 이번
 // 마이그레이션은 완전히 새 데이터베이스에 처음부터 스키마를 만드는
 // 것이므로 더 이상 쓰이지 않는 컬럼을 굳이 다시 만들 이유가 없다.
+// is_fallback은 detailed_text가 hallucinationFallback(제목 기반 안전
+// 문구, briefing.go 참고)이었는지를 기록한다 — 실제 보고된 사례: 검증
+// 실패로 안전 문구("가장 인기 있는 뉴스: A 3.6-ton mirror...")가 반환돼도
+// 그 반환값 자체는 err == nil인 "성공"이라, 이 플래그가 없던 시절에는
+// 다른 정상 생성 결과와 구분 없이 data_hash 기준으로 영구 캐싱됐다.
+// resolveBriefingSection은 이 값이 true인 행을 data_hash가 일치해도
+// "재사용 가능한 캐시"로 보지 않고 매번 재생성을 다시 시도한다.
 const createBriefingSectionCacheTable = `
 CREATE TABLE IF NOT EXISTS briefing_section_cache (
 	section TEXT PRIMARY KEY,
 	data_hash TEXT NOT NULL,
 	detailed_text TEXT NOT NULL,
-	generated_at TEXT DEFAULT CURRENT_TIMESTAMP
+	generated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+	is_fallback INTEGER NOT NULL DEFAULT 0
 )`
 
 // (cycle_start_date, mode)가 복합 기본키다 — 사이클마다, 그리고 그
@@ -570,6 +578,9 @@ func migrate(conn *sql.DB) error {
 	}
 	if _, err := conn.Exec(createBriefingSectionCacheTable); err != nil {
 		return fmt.Errorf("create briefing_section_cache: %w", err)
+	}
+	if err := ensureColumnExists(conn, "briefing_section_cache", "is_fallback", "is_fallback INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("migrate briefing_section_cache: %w", err)
 	}
 	if _, err := conn.Exec(createLottoRecommendationTable); err != nil {
 		return fmt.Errorf("create lotto_recommendation: %w", err)

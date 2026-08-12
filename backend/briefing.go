@@ -1384,6 +1384,16 @@ func validateSectionOutput(combined string, allowedNumbers []float64, groundingT
 // generateNewsSectionText는 이 원문을 보고 어느 헤드라인이 문제였는지
 // 추정해 그 항목만 제외한 재시도를 한 번 더 시도한다.
 //
+// isFallback은 text가 hallucinationFallback(제목 기반 안전 문구)로
+// 대체된 경우에만 true를 반환합니다 — err는 nil이라 호출자
+// (resolveBriefingSection)는 이걸 "정상 생성 성공"으로 취급하지만, 실제
+// 내용은 LLM이 생성한 문장이 아니라 원문 제목 그대로입니다. 이 신호가
+// 없던 시절에는 resolveBriefingSection이 이 텍스트를 다른 정상 결과와
+// 똑같이 data_hash 기준으로 영구 캐싱해서, 실제 보고된 사례처럼("가장
+// 인기 있는 뉴스: A 3.6-ton mirror..." 원문이 그대로 캐시에 고정된 채
+// 계속 재사용됨) 같은 뉴스 데이터가 남아있는 한(뉴스 원본 캐시 TTL
+// 30분) 정상 생성을 다시 시도할 기회조차 주어지지 않았습니다.
+//
 // groundingText/hallucinationFallback은 뉴스 섹션에서만 의미가
 // 있습니다 — groundingText가 비어 있으면 고유명사 검사 자체를 건너뜁니다
 // (날씨/환율은 빈 문자열 ""을 넘깁니다).
@@ -1419,10 +1429,10 @@ const briefingSectionFrequencyPenalty = 0.4
 // 구조 자체를 없앴습니다). 모델이 지침을 어기고 따옴표나 코드블록으로
 // 감싸서 응답하는 경우에 대비해 trimSurroundingQuotes로 방어적으로
 // 벗겨냅니다.
-func generateSectionText(ctx context.Context, name, model, systemPrompt, userContent string, allowedNumbers []float64, groundingText, hallucinationFallback string) (text string, err error) {
+func generateSectionText(ctx context.Context, name, model, systemPrompt, userContent string, allowedNumbers []float64, groundingText, hallucinationFallback string) (text string, isFallback bool, err error) {
 	apiKey := os.Getenv("GROQ_API_KEY")
 	if apiKey == "" {
-		return "", errGroqKeyMissing
+		return "", false, errGroqKeyMissing
 	}
 
 	currentModel := model
@@ -1433,17 +1443,17 @@ func generateSectionText(ctx context.Context, name, model, systemPrompt, userCon
 			{Role: "user", Content: userContent},
 		}, briefingSectionTemperature, briefingSectionMaxTokens, briefingSectionFrequencyPenalty, false)
 		if callErr != nil {
-			return "", callErr
+			return "", false, callErr
 		}
 
 		text = trimSurroundingQuotes(strings.TrimSpace(content))
 		if text == "" {
-			return "", fmt.Errorf("%s briefing response was empty", name)
+			return "", false, fmt.Errorf("%s briefing response was empty", name)
 		}
 
 		reason, hardFailure, useFallback, lenientIfCoreNounSurvives := validateSectionOutput(text, allowedNumbers, groundingText)
 		if reason == "" {
-			return text, nil
+			return text, false, nil
 		}
 
 		// 검증 실패의 입력과 원문 전체를 로그로 남깁니다 — reason에는 매칭된
@@ -1462,21 +1472,21 @@ func generateSectionText(ctx context.Context, name, model, systemPrompt, userCon
 					// 지어냈을 가능성보다 높다고 보고, 재시도 후 마지막
 					// 결과를 안전 문구로 대체하는 대신 그대로 사용한다.
 					log.Printf("브리핑(%s): 재시도 후에도 %s이지만, 원문 핵심 개체가 응답에 남아있어 부분적으로 신뢰 가능하다고 보고 그대로 사용합니다", name, reason)
-					return text, nil
+					return text, false, nil
 				}
 				if useFallback && hallucinationFallback != "" {
 					log.Printf("브리핑(%s): 재시도 후에도 %s, 제목 기반 안전 문구로 대체", name, reason)
-					return hallucinationFallback, nil
+					return hallucinationFallback, true, nil
 				}
 				// text에는 검증에 실패한 마지막 응답을 그대로 담아 반환한다 —
 				// generateNewsSectionText가 이 실패 원문을 보고 어느 헤드라인이
 				// 문제였는지 추정해 그 항목만 제외한 재시도를 시도할 수 있게
 				// 하기 위해서다. 다른 호출자들은 err != nil이면 text를 쓰지
 				// 않으므로 기존 동작에는 영향이 없다.
-				return text, fmt.Errorf("%s: %w (%s 반복 감지)", name, errBriefingValidationFailed, reason)
+				return text, false, fmt.Errorf("%s: %w (%s 반복 감지)", name, errBriefingValidationFailed, reason)
 			}
 			log.Printf("브리핑(%s): 재시도 후에도 %s — 마지막 결과를 그대로 사용합니다", name, reason)
-			return text, nil
+			return text, false, nil
 		}
 
 		if groqEscalationCountToday() >= maxDailyGroqEscalations {
@@ -1484,14 +1494,14 @@ func generateSectionText(ctx context.Context, name, model, systemPrompt, userCon
 			if hardFailure {
 				if lenientIfCoreNounSurvives && hasGroundedCoreProperNoun(text, groundingText) {
 					log.Printf("브리핑(%s): 승격 한도 도달 상태에서도 원문 핵심 개체가 응답에 남아있어 그대로 사용합니다", name)
-					return text, nil
+					return text, false, nil
 				}
 				if useFallback && hallucinationFallback != "" {
-					return hallucinationFallback, nil
+					return hallucinationFallback, true, nil
 				}
-				return text, fmt.Errorf("%s: %w (%s, 승격 한도 도달)", name, errBriefingValidationFailed, reason)
+				return text, false, fmt.Errorf("%s: %w (%s, 승격 한도 도달)", name, errBriefingValidationFailed, reason)
 			}
-			return text, nil
+			return text, false, nil
 		}
 
 		escalated := escalationGroqModel()
@@ -1502,7 +1512,7 @@ func generateSectionText(ctx context.Context, name, model, systemPrompt, userCon
 
 	// 도달 불가능한 코드: 위의 attempt == maxSectionRegenerations 분기
 	// 안에서 루프가 항상 return하므로 여기까지 오지 않습니다.
-	return text, nil
+	return text, false, nil
 }
 
 // pickNewsItemToExclude는 8B와 70B 모두에서 강한 검증 실패로 끝난 뉴스
@@ -1557,13 +1567,13 @@ func pickNewsItemToExclude(failedText string, items []briefingNewsItem) int {
 // stale_fallback으로 넘어간다. 이 재시도마저 실패해도 마찬가지로 원래
 // 오류를 돌려준다 — 여기서 더 시도하면 사용자가 겪는 지연과 Groq 쿼터
 // 소모만 늘어날 뿐이다.
-func generateNewsSectionText(ctx context.Context, name, model, systemPrompt, userContent string, allowedNumbers []float64, groundingText, hallucinationFallback string, newsInput *briefingNewsInput) (string, error) {
-	text, err := generateSectionText(ctx, name, model, systemPrompt, userContent, allowedNumbers, groundingText, hallucinationFallback)
+func generateNewsSectionText(ctx context.Context, name, model, systemPrompt, userContent string, allowedNumbers []float64, groundingText, hallucinationFallback string, newsInput *briefingNewsInput) (string, bool, error) {
+	text, isFallback, err := generateSectionText(ctx, name, model, systemPrompt, userContent, allowedNumbers, groundingText, hallucinationFallback)
 	if err == nil || !errors.Is(err, errBriefingValidationFailed) {
-		return text, err
+		return text, isFallback, err
 	}
 	if newsInput == nil || len(newsInput.Items) < 2 {
-		return text, err
+		return text, isFallback, err
 	}
 
 	excludeIdx := pickNewsItemToExclude(text, newsInput.Items)
@@ -1575,7 +1585,7 @@ func generateNewsSectionText(ctx context.Context, name, model, systemPrompt, use
 	log.Printf("브리핑(%s): 승격 재시도 후에도 검증 실패(%v) — 문제로 의심되는 항목(id=%q) 제외하고 나머지 %d개 헤드라인으로 재생성 시도",
 		name, err, newsInput.Items[excludeIdx].ID, len(reduced.Items))
 
-	retryText, retryErr := generateSectionText(ctx, name, frequentGroqModel(), systemPrompt, reducedUserContent, allowedNewsNumbers(reduced), newsGroundingText(reduced), hallucinationFallback)
+	retryText, retryIsFallback, retryErr := generateSectionText(ctx, name, frequentGroqModel(), systemPrompt, reducedUserContent, allowedNewsNumbers(reduced), newsGroundingText(reduced), hallucinationFallback)
 	if retryErr != nil {
 		// retryErr(이번 시도의 실제 실패 사유)을 반환해야 한다 — 예전에는
 		// 여기서 최초 실패(err, 예: "한자/CJK 문자 감지")를 그대로
@@ -1584,10 +1594,10 @@ func generateNewsSectionText(ctx context.Context, name, model, systemPrompt, use
 		// classifyBriefingFailureReason 분류)에는 항상 두 번째 시도의
 		// 낡은 사유만 남아 실제 원인을 알 수 없었다.
 		log.Printf("브리핑(%s): 문제 항목 제외 후에도 생성 실패(%v) — stale_fallback으로 넘어갑니다 (최초 실패 사유는 참고용: %v)", name, retryErr, err)
-		return retryText, retryErr
+		return retryText, retryIsFallback, retryErr
 	}
 	log.Printf("브리핑(%s): 문제 항목 제외 후 재생성 성공", name)
-	return retryText, nil
+	return retryText, retryIsFallback, nil
 }
 
 // trimSurroundingQuotes는 모델이 "응답은 문장 텍스트만 그대로 출력하라"는
@@ -1604,10 +1614,15 @@ func trimSurroundingQuotes(s string) string {
 	return s
 }
 
+// isFallback은 이 캐시 행의 텍스트가 hallucinationFallback(제목 기반
+// 안전 문구)이었는지를 나타낸다 — resolveBriefingSection이 data_hash가
+// 일치해도 이 값이 true면 캐시를 그대로 재사용하지 않고 재생성을
+// 시도하는 데 쓰인다(resolveBriefingSection 문서 주석 참고).
 type briefingSectionCacheRow struct {
 	dataHash    string
 	text        string
 	generatedAt time.Time
+	isFallback  bool
 }
 
 func lookupBriefingSectionCache(ctx context.Context, conn *sql.DB, section string) (briefingSectionCacheRow, bool) {
@@ -1617,23 +1632,23 @@ func lookupBriefingSectionCache(ctx context.Context, conn *sql.DB, section strin
 
 	var row briefingSectionCacheRow
 	err := conn.QueryRowContext(ctx,
-		`SELECT data_hash, detailed_text, generated_at FROM briefing_section_cache WHERE section = ?`, section,
-	).Scan(&row.dataHash, &row.text, &row.generatedAt)
+		`SELECT data_hash, detailed_text, generated_at, is_fallback FROM briefing_section_cache WHERE section = ?`, section,
+	).Scan(&row.dataHash, &row.text, &row.generatedAt, &row.isFallback)
 	if err != nil {
 		return briefingSectionCacheRow{}, false
 	}
 	return row, true
 }
 
-func upsertBriefingSectionCache(ctx context.Context, conn *sql.DB, section, dataHash, text string, generatedAt time.Time) error {
+func upsertBriefingSectionCache(ctx context.Context, conn *sql.DB, section, dataHash, text string, generatedAt time.Time, isFallback bool) error {
 	if conn == nil {
 		return nil
 	}
 	_, err := conn.ExecContext(ctx, `
-		INSERT INTO briefing_section_cache (section, data_hash, detailed_text, generated_at)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(section) DO UPDATE SET data_hash = excluded.data_hash, detailed_text = excluded.detailed_text, generated_at = excluded.generated_at`,
-		section, dataHash, text, generatedAt,
+		INSERT INTO briefing_section_cache (section, data_hash, detailed_text, generated_at, is_fallback)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(section) DO UPDATE SET data_hash = excluded.data_hash, detailed_text = excluded.detailed_text, generated_at = excluded.generated_at, is_fallback = excluded.is_fallback`,
+		section, dataHash, text, generatedAt, isFallback,
 	)
 	return err
 }
@@ -1690,6 +1705,19 @@ type briefingSectionOutput struct {
 // "실패해서 어쩔 수 없이 대체된 것"을 구분해 사용자에게 알릴 수 있게
 // 합니다.
 //
+// data_hash가 일치해도 cached.isFallback이 true면(직전 생성이
+// hallucinationFallback으로 대체된 결과였다면) 캐시를 그대로 재사용하지
+// 않고 다시 생성을 시도합니다 — 실제 보고된 사례: "가장 인기 있는
+// 뉴스: A 3.6-ton mirror..." 같은 원문 그대로의 안전 문구가 뉴스 데이터가
+// 안 바뀌는 동안(원본 뉴스 캐시 TTL 30분) 영구히 재사용되고 있었습니다.
+// hallucinationFallback도 err == nil로 반환되는 "성공"이라 이전에는 다른
+// 정상 결과와 구분 없이 그대로 캐싱됐기 때문입니다. 이 재시도가 다시
+// 실패하면(err != nil) 아래의 기존 stale_fallback 처리 경로가 그대로
+// 이 캐시 행(과 그 안의 폴백 텍스트)을 대체 값으로 서빙합니다 — 즉
+// 폴백은 "매 요청마다 새로 생성을 시도하되, 실패하면 이전 폴백을 잠깐
+// 더 보여준다"는 동작이 되어, 짧은 TTL을 따로 두지 않고도 사실상 매
+// 요청이 복구 기회가 됩니다.
+//
 // newsInput은 뉴스 작업에서만 nil이 아니며, 그 경우 generateSectionText
 // 대신 generateNewsSectionText를 사용해 "8B/70B 모두 실패하면 문제로
 // 의심되는 헤드라인 하나만 제외하고 재시도"하는 뉴스 전용 폴백을 태웁니다
@@ -1707,13 +1735,17 @@ type briefingSectionOutput struct {
 // 쓸 수 있도록 호출자가 정합니다.
 func resolveBriefingSection(ctx context.Context, section, model, hash, systemPrompt, userContent string, allowedNumbers []float64, groundingText, hallucinationFallback string, newsInput *briefingNewsInput, hasData bool, dataMissingMessage string) briefingSectionOutput {
 	cached, found := lookupBriefingSectionCache(ctx, db, section)
-	if found && cached.dataHash == hash {
+	if found && cached.dataHash == hash && !cached.isFallback {
 		recordGroqCacheHit()
 		log.Printf("[캐시 재사용] 브리핑(%s): 입력 데이터 변경 없음 (Groq 미호출)", section)
 		return briefingSectionOutput{Text: cached.text, Cached: true, GeneratedAt: cached.generatedAt, Status: briefingStatusCached}
 	}
+	if found && cached.dataHash == hash && cached.isFallback {
+		log.Printf("브리핑(%s): 캐시가 안전 폴백 결과라 데이터 변경 없이도 재생성을 시도합니다", section)
+	}
 
 	var text string
+	var isFallback bool
 	var err error
 	if !hasData {
 		err = errBriefingDataMissing
@@ -1725,9 +1757,9 @@ func resolveBriefingSection(ctx context.Context, section, model, hash, systemPro
 			log.Printf("브리핑(%s): 캐시 없음, Groq 최초 호출 (모델: %s)", section, model)
 		}
 		if newsInput != nil {
-			text, err = generateNewsSectionText(ctx, section, model, systemPrompt, userContent, allowedNumbers, groundingText, hallucinationFallback, newsInput)
+			text, isFallback, err = generateNewsSectionText(ctx, section, model, systemPrompt, userContent, allowedNumbers, groundingText, hallucinationFallback, newsInput)
 		} else {
-			text, err = generateSectionText(ctx, section, model, systemPrompt, userContent, allowedNumbers, groundingText, hallucinationFallback)
+			text, isFallback, err = generateSectionText(ctx, section, model, systemPrompt, userContent, allowedNumbers, groundingText, hallucinationFallback)
 		}
 	}
 	if err != nil {
@@ -1753,7 +1785,10 @@ func resolveBriefingSection(ctx context.Context, section, model, hash, systemPro
 	}
 
 	generatedAt := time.Now()
-	if upsertErr := upsertBriefingSectionCache(ctx, db, section, hash, text, generatedAt); upsertErr != nil {
+	if isFallback {
+		log.Printf("브리핑(%s): 안전 폴백 결과를 캐싱합니다 — 다음 요청에서 데이터가 그대로여도 재생성을 다시 시도합니다", section)
+	}
+	if upsertErr := upsertBriefingSectionCache(ctx, db, section, hash, text, generatedAt, isFallback); upsertErr != nil {
 		log.Printf("브리핑(%s): 캐시 저장 실패: %v", section, upsertErr)
 	}
 	return briefingSectionOutput{Text: text, Cached: false, GeneratedAt: generatedAt, Status: briefingStatusFresh}

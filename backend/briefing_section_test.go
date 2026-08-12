@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -189,8 +193,140 @@ func TestBriefingSectionCacheNilDB(t *testing.T) {
 	if _, found := lookupBriefingSectionCache(context.Background(), nil, "weather"); found {
 		t.Error("expected lookup against a nil db to report not-found")
 	}
-	if err := upsertBriefingSectionCache(context.Background(), nil, "weather", "hash", "text", time.Now()); err != nil {
+	if err := upsertBriefingSectionCache(context.Background(), nil, "weather", "hash", "text", time.Now(), false); err != nil {
 		t.Errorf("expected upsert against a nil db to no-op without error, got %v", err)
+	}
+}
+
+// openTempBriefingTestDB는 격리된 임시 SQLite/libSQL 파일 DB를 열고 전체
+// 마이그레이션(migrate)을 실행한 뒤 반환한다 — briefing_section_cache의
+// is_fallback 컬럼처럼 실제 DB 스키마/왕복(round-trip)을 검증해야 하는
+// 테스트가, 프로덕션 Turso DB나 다른 테스트와 상태를 공유하지 않고 각자
+// 독립된 DB로 실행되게 한다. t.TempDir()이 테스트 종료 시 자동으로
+// 정리해주므로 별도 cleanup은 DB 커넥션을 닫는 것뿐이다.
+func openTempBriefingTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "test.db")
+	conn, err := sql.Open("libsql", "file:"+path)
+	if err != nil {
+		t.Fatalf("open temp db: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	if err := migrate(conn); err != nil {
+		t.Fatalf("migrate temp db: %v", err)
+	}
+	return conn
+}
+
+// TestBriefingSectionCacheIsFallbackRoundTrips는 is_fallback 컬럼이 실제
+// DB 왕복(insert -> select)에서 정확히 보존되는지 확인한다 — 이 컬럼이
+// 없던 시절에는 hallucinationFallback 결과가 다른 정상 결과와 구분 없이
+// 캐싱되어, 실제 보고된 사례처럼("가장 인기 있는 뉴스: A 3.6-ton
+// mirror..." 원문이 그대로 고정 재사용됨) 데이터가 안 바뀌는 동안 다시
+// 정상 생성을 시도할 기회 자체가 없었다.
+func TestBriefingSectionCacheIsFallbackRoundTrips(t *testing.T) {
+	conn := openTempBriefingTestDB(t)
+	ctx := context.Background()
+	const section = "news:test:round-trip"
+
+	if err := upsertBriefingSectionCache(ctx, conn, section, "hash1", "가장 인기 있는 뉴스: Some English Title", time.Now(), true); err != nil {
+		t.Fatalf("upsert fallback row: %v", err)
+	}
+	row, found := lookupBriefingSectionCache(ctx, conn, section)
+	if !found {
+		t.Fatal("expected to find the row just inserted")
+	}
+	if !row.isFallback {
+		t.Error("expected isFallback to round-trip as true for a fallback result")
+	}
+
+	// 같은 섹션에 정상 생성 결과로 다시 쓰면(ON CONFLICT UPDATE)
+	// is_fallback도 false로 갱신되어야 한다 — 이후 재생성이 성공하면
+	// 다음 요청부터는 다시 정상적으로 캐시가 재사용되어야 하기 때문이다.
+	if err := upsertBriefingSectionCache(ctx, conn, section, "hash1", "정상적으로 생성된 한국어 문장입니다.", time.Now(), false); err != nil {
+		t.Fatalf("upsert normal row: %v", err)
+	}
+	row2, found2 := lookupBriefingSectionCache(ctx, conn, section)
+	if !found2 {
+		t.Fatal("expected to find the row after the update")
+	}
+	if row2.isFallback {
+		t.Error("expected isFallback to round-trip as false once a normal generation overwrites the fallback")
+	}
+}
+
+// TestResolveBriefingSectionRetriesWhenCachedResultIsFallback은 이번
+// 수정의 핵심 시나리오를 재현한다: data_hash가 지금 입력과 완전히 같아도,
+// 캐시된 결과가 hallucinationFallback이었다면(is_fallback=true)
+// resolveBriefingSection이 이를 "재사용 가능한 캐시"로 취급하지 않고
+// 재생성을 시도해야 한다. GROQ_API_KEY를 비워 재생성 시도가 즉시
+// errGroqKeyMissing으로 실패하게 만들면, 그 결과가 briefingStatusCached
+// (캐시를 그대로 재사용)가 아니라 briefingStatusStaleFallback(재생성을
+// 시도했지만 실패해 이전 캐시로 대체)로 나와야 한다 — 이 둘의 차이가
+// 바로 "재생성 시도가 실제로 있었는지"를 증명한다.
+func TestResolveBriefingSectionRetriesWhenCachedResultIsFallback(t *testing.T) {
+	conn := openTempBriefingTestDB(t)
+	originalDB := db
+	db = conn
+	t.Cleanup(func() { db = originalDB })
+
+	t.Setenv("GROQ_API_KEY", "")
+
+	const section = "news:test:fallback-retry"
+	const hash = "same-hash"
+	const fallbackText = "가장 인기 있는 뉴스: Old English Title"
+	if err := upsertBriefingSectionCache(context.Background(), conn, section, hash, fallbackText, time.Now(), true); err != nil {
+		t.Fatalf("seed fallback cache: %v", err)
+	}
+
+	out := resolveBriefingSection(context.Background(), section, "model", hash, "system", "user", nil, "", "", nil, true, "⚠️ missing")
+
+	if out.Status != briefingStatusStaleFallback {
+		t.Errorf("Status = %q, want %q — a cached fallback result must not be served as a plain cache hit even when data_hash matches", out.Status, briefingStatusStaleFallback)
+	}
+	if out.Text != fallbackText {
+		t.Errorf("Text = %q, want the previously cached fallback %q to be served as the stale_fallback value", out.Text, fallbackText)
+	}
+}
+
+// TestGenerateSectionTextReturnsIsFallbackTrueOnHallucinationFallback은
+// generateSectionText가 실제로 hallucinationFallback을 반환할 때
+// isFallback=true를 함께 반환하는지 확인한다 — resolveBriefingSection이
+// 이 신호로 캐시 저장 여부를 결정하므로, 이 플래그 자체가 정확해야 위
+// 두 테스트가 의미를 갖는다. 재현에는 실제 보고됐던 "계약 상대방 날조"
+// 패턴(TestFindUngroundedProperNoun_RegressesTheReportedHallucination과
+// 같은 입력)을 쓴다 — 이 실패는 항상 hardFailure=true, useFallback=true로
+// 분류되어(완화 대상이 아니라) 재시도 후 결정적으로 폴백 경로를 탄다.
+func TestGenerateSectionTextReturnsIsFallbackTrueOnHallucinationFallback(t *testing.T) {
+	resetGroqUsageForTest()
+	resetGroqCallGateForTest(8, 0)
+	t.Setenv("GROQ_API_KEY", "test-key")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"두산에너빌리티가 노블리스 오일 앤 가스와 계약을 체결했다고 밝혔습니다."}}]}`))
+	}))
+	defer server.Close()
+	original := groqEndpoint
+	groqEndpoint = server.URL
+	defer func() { groqEndpoint = original }()
+
+	groundingText := newsGroundingText(&briefingNewsInput{
+		Items: []briefingNewsItem{
+			{ID: "1", Title: "두산에너빌리티, 원전·가스터빈 수주 잇따라", Description: "두산에너빌리티가 국내외에서 원전과 가스터빈 관련 수주를 잇따라 확보했다고 밝혔다."},
+		},
+	})
+	const fallback = "가장 인기 있는 뉴스: Doosan Enerbility wins more nuclear and gas turbine contracts"
+
+	text, isFallback, err := generateSectionText(context.Background(), "test-section", frequentGroqModel(), newsSectionSystemPrompt, "user content", nil, groundingText, fallback)
+	if err != nil {
+		t.Fatalf("expected nil error when a hallucinationFallback is available, got %v", err)
+	}
+	if !isFallback {
+		t.Error("expected isFallback=true when the hallucination fallback path is taken")
+	}
+	if text != fallback {
+		t.Errorf("text = %q, want the fallback %q", text, fallback)
 	}
 }
 
