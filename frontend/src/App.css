@@ -567,17 +567,6 @@
   width: 100%;
 }
 
-.card--skeleton .skeleton-news-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-}
-
-.card--skeleton .skeleton-news-row .skeleton-circle {
-  width: 16px;
-  height: 16px;
-}
-
 .card--skeleton.card--briefing .skeleton-line--row {
   height: 13px;
   width: 100%;

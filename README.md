@@ -915,7 +915,27 @@ AI 브리핑 카드만 스켈레톤 상태로 대기시킵니다.
   두드러졌습니다). 조건을 `loading`만으로 단순화하고 목록/안내 문구 쪽에
   `!loading`을 추가해, 로딩 중엔 항상 스켈레톤이 목록을 대체하도록 했습니다.
   스켈레톤↔목록 전환에는 `.briefing__text`와 같은 `fade-in 200ms ease-out`을
-  재사용해 뚝 끊기지 않게 했습니다.
+  재사용해 뚝 끊기지 않게 했습니다. 스켈레톤 자체는 원(circle) + 가로줄
+  조합의 전용 마크업 대신, `BriefingCard`의 "문단 갱신 중" 스켈레톤과
+  완전히 같은 `briefing__skeleton-line`(회색 반투명 shimmer 가로 막대)을
+  그대로 재사용합니다 — 헤드라인 5개 자리에 맞춰 5개를 두되, 실제
+  제목처럼 길이가 들쭉날쭉해 보이도록 너비를 조금씩 다르게 줘서(전부
+  같은 너비면 오히려 "막대 목록"처럼 보여 헤드라인이라는 인상이 덜
+  듭니다), 두 카드의 로딩 표현이 시각적으로 통일되게 했습니다.
+- `useNews.ts`의 `load`에 실제로 보고된 경쟁 상태(race condition) 버그가
+  있었습니다: category/region이 바뀌어 이전 요청을
+  `abortRef.current?.abort()`로 취소하고 새 요청을 시작해도, 취소된
+  이전 요청의 `try/catch/finally` 블록은 여전히 끝까지 실행됩니다 —
+  `catch`는 `AbortError`를 보고 조용히 `return`하지만, `finally`는
+  `return` 이후에도 항상 실행되어 `setLoading(false)`를 호출합니다.
+  이 abort는 비동기로 처리되므로, 새 요청이 `setLoading(true)`를 호출한
+  *뒤에* 옛 요청의 이 `finally`가 뒤늦게 실행되어 방금 켜진 로딩
+  상태를 도로 꺼버릴 수 있었습니다 — 그러면 새 요청이 여전히 진행
+  중인데도 `loading`이 `false`로 잘못 표시되어, 스켈레톤도 목록도
+  아닌 완전히 빈 본문이 보이는 문제로 나타났습니다. 이제 `finally`에서
+  `abortRef.current === controller`(이 호출이 여전히 "현재" 요청인지)를
+  먼저 확인해, 이미 다른 요청으로 대체된 옛 요청은 `loading` 상태를
+  건드리지 않습니다.
 - 뉴스 카테고리 버튼과 국내/해외 토글(`NewsCard.tsx`)은 `loading`(이 카드
   자체의 `/api/news` 조회) **또는** `briefingInFlight`(날씨/환율/뉴스
   AI 브리핑 3섹션 중 하나라도 아직 생성 중)가 `true`이면 `disabled`

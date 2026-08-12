@@ -120,12 +120,15 @@ export default function NewsCard({
 
         <div className="news__content">
         {loading && (
+          // AI 브리핑 카드(BriefingCard)의 "문단 갱신 중" 스켈레톤과 완전히
+          // 같은 바 스타일(briefing__skeleton-line — 회색 반투명 shimmer
+          // 가로 막대)을 그대로 재사용한다. 헤드라인 5개 자리에 맞춰
+          // 5개를 두되, 실제 제목처럼 길이가 들쭉날쭉해 보이도록 너비를
+          // 조금씩 다르게 준다 — 전부 같은 너비면 오히려 "막대 목록"처럼
+          // 보여 헤드라인 리스트라는 인상이 덜 든다.
           <div className="news__skeleton" aria-label="뉴스 불러오는 중">
-            {[0, 1, 2, 3, 4].map((i) => (
-              <div className="skeleton-news-row" key={i}>
-                <span className="skeleton-circle" />
-                <span className="skeleton-line skeleton-line--row" />
-              </div>
+            {['94%', '82%', '90%', '70%', '85%'].map((width, i) => (
+              <span className="briefing__skeleton-line" style={{ width }} key={i} />
             ))}
           </div>
         )}

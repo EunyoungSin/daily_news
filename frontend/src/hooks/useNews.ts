@@ -31,7 +31,15 @@ export function useNews(category: string, region: NewsRegion) {
       if (err instanceof DOMException && err.name === 'AbortError') return
       setError(err instanceof Error ? err.message : '알 수 없는 오류가 발생했습니다')
     } finally {
-      setLoading(false)
+      // abortRef.current가 이 호출의 controller와 더 이상 같지 않다면, 그
+      // 사이 category/region이 다시 바뀌어 새 load() 호출이 이 요청을
+      // 이미 대체(abort)한 것이다 — 이 경우 setLoading(false)를 호출하면
+      // 안 된다. abort는 비동기로(마이크로태스크 이후) 처리되므로, 새
+      // 요청이 setLoading(true)를 호출한 *뒤에* 옛 요청의 이 finally가
+      // 실행되어 방금 켜진 로딩 상태를 도로 꺼버리는 경쟁 상태가 실제로
+      // 있었다 — 그러면 새 요청이 여전히 진행 중인데도 loading이
+      // false로 잘못 표시되어, 스켈레톤도 목록도 아닌 빈 본문이 보였다.
+      if (abortRef.current === controller) setLoading(false)
     }
   }, [category, region])
 
