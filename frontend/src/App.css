@@ -1038,6 +1038,15 @@
   margin-bottom: 0;
 }
 
+/* briefingInFlight 동안만 나타나는 안내 문구 — .news__controls의
+   flex-column + gap 덕분에 별도 마진 없이도 pill/탭과 일정한 간격을
+   두고 자연스럽게 아래에 쌓인다. */
+.news__controls-hint {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
 .news__translation-fallback {
   color: var(--text-faint);
   font-size: 12px;

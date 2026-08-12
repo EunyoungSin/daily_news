@@ -361,6 +361,21 @@ export function useDashboard(initialParams: DashboardParams, newsContext: NewsCo
     }
   }, [])
 
+  // briefingInFlight: AI 브리핑 3섹션(날씨/환율/뉴스) 중 하나라도 아직
+  // 생성이 끝나지 않았음을 나타내는 단일 플래그다. briefingSectionPending의
+  // 세 필드뿐 아니라 briefingPending도 포함해야 한다 — 최초 로드나 "재시도"
+  // 버튼(load)을 눌렀을 때는 3섹션 전체가 캐시 없이 한꺼번에 새로
+  // 생성되는데, 이 경로는 briefingSectionPending의 개별 필드를 전혀
+  // 건드리지 않고 briefingPending 하나로만 "지금 합성 중"임을 나타내기
+  // 때문이다(load 참고). briefingPending을 빼면, 정작 3개의 Groq 호출이
+  // 동시에 나가는 가장 위험한 순간(캐시 미스 상태의 최초 로드)에 이
+  // 플래그가 여전히 false로 남아 뉴스 탭 잠금이 무력화된다.
+  const briefingInFlight =
+    briefingPending ||
+    briefingSectionPending.weather ||
+    briefingSectionPending.exchange ||
+    briefingSectionPending.news
+
   return {
     data,
     loading,
@@ -368,6 +383,7 @@ export function useDashboard(initialParams: DashboardParams, newsContext: NewsCo
     exchangePending,
     briefingPending,
     briefingSectionPending,
+    briefingInFlight,
     error,
     params,
     applyParams,

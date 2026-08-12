@@ -33,6 +33,7 @@ export default function App() {
     exchangePending,
     briefingPending,
     briefingSectionPending,
+    briefingInFlight,
     error,
     params,
     applyParams,
@@ -245,6 +246,7 @@ export default function App() {
             region={newsRegion}
             onCategoryChange={setNewsCategory}
             onRegionChange={setNewsRegion}
+            briefingInFlight={briefingInFlight}
           />
         </div>
 

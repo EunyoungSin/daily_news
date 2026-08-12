@@ -12,6 +12,14 @@ interface Props {
   region: NewsRegion
   onCategoryChange: (category: string) => void
   onRegionChange: (region: NewsRegion) => void
+  // briefingInFlight: AI 브리핑 3섹션(날씨/환율/뉴스)이 아직 생성 중이면
+  // true — 이 카드 자체의 loading(뉴스 목록 자체 조회)과는 별개다. 뉴스
+  // 카테고리/지역 탭을 빠르게 전환하면 이 카드의 자체 조회뿐 아니라
+  // 브리핑의 뉴스 문단도 함께 재생성되는데(둘 다 Groq를 호출한다), 이
+  // 카드의 loading만으로 탭을 잠그면 자체 조회는 먼저 끝나고 브리핑
+  // 쪽만 아직 진행 중인 틈에 탭을 또 바꿔 Groq 호출이 겹쳐 쌓일 수
+  // 있다. 두 플래그를 모두 disabled 조건에 반영해 그 틈을 없앤다.
+  briefingInFlight: boolean
 }
 
 function formatPubDate(pubDate: string): string {
@@ -29,8 +37,10 @@ export default function NewsCard({
   region,
   onCategoryChange,
   onRegionChange,
+  briefingInFlight,
 }: Props) {
   const [retrying, setRetrying] = useState(false)
+  const tabsDisabled = loading || briefingInFlight
   // 헤드라인별 "원문/한글" override — 값이 없으면 "region 기본값을 사용"
   // (번역이 있으면 한글)한다는 의미이고, 값이 있으면 사용자가 그 행을
   // 명시적으로 전환했다는 의미다.
@@ -75,7 +85,7 @@ export default function NewsCard({
                 aria-selected={category === opt.value}
                 className={category === opt.value ? 'news__category-pill news__category-pill--active' : 'news__category-pill'}
                 onClick={() => onCategoryChange(opt.value)}
-                disabled={loading}
+                disabled={tabsDisabled}
               >
                 {opt.label}
               </button>
@@ -89,7 +99,7 @@ export default function NewsCard({
               aria-selected={region === 'domestic'}
               className={region === 'domestic' ? 'briefing__tab briefing__tab--active' : 'briefing__tab'}
               onClick={() => onRegionChange('domestic')}
-              disabled={loading}
+              disabled={tabsDisabled}
             >
               🇰🇷 국내
             </button>
@@ -99,11 +109,13 @@ export default function NewsCard({
               aria-selected={region === 'international'}
               className={region === 'international' ? 'briefing__tab briefing__tab--active' : 'briefing__tab'}
               onClick={() => onRegionChange('international')}
-              disabled={loading}
+              disabled={tabsDisabled}
             >
               🌐 해외
             </button>
           </div>
+
+          {briefingInFlight && <p className="news__controls-hint">브리핑 생성 중에는 잠시 후 이용해주세요</p>}
         </div>
 
         <div className="news__content">
