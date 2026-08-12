@@ -84,6 +84,7 @@ export default function App() {
     retry: retryLotto,
     mode: lottoRecommendationMode,
     setMode: setLottoRecommendationMode,
+    recommendationPending: lottoRecommendationPending,
   } = useLotto()
 
   const { section: newsSection, loading: newsLoading, error: newsError, retry: retryNews } = useNews(
@@ -279,6 +280,7 @@ export default function App() {
           onRetry={retryLotto}
           recommendationMode={lottoRecommendationMode}
           onRecommendationModeChange={setLottoRecommendationMode}
+          recommendationPending={lottoRecommendationPending}
         />
       </div>
     </div>

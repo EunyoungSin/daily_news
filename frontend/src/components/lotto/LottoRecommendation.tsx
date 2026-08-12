@@ -65,13 +65,33 @@ function useCountdownLabel(targetIso: string | undefined): string {
   return label
 }
 
+// AI 브리핑 카드의 "문단 갱신 중" 스켈레톤(briefing__skeleton-line)과 완전히
+// 같은 바 스타일을 재사용한다 — 번호 뱃지 6개는 원형 스켈레톤
+// (skeleton-circle, LottoBall 기본 크기인 36px에 맞춤)으로, 통계 두 줄은
+// 실제 텍스트("홀짝 ... · 합계 ... · 직전 회차 중복 ...개", "구간분포 ...")
+// 길이에 맞춰 너비를 다르게 준 가로 막대로 표시한다.
+function RecommendationSetSkeleton() {
+  return (
+    <div className="lotto__rec-set" aria-label="추천 번호 다시 계산 중">
+      <div className="lotto__balls">
+        {Array.from({ length: 6 }).map((_, i) => (
+          <span className="skeleton-circle" key={i} style={{ width: 36, height: 36 }} />
+        ))}
+      </div>
+      <span className="briefing__skeleton-line lotto__rec-set-stats" />
+      <span className="briefing__skeleton-line briefing__skeleton-line--short lotto__rec-set-stats lotto__rec-set-stats--bands" />
+    </div>
+  )
+}
+
 interface Props {
   recommendation: LottoRecommendation
   mode: LottoRecommendationMode
   onModeChange: (mode: LottoRecommendationMode) => void
+  pending: boolean
 }
 
-export default function LottoRecommendation({ recommendation, mode, onModeChange }: Props) {
+export default function LottoRecommendation({ recommendation, mode, onModeChange, pending }: Props) {
   const countdown = useCountdownLabel(recommendation.isBlackout ? recommendation.nextAvailableAt : undefined)
 
   return (
@@ -80,7 +100,11 @@ export default function LottoRecommendation({ recommendation, mode, onModeChange
 
       <label className="lotto__rec-mode-label">
         추천 방식
-        <select value={mode} onChange={(e) => onModeChange(e.target.value as LottoRecommendationMode)}>
+        <select
+          value={mode}
+          onChange={(e) => onModeChange(e.target.value as LottoRecommendationMode)}
+          disabled={pending}
+        >
           {MODE_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value}>
               {opt.label}
@@ -89,7 +113,9 @@ export default function LottoRecommendation({ recommendation, mode, onModeChange
         </select>
       </label>
 
-      {recommendation.isBlackout ? (
+      {pending ? (
+        <RecommendationSetSkeleton />
+      ) : recommendation.isBlackout ? (
         <div className="lotto__rec-blackout">
           <p>
             현재는 이번 회차 판매가 마감되어 추천 번호를 준비 중입니다. 일요일 오전 6시부터 다음 회차 추천 번호를

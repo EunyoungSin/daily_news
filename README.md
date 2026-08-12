@@ -1025,3 +1025,31 @@ AI 브리핑 카드만 스켈레톤 상태로 대기시킵니다.
   실패하든 각 훅의 `finally`에서 항상 해제되므로, 브리핑과 뉴스
   카드 조회가 모두 끝나는 즉시 버튼은 다시 클릭 가능한 상태로
   돌아옵니다.
+- 로또 "이번 주 추천 번호"의 추천 방식(핫넘버/콜드넘버/완전 무작위)
+  드롭다운도 같은 문제가 있었습니다: `useLotto.ts`의 `load`는 `mode`가
+  바뀌면 `/api/lotto?mode=...`를 다시 통째로 fetch하는데, 카드 전체
+  스켈레톤 조건이 `loading && !section`이라(뉴스 카드가 예전에 겪은 것과
+  똑같은 패턴) `section`이 이미 있는 상태(모드 전환)에서는 로딩 표시가
+  전혀 없이 이전 추천 번호가 그대로 보이다가 새 응답이 오면 갑자기
+  바뀌었습니다. `useLotto.ts`에 `recommendationPending`을 추가했는데,
+  이 플래그는 초기 로드나 "재시도"가 아니라 오직 추천 방식을 바꿀
+  때만(전용 `changeRecommendationMode` 함수를 거칠 때만) 켜집니다.
+  `LottoRecommendation.tsx`는 이 플래그가 true인 동안 추천 번호 뱃지
+  6개와 홀짝비/합계/직전회차 중복/구간분포 통계를 `BriefingCard`의
+  "문단 갱신 중" 스켈레톤과 완전히 같은 스타일(번호 뱃지는
+  `skeleton-circle` 원형, 통계는 `briefing__skeleton-line` 가로 막대)로
+  대체하고, 드롭다운 자체도 `disabled` 처리해 응답이 오기 전 추가
+  전환으로 요청이 겹치는 것을 막습니다. 이 작업 중에 `useNews.ts`에서
+  고쳤던 것과 완전히 같은 경쟁 상태 버그가 `useLotto.ts`의 `load`에도
+  있는 것을 발견해 함께 고쳤습니다 — 이전 요청이 abort된 뒤에도 그
+  요청의 `finally { setLoading(false) }`가 무조건 실행되어, 새 요청이
+  이미 `setLoading(true)`를 호출한 뒤에 뒤늦게 그 값을 도로 꺼버릴 수
+  있었습니다. `abortRef.current === controller`로 "여전히 현재
+  요청인지" 확인한 뒤에만 `loading`/`recommendationPending`을 갱신하도록
+  고쳤습니다. 서버 캐시가 있어(같은 사이클 안에서 이미 조회한 모드로
+  되돌아가면 재계산 없이 즉시 응답) 왕복이 매우 짧게 끝날 수 있는데,
+  그러면 스켈레톤이 깜빡이는 것처럼 보일 수 있어 `recommendationPending`
+  이 최소 300ms(`MIN_RECOMMENDATION_PENDING_MS`)는 유지되도록
+  했습니다 — 응답이 그보다 먼저 와도 `setTimeout`으로 나머지 시간만큼
+  더 기다렸다가 끕니다. 스켈레톤↔실제 세트 전환에는 다른 카드들과 같은
+  `fade-in 200ms ease-out`을 재사용합니다.

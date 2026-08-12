@@ -19,6 +19,11 @@ interface Props {
   onRetry: () => Promise<void>
   recommendationMode: LottoRecommendationMode
   onRecommendationModeChange: (mode: LottoRecommendationMode) => void
+  // recommendationPending: 추천 방식 드롭다운을 바꿔서 재조회하는 동안만
+  // true다(useLotto.ts 참고) — 카드 전체 loading과 달리 이 값은 추천
+  // 영역에만 스켈레톤을 씌우고 나머지(회차 목록, 통계, AI 인사이트)는
+  // 그대로 유지한다.
+  recommendationPending: boolean
 }
 
 function formatUpdatedAt(iso: string): string {
@@ -56,6 +61,7 @@ export default function LottoCard({
   onRetry,
   recommendationMode,
   onRecommendationModeChange,
+  recommendationPending,
 }: Props) {
   const [retrying, setRetrying] = useState(false)
   const pulsing = usePulseOnChange(section?.data?.latest.drwNo)
@@ -154,6 +160,7 @@ export default function LottoCard({
               recommendation={section.data.recommendation}
               mode={recommendationMode}
               onModeChange={onRecommendationModeChange}
+              pending={recommendationPending}
             />
 
             <div className="lotto__section">

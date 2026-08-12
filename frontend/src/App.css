@@ -1735,6 +1735,19 @@
   font-size: 12.5px;
 }
 
+.lotto__rec-mode-label select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* 스켈레톤↔실제 세트 전환에 다른 카드들과 같은 fade-in을 재사용한다 —
+   두 상태 모두 이 클래스를 쓰는 wrapper div가 새로 마운트되므로(조건부
+   렌더링으로 서로를 대체), 어느 쪽으로 바뀌든 동일하게 부드럽게
+   나타난다. */
+.lotto__rec-set {
+  animation: fade-in 200ms ease-out;
+}
+
 .lotto__rec-set-stats {
   margin-top: 6px;
   font-size: 11px;
