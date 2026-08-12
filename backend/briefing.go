@@ -312,7 +312,8 @@ func truncateRunes(s string, maxRunes int) string {
 // 무기징역을" 같은 비문). 잘렸다는 표시를 명시적으로 남기면, 적어도 그
 // 조각이 온전한 문장이 아니라는 신호는 모델에게 전달된다.
 func truncateForPrompt(s string, maxRunes int) string {
-	if len([]rune(s)) <= maxRunes {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
 		return s
 	}
 	// 말줄임표(…) 한 글자가 들어갈 자리를 남겨둬서, 잘라낸 결과가 전체적으로
@@ -321,13 +322,31 @@ func truncateForPrompt(s string, maxRunes int) string {
 	if limit < 1 {
 		limit = maxRunes
 	}
-	cut := []rune(truncateRunes(s, limit))
-	// 잘린 지점이 단어 중간이면 마지막 공백까지 되돌아간다 — 다만 공백이
-	// 너무 앞쪽에만 있다면(예: 첫 단어 자체가 maxRunes보다 길다) 오히려
-	// 잘라내는 분량이 너무 많아지므로, 그럴 때는 되돌아가지 않고 원래
-	// 하드컷 지점을 그대로 쓴다.
-	if idx := lastRuneIndex(cut, ' '); idx > len(cut)/2 {
-		cut = cut[:idx]
+	cut := runes[:limit]
+	// 하드컷 지점이 실제로 단어 중간이었을 때만(잘린 지점 바로 다음 문자가
+	// 공백이 아닐 때만) 마지막 공백까지 되돌아간다 — 다만 공백이 너무
+	// 앞쪽에만 있다면(예: 첫 단어 자체가 maxRunes보다 길다) 오히려 잘라내는
+	// 분량이 너무 많아지므로, 그럴 때는 되돌아가지 않고 원래 하드컷 지점을
+	// 그대로 쓴다.
+	//
+	// 이 "실제로 단어 중간이었을 때만"이라는 조건이 원래 빠져 있었다 —
+	// 예전에는 하드컷 지점이 우연히 이미 완전한 단어 경계(바로 다음
+	// 글자가 공백)여도 무조건 마지막 공백을 찾아 되돌아갔다. 실제로 보고된
+	// 사례: NewsData.io 헤드라인 description "...a record $540.2 million
+	// grant..."가 briefingNewsDescriptionMaxRunes(80)에서 공교롭게도
+	// "million" 바로 뒤에서 깔끔하게 잘렸는데도, 이 무조건 되돌아가기
+	// 로직이 이미 온전한 "million"이라는 단어 전체를 불필요하게 잘라내
+	// "...a record $540.2…"만 남겼다. 그러면 annotateNumericUnits가 매칭할
+	// 단위(million)가 아예 사라져 "$540.2"가 변환되지 않은 채 그대로
+	// 프롬프트에 남았고, 모델이 단위 없는 이 숫자를 스스로 어림잡다
+	// "5억"(정답 5.4억과 약 7.4% 차이)을 만들어내 findUngroundedNumber에
+	// 근거 없는 숫자로 걸렸다 — 검증기나 숫자 변환 계산 자체의 버그가
+	// 아니라, 바로 이 잘린 단어 때문에 애초에 변환할 재료 자체가 없어진
+	// 것이 진짜 원인이었다.
+	if limit >= len(runes) || runes[limit] != ' ' {
+		if idx := lastRuneIndex(cut, ' '); idx > len(cut)/2 {
+			cut = cut[:idx]
+		}
 	}
 	return strings.TrimRight(string(cut), " ") + "…"
 }
@@ -1288,7 +1307,7 @@ const newsSectionSystemPrompt = briefingCommonRules + `
 
 절대 규칙:
 1. 원문에 없는 사건·인물·회사명·계약 상대방을 지어내거나 숫자를 다른 단위(예: %)로 바꿔치기하지 마세요.
-2. 구체적 사실(숫자·명칭) 1개 이상 포함 — "다양한 논의가 진행 중입니다" 같은 빈 문장 금지. K/M/B는 이미 한국어로 환산되어 있으니 그대로 쓰세요.
+2. 구체적 사실(숫자·명칭) 1개 이상 포함 — "다양한 논의가 진행 중입니다" 같은 빈 문장 금지. K/M/B는 이미 한국어로 환산되어 있으니 그 표기 그대로 쓰세요 — 억/만으로 다시 쪼개지 마세요(자릿수를 틀리기 쉽습니다).
 3. 원문이 기사체("~했다")여도 반드시 합니다체로 재작성하세요.
 4. 영어 고유명사(회사명·제품명)는 외래어 표기법에 맞는 한글이나 영어 원문 그대로만 쓰세요 — 일본어·중국어식 음차 금지.
 5. 의학·과학·법률 등 전문 용어도 한자를 섞지 말고 한글로만 쓰세요(예: "belly size" → "배 둘레", 한자 "腹圍" 금지). 한글로 옮기기 애매하면 억지로 옮기지 말고 쉬운 말로 풀어 쓰세요.

@@ -808,6 +808,70 @@ func TestTruncateForPromptCutsAtWordBoundary(t *testing.T) {
 	}
 }
 
+// TestTruncateForPromptDoesNotDropAWordThatAlreadyFitsExactly는 실제 보고된
+// 재발 사례를 회귀 테스트로 고정한다: 하드컷 지점이 우연히 이미 완전한
+// 단어 경계(잘린 지점 바로 다음 글자가 공백)와 일치하면, 그 마지막 단어를
+// 불필요하게 잘라내면 안 된다. 실제 사례: NewsData.io 헤드라인 description
+// "...a record $540.2 million grant..."가 briefingNewsDescriptionMaxRunes
+// (80)에서 공교롭게도 "million" 바로 뒤에서 깔끔하게 잘렸는데도, 예전
+// 로직은 무조건 마지막 공백까지 되돌아가 이미 온전했던 "million"이라는
+// 단어 전체를 잘라내 "...a record $540.2…"만 남겼다. 그러면
+// annotateNumericUnits가 매칭할 단위(million)가 사라져 "$540.2"가
+// 변환되지 않은 채 프롬프트에 그대로 남았고, 모델이 단위 없는 이 숫자를
+// 스스로 어림잡다 "5억"(정답 5.4억과 약 7.4% 차이)을 만들어내
+// findUngroundedNumber에 근거 없는 숫자로 걸렸다.
+func TestTruncateForPromptDoesNotDropAWordThatAlreadyFitsExactly(t *testing.T) {
+	desc := "Gates Foundation awards University of Washington's IHME a record $540.2 million grant to expand global health data and disease tracking."
+	got := truncateForPrompt(desc, briefingNewsDescriptionMaxRunes)
+
+	if !strings.Contains(got, "million") {
+		t.Errorf("expected the word \"million\" (which fit exactly at the truncation boundary) to be preserved, got %q", got)
+	}
+	if got := []rune(got); len(got) > briefingNewsDescriptionMaxRunes {
+		t.Errorf("expected truncated result (including ellipsis) to be at most %d runes, got %d", briefingNewsDescriptionMaxRunes, len(got))
+	}
+
+	// annotateNumericUnits가 실제로 이 단위를 인식해 변환할 수 있어야
+	// 한다 — "million"이 잘렸다면 이 변환 자체가 조용히 실패한다.
+	annotated := annotateNumericUnits(got)
+	if annotated == got {
+		t.Error("expected annotateNumericUnits to convert the $540.2 million amount once \"million\" is preserved, but the text was left unchanged")
+	}
+	if !strings.Contains(annotated, "억") {
+		t.Errorf("expected the amount to be converted to a 억 단위 Korean amount, got %q", annotated)
+	}
+}
+
+// TestTruncateForPromptStillBacksUpOnAGenuineMidWordCut은 위 수정이 원래
+// 목적(TestTruncateForPromptCutsAtWordBoundary가 고정한, 실제로 단어
+// 중간에서 잘리는 경우)을 여전히 올바르게 처리하는지 확인한다 — 하드컷
+// 지점이 진짜로 단어 한가운데라면(다음 글자가 공백이 아니면) 여전히
+// 마지막 공백까지 되돌아가야 하고, 잘린 단어 조각이 결과에 그대로
+// 남아있으면 안 된다.
+func TestTruncateForPromptStillBacksUpOnAGenuineMidWordCut(t *testing.T) {
+	s := "The quick brown fox jumps over the lazy dog while researchers watch closely"
+	const limit = 30
+	// 하드컷 지점(29번째 rune, ellipsis 한 글자를 위해 -1)이 실제로 단어
+	// 중간인지 먼저 확인한다 — 테스트 자체가 의도한 시나리오를 검증하지
+	// 못하는 것을 막기 위한 안전장치다.
+	if runes := []rune(s); runes[limit-1] == ' ' {
+		t.Fatalf("test setup invalid: rune at index %d is a space, this case does not exercise a genuine mid-word cut", limit-1)
+	}
+
+	got := truncateForPrompt(s, limit)
+	body := strings.TrimSuffix(got, "…")
+
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("expected truncated text to end with an ellipsis marker, got %q", got)
+	}
+	if body != "" && !strings.Contains(s, body+" ") {
+		t.Errorf("expected the cut to land on a word boundary from the original string, got body=%q", body)
+	}
+	if got := []rune(got); len(got) > limit {
+		t.Errorf("expected truncated result (including ellipsis) to be at most %d runes, got %d", limit, len(got))
+	}
+}
+
 // TestPickNewsItemToExclude는 8B/70B 모두 실패한 뉴스 생성 결과가 주어졌을
 // 때, generateNewsSectionText가 어떤 항목을 제외 대상으로 고르는지
 // 검증한다.
@@ -1403,5 +1467,21 @@ func TestNewsSectionSystemPromptCoversTechnicalTermHanjaMixing(t *testing.T) {
 	}
 	if !strings.Contains(newsSectionSystemPrompt, "쉬운 말로 풀어") {
 		t.Error("expected guidance to paraphrase into simpler wording when a term is hard to render in pure Hangul, not just a bare CJK prohibition")
+	}
+}
+
+// TestNewsSectionSystemPromptForbidsRedecomposingConvertedAmounts는 실제
+// 보고된 사례를 회귀 테스트로 고정한다: annotateNumericUnits가 이미
+// "5.4억 달러"로 정확히 환산해 넘겨줬는데도, 모델이 이를 "5억 400만
+// 달러"(정답은 "5억 4000만"이어야 함)처럼 억/만 단위로 다시 쪼개
+// 표현하려다 자릿수를 틀려 findUngroundedNumber에 근거 없는 숫자로
+// 걸렸다("근거 없는 숫자 감지(5e+08)"). 실제 헤드라인으로 재현해보면
+// (TestTruncateForPromptDoesNotDropAWordThatAlreadyFitsExactly가 고친
+// 원인과는 별개로) 이 재분해 시도 자체가 여전히 발생할 수 있어, "주어진
+// 표기를 그대로 쓰고 다시 쪼개 계산하지 말라"는 지침을 프롬프트에
+// 명시적으로 추가했다.
+func TestNewsSectionSystemPromptForbidsRedecomposingConvertedAmounts(t *testing.T) {
+	if !strings.Contains(newsSectionSystemPrompt, "쪼개") {
+		t.Error("expected newsSectionSystemPrompt to explicitly forbid re-decomposing an already-converted 억/만 amount")
 	}
 }
