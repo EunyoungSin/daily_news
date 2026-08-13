@@ -288,12 +288,29 @@ type briefingNewsInput struct {
 // 포기하는 대신 요청당 토큰 비용을 실질적으로 낮춥니다.
 const briefingNewsDescriptionMaxRunes = 80
 
-// briefingNewsTitleMaxRunes는 title에 대한 같은 종류의 상한입니다. 실제
-// NewsData.io 헤드라인은 대부분 이보다 훨씬 짧아 평소에는 거의 잘리지
-// 않지만, description처럼 상한이 아예 없으면 드물게 매우 긴 제목 하나가
-// 뉴스 브리핑 프롬프트의 토큰 예산(1,500토큰, 아래 테스트 참고)을 조용히
-// 넘겨버릴 수 있어 방어적으로 상한을 둡니다.
-const briefingNewsTitleMaxRunes = 80
+// briefingNewsTitleMaxRunes는 title에 대한 상한입니다. description(80자)과
+// 달리 title은 "정상적으로 자주 잘리는" 대상이 아니라 방어용 안전판에
+// 가깝습니다 — 실제 NewsData.io 헤드라인은 매우 장황한 것도 대개 120자
+// 안팎이라(예: "Ontario woman who went missing from Shambhala Music
+// Festival in B.C. posts thank you video to rescuers, shares
+// details" — 약 118자) 이 상한에 사실상 걸리지 않지만, 극히 드문
+// 비정상적으로 긴 제목 하나가 토큰 예산을 조용히 넘겨버리는 사고만
+// 막으면 됩니다.
+//
+// 예전에는 이 값도 80이라 description과 똑같이 취급됐는데, 그 결과 실제
+// 헤드라인 제목("...announces $100 million...")이 "$100…"으로 잘려나가는
+// 사고가 실제로 보고됐다 — description은 원래 정보가 일부 소실되는 것을
+// 감수하는 설계지만, title은 그 자체로 기사 전체의 핵심 사실을 담고
+// 있어서 잘리면 요약할 재료 자체가 왜곡된다("belly size" 문제와 달리
+// 이번엔 잘못 번역한 게 아니라 원문 입력 자체가 이미 불완전했다). 120으로
+// 올려서 위 예시 같은 실측 최장 헤드라인까지는 사실상 전혀 잘리지 않게
+// 했다 — 240처럼 더 크게 잡으면(TestNewsBriefingPromptFitsWithinTokenBudget의
+// 인위적 최악 시나리오 기준 실측 2,097토큰) 예산 여유가 지나치게 줄어드는데
+// 반해, 실제 헤드라인은 어차피 그 정도로 길지 않아 더 올려서 얻는 실익이
+// 없다. truncateForPrompt의 extendCutToPreserveNumericToken
+// (news_number_annotate.go)이 혹시 이 상한에 걸리는 극단적인 경우에도
+// 숫자 표현만큼은 마지막까지 보존한다.
+const briefingNewsTitleMaxRunes = 120
 
 func truncateRunes(s string, maxRunes int) string {
 	runes := []rune(s)
@@ -322,7 +339,7 @@ func truncateForPrompt(s string, maxRunes int) string {
 	if limit < 1 {
 		limit = maxRunes
 	}
-	cut := runes[:limit]
+	cutIdx := limit
 	// 하드컷 지점이 실제로 단어 중간이었을 때만(잘린 지점 바로 다음 문자가
 	// 공백이 아닐 때만) 마지막 공백까지 되돌아간다 — 다만 공백이 너무
 	// 앞쪽에만 있다면(예: 첫 단어 자체가 maxRunes보다 길다) 오히려 잘라내는
@@ -343,12 +360,22 @@ func truncateForPrompt(s string, maxRunes int) string {
 	// 근거 없는 숫자로 걸렸다 — 검증기나 숫자 변환 계산 자체의 버그가
 	// 아니라, 바로 이 잘린 단어 때문에 애초에 변환할 재료 자체가 없어진
 	// 것이 진짜 원인이었다.
-	if limit >= len(runes) || runes[limit] != ' ' {
-		if idx := lastRuneIndex(cut, ' '); idx > len(cut)/2 {
-			cut = cut[:idx]
+	if cutIdx >= len(runes) || runes[cutIdx] != ' ' {
+		if idx := lastRuneIndex(runes[:cutIdx], ' '); idx > cutIdx/2 {
+			cutIdx = idx
 		}
 	}
-	return strings.TrimRight(string(cut), " ") + "…"
+	// 위 단어 경계 보정만으로는 잡지 못하는 또 다른 사고가 있었다: 하드컷
+	// 지점이 공교롭게도 "$100" 바로 뒤(다음 글자가 공백)처럼 이미 "깔끔한"
+	// 단어 경계에 걸리면 위 보정은 아예 손대지 않는데, 그 뒤에 이어지는
+	// " million"이 통째로 잘려나가 "$100…"만 남는 경우다 — 숫자 자체는
+	// 살아있지만 단위가 사라지면 annotateNumericUnits가 변환할 재료가
+	// 없어지는 것은 위 "$540.2" 사례와 결과적으로 동일하다.
+	// extendCutToPreserveNumericToken이 이 경우를 잡아, 잘리는 위치가
+	// 숫자+단위(또는 단위 없는 통화 금액) 표현 중간이면 그 표현 전체가
+	// 포함되도록 cutIdx를 뒤로 늘린다.
+	cutIdx = extendCutToPreserveNumericToken(s, cutIdx)
+	return strings.TrimRight(string(runes[:cutIdx]), " ") + "…"
 }
 
 func lastRuneIndex(runes []rune, target rune) int {
@@ -1170,6 +1197,23 @@ func findUngroundedNumber(text, groundingText string, allowedNumbers []float64) 
 	return 0, false
 }
 
+// ungroundedNumberReasonPattern은 validateSectionOutput이
+// findUngroundedNumber의 결과를 포맷팅한 문자열("근거 없는 숫자
+// 감지(1e+08)")에서 감지된 숫자 부분만 다시 뽑아낸다 —
+// generateSectionText가 재시도 사이에 감지된 숫자 자체가 바뀌는지
+// 비교하려면 이 문자열이 필요한데, findUngroundedNumber를 다시 호출하지
+// 않고 이미 계산된 reason 문자열을 재사용하는 편이 검증 로직을 중복
+// 실행하지 않아도 된다.
+var ungroundedNumberReasonPattern = regexp.MustCompile(`^근거 없는 숫자 감지\((.+)\)$`)
+
+func extractUngroundedNumberFromReason(reason string) (string, bool) {
+	m := ungroundedNumberReasonPattern.FindStringSubmatch(reason)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
+
 // weatherFixedNumbers/exchangeFixedNumbers는 데이터가 아니라 각 섹션의
 // 프롬프트 문구 자체에 고정으로 들어있는 숫자입니다 —
 // findUngroundedNumber의 문서 주석 참고.
@@ -1311,6 +1355,7 @@ const newsSectionSystemPrompt = briefingCommonRules + `
 3. 원문이 기사체("~했다")여도 반드시 합니다체로 재작성하세요.
 4. 영어 고유명사(회사명·제품명)는 외래어 표기법에 맞는 한글이나 영어 원문 그대로만 쓰세요 — 일본어·중국어식 음차 금지.
 5. 의학·과학·법률 등 전문 용어도 한자를 섞지 말고 한글로만 쓰세요(예: "belly size" → "배 둘레", 한자 "腹圍" 금지). 한글로 옮기기 애매하면 억지로 옮기지 말고 쉬운 말로 풀어 쓰세요.
+6. title이나 description이 말줄임표(…)로 끝나 문장이 불완전하면, 그 안의 숫자·세부 정보를 추측해서 채우지 마세요 — 명시된 부분까지만 쓰거나 그 항목은 간략히만 언급하세요.
 
 예시: 한 스타트업이 5000만 달러 투자를 유치했습니다.`
 
@@ -1455,6 +1500,8 @@ func generateSectionText(ctx context.Context, name, model, systemPrompt, userCon
 	}
 
 	currentModel := model
+	var previousUngroundedNumber string
+	var hasPreviousUngroundedNumber bool
 
 	for attempt := 0; attempt <= maxSectionRegenerations; attempt++ {
 		content, callErr := callGroqChat(ctx, apiKey, currentModel, []groqChatMessage{
@@ -1480,6 +1527,22 @@ func generateSectionText(ctx context.Context, name, model, systemPrompt, userCon
 		// (해외 모드처럼) 원문 헤드라인/description 자체가 이미 뒤섞이거나
 		// 잘려서 문제였는지 보려면 입력과 출력 전체가 함께 필요합니다.
 		log.Printf("브리핑(%s) 시도 %d/%d 검증 실패: %s\n입력: %s\n전체 응답: %s", name, attempt+1, maxSectionRegenerations+1, reason, userContent, text)
+
+		// 재시도마다 findUngroundedNumber가 감지하는 숫자 자체가 바뀌는 것은
+		// "모델이 매번 다른 값을 지어낸다"는 신호다 — 실제로 있었던 사고:
+		// title이 "$100…"으로 잘려 단위(million)가 사라지자, 모델이 1차
+		// 시도에서 "1억"으로, 모델 승격 후 2차 시도에서 "10억"으로 서로 다른
+		// 값을 추측해 두 시도 모두 검증에 실패했다. 이 패턴이 감지되면
+		// 검증기나 프롬프트 자체보다 원문 입력(title/description)이 잘려서
+		// 애초에 근거가 없었을 가능성을 의심해야 하므로, 원인 추적이 쉽도록
+		// 명시적으로 경고를 남긴다.
+		if num, ok := extractUngroundedNumberFromReason(reason); ok {
+			if hasPreviousUngroundedNumber && num != previousUngroundedNumber {
+				log.Printf("브리핑(%s): 재시도마다 감지된 근거 없는 숫자가 다름(%s -> %s) — 검증기/프롬프트 문제가 아니라 원문 title/description 자체가 잘려서 불완전할 가능성이 있습니다. 입력: %s", name, previousUngroundedNumber, num, userContent)
+			}
+			previousUngroundedNumber = num
+			hasPreviousUngroundedNumber = true
+		}
 
 		if attempt >= maxSectionRegenerations {
 			if hardFailure {

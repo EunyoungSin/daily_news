@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // numericUnitPattern은 숫자 바로 뒤에 K/M/B가 붙는 축약 표기("9B",
@@ -139,4 +140,57 @@ func koreanUnitAmount(value float64) string {
 func trimTrailingZero(f float64) string {
 	s := strconv.FormatFloat(f, 'f', 1, 64)
 	return strings.TrimSuffix(s, ".0")
+}
+
+// bareCurrencyAmountPattern은 numericUnitPattern과 달리 단위 축약형이 없는
+// 통화 금액("$1,204,000", "£25.50")을 매칭한다 — numericUnitPattern은
+// million/billion/bn 같은 단위 축약형이 반드시 있어야 매칭되므로, 이
+// 패턴은 그 보완이다. truncateForPrompt(briefing.go)가 잘라내는 위치가
+// 이런 금액 한가운데를 가로지르지 않게 하는 용도로만 쓰인다 — 통화
+// 기호를 필수로 요구해, 연도나 퍼센트처럼 무관한 숫자 때문에 잘라내는
+// 위치가 불필요하게 뒤로 밀리지 않게 한다.
+var bareCurrencyAmountPattern = regexp.MustCompile(`[$£€]\s?\d[\d,]*(?:\.\d+)?`)
+
+// numericTruncationGuardPatterns는 extendCutToPreserveNumericToken이
+// "이 지점에서 자르면 숫자 표현이 반토막 나는가"를 확인할 때 훑는
+// 패턴 목록이다. numericUnitPattern(통화 기호 없이도 million/billion 같은
+// 단위 축약형이 있으면 매칭)과 bareCurrencyAmountPattern(단위 축약형 없이
+// 통화 기호만 있는 금액)을 함께 써야, "3 million people"처럼 통화가 아닌
+// 표현과 "$1,204,000"처럼 축약형이 없는 금액을 모두 커버한다.
+var numericTruncationGuardPatterns = []*regexp.Regexp{numericUnitPattern, bareCurrencyAmountPattern}
+
+// extendCutToPreserveNumericToken은 cutIdx(원본 문자열 s의 rune 인덱스)가
+// numericTruncationGuardPatterns 중 하나의 매치 중간을 가로지르면, 그
+// 매치 전체가 포함되도록 cutIdx를 매치의 끝까지 뒤로 미룬다. 가로지르는
+// 매치가 없으면 cutIdx를 그대로 반환한다.
+//
+// 실제 보고된 사례: "$100 million" 표현이 하드컷 지점 바로 뒤에서 시작되는
+// " million" 부분만 잘려나가 "$100…"만 남으면, annotateNumericUnits가
+// 매칭할 단위를 찾지 못해 원래 값이 완전히 소실되고, 모델이 "1억"과
+// "10억" 사이를 오가며 추측하다 검증에 반복 실패하는 사고로 이어졌다.
+// 완전히 안 자르는 대신 이 표현 하나만큼만 살짝 더 자르는 것이,
+// title/description 전체 상한을 없애는 것보다 토큰 비용 대비 효율적이다.
+//
+// 최대 3회 반복하는 이유는, cutIdx를 한 매치의 끝까지 늘렸더니 공교롭게도
+// 그 늘어난 지점이 또 다른 매치 중간에 걸리는(예: 숫자 표현 두 개가
+// 바로 붙어 있는) 드문 경우까지 안전하게 처리하기 위해서다 — 실제로는
+// 거의 항상 1회 안에 안정된다.
+func extendCutToPreserveNumericToken(s string, cutIdx int) int {
+	for pass := 0; pass < 3; pass++ {
+		moved := false
+		for _, pattern := range numericTruncationGuardPatterns {
+			for _, loc := range pattern.FindAllStringIndex(s, -1) {
+				start := utf8.RuneCountInString(s[:loc[0]])
+				end := utf8.RuneCountInString(s[:loc[1]])
+				if start < cutIdx && end > cutIdx {
+					cutIdx = end
+					moved = true
+				}
+			}
+		}
+		if !moved {
+			break
+		}
+	}
+	return cutIdx
 }

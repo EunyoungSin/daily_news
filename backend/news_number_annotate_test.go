@@ -49,6 +49,63 @@ func TestAnnotateNumericUnits(t *testing.T) {
 	}
 }
 
+// TestExtendCutToPreserveNumericToken은 truncateForPrompt(briefing.go)가
+// 쓰는 핵심 보조 함수를 직접 검증한다 — 잘리는 위치가 숫자+단위 표현
+// (또는 단위 없는 통화 금액) 중간을 가로지르면, 그 표현 전체가 포함되게
+// cutIdx를 뒤로 늘려야 한다.
+func TestExtendCutToPreserveNumericToken(t *testing.T) {
+	cases := []struct {
+		name string
+		s    string
+		cut  int
+		want int
+	}{
+		{
+			// "$100 million"에서 cut이 "$100"과 " million" 사이 공백에
+			// 걸린다 — 실제 보고된 사고("$100…")를 그대로 재현한다.
+			name: "cut lands right between the number and its unit word",
+			s:    "A firm raised $100 million in funding",
+			cut:  18, // "A firm raised $100" 뒤, " million" 앞
+			want: 26, // "A firm raised $100 million" 끝까지 늘어나야 함
+		},
+		{
+			// "3 million people"처럼 통화 기호가 없는 단위 표현도 보호돼야
+			// 한다.
+			name: "cut lands mid-unit-word with no currency symbol",
+			s:    "roughly 3 million people attended",
+			cut:  11, // "roughly 3 m" 중간(단위 단어 자체가 반토막)
+			want: 17, // "roughly 3 million" 끝까지
+		},
+		{
+			// 단위 축약형이 없는 통화 금액("$1,204,000")도
+			// bareCurrencyAmountPattern으로 보호돼야 한다.
+			name: "cut lands mid-digit inside a bare currency amount",
+			s:    "the grant totaled $1,204,000 this year",
+			cut:  22, // "$1,20" 중간
+			want: 28, // "$1,204,000" 끝까지
+		},
+		{
+			// 매치 자체가 cut 지점을 가로지르지 않으면(이미 매치보다 훨씬
+			// 앞이거나 뒤) 손대지 않는다.
+			name: "cut point does not cross any numeric token",
+			s:    "no numbers anywhere near this cut point at all",
+			cut:  10,
+			want: 10,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extendCutToPreserveNumericToken(tc.s, tc.cut)
+			if got != tc.want {
+				runes := []rune(tc.s)
+				t.Errorf("extendCutToPreserveNumericToken(%q, %d) = %d (text[:%d]=%q), want %d (text[:%d]=%q)",
+					tc.s, tc.cut, got, got, string(runes[:min(got, len(runes))]), tc.want, tc.want, string(runes[:min(tc.want, len(runes))]))
+			}
+		})
+	}
+}
+
 func TestKoreanUnitAmount(t *testing.T) {
 	cases := []struct {
 		value float64

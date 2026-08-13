@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -327,6 +330,57 @@ func TestGenerateSectionTextReturnsIsFallbackTrueOnHallucinationFallback(t *test
 	}
 	if text != fallback {
 		t.Errorf("text = %q, want the fallback %q", text, fallback)
+	}
+}
+
+// TestGenerateSectionTextWarnsWhenUngroundedNumberChangesBetweenAttempts는
+// 이번에 고친 실제 사고를 재현한다: 원문 title이 잘려 단위(million)가
+// 사라지면, 모델이 재시도마다(8B -> 70B 승격) 서로 다른 크기의 숫자를
+// 추측해내면서 두 시도 모두 findUngroundedNumber에 검증 실패로 걸린다.
+// 이 패턴(같은 섹션에서 검증 실패 시 감지된 숫자가 재시도마다 달라짐)이
+// 감지되면, 원인이 검증기나 프롬프트 자체가 아니라 원문 입력이 잘려서
+// 불완전했을 가능성이 있다는 경고를 로그로 남겨야 원인 추적이 쉬워진다.
+func TestGenerateSectionTextWarnsWhenUngroundedNumberChangesBetweenAttempts(t *testing.T) {
+	resetGroqUsageForTest()
+	resetGroqCallGateForTest(8, 0)
+	t.Setenv("GROQ_API_KEY", "test-key")
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusOK)
+		if callCount == 1 {
+			w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"한 스타트업이 1억 달러 투자를 유치했습니다."}}]}`))
+		} else {
+			w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"한 스타트업이 10억 달러 투자를 유치했습니다."}}]}`))
+		}
+	}))
+	defer server.Close()
+	original := groqEndpoint
+	groqEndpoint = server.URL
+	defer func() { groqEndpoint = original }()
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	// allowedNumbers/groundingText를 모두 비워서, "$100…"으로 잘려 근거
+	// 자체가 완전히 사라진 실제 상황을 재현한다 — 두 시도 모두 근거 없는
+	// 숫자로 걸려야 이 테스트가 의도한 시나리오를 검증한다.
+	_, _, err := generateSectionText(context.Background(), "news:test", "model", newsSectionSystemPrompt, "user content", nil, "", "")
+	if err == nil {
+		t.Fatal("test setup invalid: expected generateSectionText to fail validation on both attempts")
+	}
+	if callCount != maxSectionRegenerations+1 {
+		t.Fatalf("test setup invalid: expected %d Groq calls (initial + escalation retry), got %d", maxSectionRegenerations+1, callCount)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "재시도마다 감지된 근거 없는 숫자가 다름") {
+		t.Errorf("expected a warning log about the ungrounded number changing between attempts, got logs:\n%s", logged)
+	}
+	if !strings.Contains(logged, "1e+08") || !strings.Contains(logged, "1e+09") {
+		t.Errorf("expected the warning to include both differing values (1e+08 -> 1e+09), got logs:\n%s", logged)
 	}
 }
 
@@ -842,6 +896,45 @@ func TestTruncateForPromptDoesNotDropAWordThatAlreadyFitsExactly(t *testing.T) {
 	}
 }
 
+// TestTruncateForPromptPreservesNumericUnitSpanningTheCutPoint는 실제
+// 보고된 새로운 재발 사례를 회귀 테스트로 고정한다: 위
+// TestTruncateForPromptDoesNotDropAWordThatAlreadyFitsExactly가 고친
+// 사례는 하드컷 지점이 "million" 바로 뒤(단어 전체가 이미 끝난 지점)였지만,
+// 이번 사례는 하드컷 지점이 "$100"과 " million" *사이의 공백*에 걸린다 —
+// 그 지점은 여전히 "이미 깔끔한 단어 경계"로 보이므로(다음 글자가 공백)
+// 기존 보정 로직은 아예 손대지 않고 그대로 "A firm announces $100…"를
+// 반환해, "million"이라는 단위 전체가 통째로 사라지는 사고로
+// 이어졌었다. extendCutToPreserveNumericToken이 이 경우를 잡아 cutIdx를
+// "million" 끝까지 늘려야 한다.
+func TestTruncateForPromptPreservesNumericUnitSpanningTheCutPoint(t *testing.T) {
+	title := "A firm announces $100 million in new funding for its expansion plans"
+	// limit(=maxRunes-1)이 정확히 "$100"과 " million" 사이의 공백에 오도록
+	// maxRunes를 골랐다 — 아래 assert가 이 전제 자체를 검증한다.
+	const maxRunes = 22
+	runes := []rune(title)
+	if runes[maxRunes-1] != ' ' {
+		t.Fatalf("test setup invalid: rune at index %d is not a space, this case does not exercise the reported scenario", maxRunes-1)
+	}
+
+	got := truncateForPrompt(title, maxRunes)
+
+	if !strings.Contains(got, "$100 million") {
+		t.Fatalf("expected the full numeric unit expression \"$100 million\" to be preserved even though it extends past maxRunes, got %q", got)
+	}
+	if strings.HasSuffix(got, "$100…") {
+		t.Fatal("regression: the unit word \"million\" was dropped, leaving a bare \"$100…\" that annotateNumericUnits cannot convert")
+	}
+
+	// 잘린 결과라도 annotateNumericUnits가 여전히 이 금액을 인식해
+	// 변환할 수 있어야 한다 — 이게 실제 버그의 핵심이었다: 단위가
+	// 사라지면 변환 자체가 조용히 실패해 모델이 단위 없는 숫자를 스스로
+	// 어림잡다 검증에 반복 실패했다.
+	annotated := annotateNumericUnits(got)
+	if !strings.Contains(annotated, "1억") {
+		t.Errorf("expected \"$100 million\" to convert to \"1억 달러\", got %q (from %q)", annotated, got)
+	}
+}
+
 // TestTruncateForPromptStillBacksUpOnAGenuineMidWordCut은 위 수정이 원래
 // 목적(TestTruncateForPromptCutsAtWordBoundary가 고정한, 실제로 단어
 // 중간에서 잘리는 경우)을 여전히 올바르게 처리하는지 확인한다 — 하드컷
@@ -875,6 +968,38 @@ func TestTruncateForPromptStillBacksUpOnAGenuineMidWordCut(t *testing.T) {
 // TestPickNewsItemToExclude는 8B/70B 모두 실패한 뉴스 생성 결과가 주어졌을
 // 때, generateNewsSectionText가 어떤 항목을 제외 대상으로 고르는지
 // 검증한다.
+// TestToBriefingNewsInputDoesNotTruncateRealisticTitles는 실제 보고된
+// 사고를 toBriefingNewsInput 수준(truncateForPrompt를 직접 부르는 것이
+// 아니라 실제 파이프라인 진입점)에서 재현한다: "...announces $100
+// million..." 형태의 제목이 title 상한(옛 80자)에 걸려 "$100…"으로
+// 잘려나가면서 단위(million)가 소실됐다 — title은 description과 달리
+// "정상적으로 자주 잘리는" 필드가 아니어야 하므로(briefingNewsTitleMaxRunes
+// 문서 참고), 실측 최장 헤드라인 수준의 제목까지는 전혀 잘리지 않아야
+// 한다.
+func TestToBriefingNewsInputDoesNotTruncateRealisticTitles(t *testing.T) {
+	// 실제 관측된 장황한 헤드라인(약 118자)과, 버그가 보고된 통화+단위
+	// 헤드라인 둘 다 검증한다.
+	longRealisticTitle := "Ontario woman who went missing from Shambhala Music Festival in B.C. posts thank you video to rescuers, shares details"
+	moneyTitle := "Startup announces $100 million in new funding to accelerate international expansion plans"
+
+	news := &NewsData{Items: []NewsItem{
+		{ID: "1", Title: longRealisticTitle},
+		{ID: "2", Title: moneyTitle},
+	}}
+
+	input := toBriefingNewsInput(news)
+
+	if strings.HasSuffix(input.Items[0].Title, "…") {
+		t.Errorf("expected a realistic-length real-world headline (%d runes) not to be truncated, got %q", len([]rune(longRealisticTitle)), input.Items[0].Title)
+	}
+	if !strings.Contains(input.Items[1].Title, "1억") {
+		t.Errorf("expected \"$100 million\" to survive intact and convert to \"1억 달러\", got %q", input.Items[1].Title)
+	}
+	if strings.Contains(input.Items[1].Title, "$100…") || strings.Contains(input.Items[1].Title, "$100 …") {
+		t.Errorf("regression: the unit word was dropped mid-title, got %q", input.Items[1].Title)
+	}
+}
+
 func TestPickNewsItemToExclude(t *testing.T) {
 	items := []briefingNewsItem{
 		{ID: "1", Title: "한 스타트업이 5000만 달러 투자를 유치했다", Description: ""},
@@ -1368,13 +1493,17 @@ func TestExchangeBriefingPromptFitsWithinTokenBudget(t *testing.T) {
 // 하나 더 추가했을 때 예산을 넘었는지"를 사람이 매번 로그를 보고 계산하지
 // 않고도 CI/로컬 테스트에서 바로 잡아내기 위한 것이다. 의학/과학/법률
 // 전문 용어의 한자 혼입을 막는 규칙(newsSectionSystemPrompt 5번, "belly
-// size" → "배圍" 실제 사례)을 추가하며 1500에서 1650으로 올렸다 — 이미
-// 최대한 압축한 문구인데도 이 값을 넘어섰고, 늘어난 뒤에도(실측 약
-// 1,573) 6,000 TPM 한도까지는 여전히 큰 여유가 있다. 새 규칙이 실제
-// 실패를 막는 데 필요한 만큼, 이 상수도 그 필요를 반영해 함께 올리는
-// 것이 맞다고 판단했다 — 다만 다음에 규칙을 추가할 때는 이 값을 또
-// 올리기보다, 정말 프롬프트 문구가 필요한지부터 검토해야 한다.
-const briefingNewsPromptTokenBudget = 1650
+// size" → "배圍" 실제 사례)을 추가하며 1500에서 1650으로 올렸다.
+//
+// 그 뒤 실제 헤드라인 title이 "$100 million"의 " million" 부분만 잘려
+// "$100…"으로 남는 사고(briefingNewsTitleMaxRunes 문서 참고)가 보고되어
+// title 상한을 80에서 120으로 올리고(이 테스트의 인위적 최악 시나리오
+// 기준 실측 1,793토큰), 원문이 말줄임표로 끝나 불완전할 때 숫자를
+// 추측하지 말라는 규칙 6번을 newsSectionSystemPrompt에 추가하며(실측
+// 1,902토큰) 1650에서 1950으로 함께 올렸다. 늘어난 뒤에도 6,000 TPM
+// 한도까지는 여전히 4,000토큰 이상의 여유가 있다. 다음에 규칙이나 상한을
+// 추가할 때는 이 값을 또 올리기보다, 정말 필요한지부터 검토해야 한다.
+const briefingNewsPromptTokenBudget = 1950
 
 // TestNewsBriefingPromptFitsWithinTokenBudget은 뉴스 브리핑 프롬프트가
 // briefingNewsPromptTokenBudget을 넘지 않는지 검증한다. 헤드라인 3개
@@ -1483,5 +1612,23 @@ func TestNewsSectionSystemPromptCoversTechnicalTermHanjaMixing(t *testing.T) {
 func TestNewsSectionSystemPromptForbidsRedecomposingConvertedAmounts(t *testing.T) {
 	if !strings.Contains(newsSectionSystemPrompt, "쪼개") {
 		t.Error("expected newsSectionSystemPrompt to explicitly forbid re-decomposing an already-converted 억/만 amount")
+	}
+}
+
+// TestNewsSectionSystemPromptForbidsGuessingIncompleteTruncatedInput은
+// 새로 추가된 규칙 6번을 회귀 테스트로 고정한다: title/description이
+// 말줄임표(…)로 끝나 불완전할 때, 모델이 그 안의 숫자·세부 정보를
+// 추측해서 채우면 안 된다는 지침이 프롬프트에 명시적으로 있어야 한다 —
+// truncateForPrompt의 extendCutToPreserveNumericToken이 숫자 표현
+// 자체는 최대한 보존하더라도, description처럼 원래도 잘리는 것을
+// 전제로 하는 필드는 여전히 문장 중간에서 끊길 수 있으므로, 검증기
+// (findUngroundedNumber)만으로는 못 막는 다른 종류의 추측(숫자가 아닌
+// 세부 사실)까지 이 지침이 예방한다.
+func TestNewsSectionSystemPromptForbidsGuessingIncompleteTruncatedInput(t *testing.T) {
+	if !strings.Contains(newsSectionSystemPrompt, "말줄임표") {
+		t.Fatal("expected newsSectionSystemPrompt to mention the ellipsis marker used by truncateForPrompt")
+	}
+	if !strings.Contains(newsSectionSystemPrompt, "추측") {
+		t.Error("expected newsSectionSystemPrompt to explicitly forbid guessing at incomplete/truncated details")
 	}
 }

@@ -296,6 +296,33 @@ BMI at predicting heart attacks" 헤드라인을 다루다가 "배圍"(한글 "�
   `findUngroundedNumber`가 쓰는 `extractEnglishUnitNumbers`(사후 검증, 이중 방어선)가 이 함수
   하나를 함께 참조하므로, 두 곳의 판단이 어긋나 정상 변환을 오탐하는 문제가 재발하기 어렵습니다.
   물론 "2500억"처럼 잘못 계산된 값이나 원문과 무관한 금액은 여전히 걸러집니다.
+  이 사가에는 한 화가 더 있습니다: 위 "$540.2 million" 사례는 하드컷 지점이 이미 "million" 바로
+  뒤(단어 전체가 끝난 지점)였던 경우였는데, 실제로는 하드컷 지점이 숫자와 단위 사이의 *공백*에
+  걸리는 경우도 있었습니다 — 예: "...announces $100 million..."이
+  `briefingNewsTitleMaxRunes`에서 "$100"과 " million" 사이 공백에서 잘리면, 그 지점은 여전히
+  "이미 완전한 단어 경계"로 보여 위 수정된 로직도 손대지 않고 그대로 "$100…"만 남겨 "million"
+  전체가 사라졌습니다. 게다가 이때는 title 자체가 잘린 것이었는데(옛 `briefingNewsTitleMaxRunes`
+  80은 description과 똑같았습니다), 모델이 재시도(8B → 70B 승격)마다 서로 다른 크기로 추측해
+  "1억"과 "10억" 사이를 오가며 두 시도 모두 검증에 실패했습니다. `extendCutToPreserveNumericToken`
+  (`news_number_annotate.go`)이 이 경우를 구조적으로 막습니다 — 하드컷 지점이
+  `numericUnitPattern`(단위 축약형이 있는 숫자) 또는 `bareCurrencyAmountPattern`(단위 없이 통화
+  기호만 있는 금액, 예: "$1,204,000") 중 하나의 매치 중간을 가로지르면, 그 표현 전체가 포함되도록
+  잘리는 위치를 매치 끝까지 뒤로 늘립니다 — 완전히 안 자르는 것보다 숫자 표현 하나만큼만 더
+  자르는 편이 토큰 비용 대비 효율적입니다. 별개로 title 상한도 description(80자)과 똑같이
+  취급되던 것을 120으로 올렸습니다 — title은 description과 달리 정보 일부 소실을 감수하는
+  설계가 아니라 그 자체로 기사 핵심 사실을 담고 있어서, 실측 최장 헤드라인(약 118자) 수준까지는
+  사실상 전혀 잘리지 않아야 합니다(240처럼 더 크게 잡으면
+  `TestNewsBriefingPromptFitsWithinTokenBudget`의 최악 시나리오 기준 예산 여유가 지나치게
+  줄어듭니다 — 그래서 이 테스트가 쓰는 토큰 예산도 1650→1950으로 함께 올렸습니다). 그래도
+  description은 여전히 80자에서 잘릴 수 있으므로(문장이 통째로 잘려 세부 정보가 소실되는 것
+  자체는 막을 수 없습니다), `newsSectionSystemPrompt`에 "title/description이 말줄임표(…)로
+  끝나 불완전하면 그 안의 숫자·세부 정보를 추측해서 채우지 말라"는 규칙을 추가해, 검증기가 못
+  잡는 유형(모델이 우연히 그럴듯한 값을 만들어 `findUngroundedNumber`를 통과해버리는 경우)까지
+  생성 단계에서부터 예방합니다. 마지막으로, "재시도마다 검증 실패 사유는 같은데 감지된 숫자
+  자체가 다름"이라는 패턴(`extractUngroundedNumberFromReason`으로 `generateSectionText`의 재시도
+  루프 안에서 비교)이 나타나면 "검증기나 프롬프트 문제가 아니라 원문 입력 자체가 잘려서
+  불완전할 가능성이 있다"는 경고를 로그에 남겨, 다음에 비슷한 사고가 나면 두 번째 원인(잘못된
+  검증 로직)부터 의심하며 헤매지 않고 원문 truncate 지점부터 바로 확인할 수 있게 했습니다.
   `findUngroundedProperNoun`은 두 종류의 실패를 구분합니다: `newsContractCounterpartyPattern`이
   잡아내는 "계약 상대방 날조"(예: 두산에너빌리티가 실제로는 존재하지 않는 "노블리스 오일 앤
   가스"와 계약했다고 지어낸 사례)는 절대 완화되지 않고 항상 hard failure로 남습니다. 반면 그 외의
