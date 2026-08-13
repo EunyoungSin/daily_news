@@ -537,11 +537,21 @@ CREATE TABLE IF NOT EXISTS raw_data_cache (
 // map이었지만(재시작되면 사라져도 몇 시간 안에 헤드라인 자체가 바뀌니
 // 큰 문제는 아니었다), 다른 캐시들과 마찬가지로 DB에 옮겨두면 서버가
 // 재시작돼도 같은 기사에 대해 다시 Groq를 호출하지 않는다.
+//
+// translated_title이 빈 문자열인 행은 번역 실패 기록이다(성공한 번역은
+// 항상 비어있지 않은 문자열이므로) — failure_reason(rate_limit/
+// validation_failed/api_error)과 retry_after(그 사유별 쿨다운이 끝나는
+// 시각, RFC3339)가 함께 채워진다. rate_limit은 다음 요청 시점엔 Groq
+// TPM 예산이 풀려있을 가능성이 높아 훨씬 짧은 쿨다운을, 나머지는 같은
+// 콘텐츠를 당장 재시도해도 비슷한 결과가 나올 가능성이 있어 더 긴
+// 쿨다운을 쓴다(news_translation.go의 newsTranslationCooldownForReason).
 const createNewsTranslationCacheTable = `
 CREATE TABLE IF NOT EXISTS news_translation_cache (
 	article_id TEXT PRIMARY KEY,
 	translated_title TEXT NOT NULL,
-	cached_at TEXT DEFAULT CURRENT_TIMESTAMP
+	cached_at TEXT DEFAULT CURRENT_TIMESTAMP,
+	failure_reason TEXT NOT NULL DEFAULT '',
+	retry_after TEXT
 )`
 
 // deleteOldNewsTranslationCache는 weather_slot_cache와 같은 이유로 시작
@@ -554,16 +564,20 @@ const deleteOldNewsTranslationCache = `
 DELETE FROM news_translation_cache WHERE cached_at < datetime('now', '-30 days')`
 
 // deleteEmptyNewsTranslationCache는 일회성 정리 쿼리다. news_translation.go가
-// 예전에는 검증 실패(CJK/영어 혼입) 항목을 빈 문자열("")로 캐시에 그대로
-// 저장했는데, 그러면 이후 lookupNewsTranslation이 "행이 존재하니 캐시
+// 한때(failure_reason/retry_after 컬럼이 생기기 전) 검증 실패(CJK/영어
+// 혼입) 항목을 사유 정보 없이 빈 문자열("")로만 캐시에 저장한 적이
+// 있었는데, 그러면 이후 lookupNewsTranslation이 "행이 존재하니 캐시
 // 성공"으로 잘못 판단해서 해당 기사가 노출되는 동안 계속 "번역 실패"(원문
-// 표시)로 고정되는 문제가 있었다. translateNewsItems가 이제는 빈 결과를
-// 캐시에 쓰지 않도록 고쳐졌으니, 이 마이그레이션이 배포되는 순간 이미
-// 박혀 있던 빈 문자열 행들을 지워서 다음 요청부터 새 쿨다운 로직으로
-// 재시도되게 한다. CREATE TABLE IF NOT EXISTS처럼 매 시작마다 실행해도
-// 안전하다 — 지울 빈 문자열 행이 없으면 그냥 0행 삭제로 끝난다.
+// 표시)로 고정되는 문제가 있었다. 지금은 실패 기록도 의도적으로 빈
+// translated_title로 저장하지만(recordNewsTranslationFailure 참고)
+// failure_reason이 항상 함께 채워지므로, failure_reason이 비어있는
+// 행만 그 시절의 레거시 깨진 행으로 보고 지운다 — 조건에
+// failure_reason = ”을 추가하지 않으면 이 정리가 매 시작마다 방금 막
+// 기록된 정상적인 쿨다운 상태까지 지워버리게 된다. CREATE TABLE IF NOT
+// EXISTS처럼 매 시작마다 실행해도 안전하다 — 지울 레거시 행이 없으면
+// 그냥 0행 삭제로 끝난다.
 const deleteEmptyNewsTranslationCache = `
-DELETE FROM news_translation_cache WHERE translated_title = ''`
+DELETE FROM news_translation_cache WHERE translated_title = '' AND failure_reason = ''`
 
 // migrate는 로또/브리핑/캐시 관련 테이블이 없으면 생성한다. 매 시작마다
 // 실행해도 안전하다(CREATE TABLE IF NOT EXISTS). MySQL 시절에 있던
@@ -641,6 +655,12 @@ func migrate(conn *sql.DB) error {
 	}
 	if _, err := conn.Exec(createNewsTranslationCacheTable); err != nil {
 		return fmt.Errorf("create news_translation_cache: %w", err)
+	}
+	if err := ensureColumnExists(conn, "news_translation_cache", "failure_reason", "failure_reason TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrate news_translation_cache: %w", err)
+	}
+	if err := ensureColumnExists(conn, "news_translation_cache", "retry_after", "retry_after TEXT"); err != nil {
+		return fmt.Errorf("migrate news_translation_cache: %w", err)
 	}
 	if _, err := conn.Exec(deleteOldNewsTranslationCache); err != nil {
 		return fmt.Errorf("clean up old news_translation_cache rows: %w", err)

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"sync"
+	"strings"
 	"time"
 )
 
@@ -55,13 +55,20 @@ const newsTranslationSystemPrompt = `당신은 다양한 분야(정치, 경제, 
 // 이미 만료돼 있어 저장 자체가 실패할 수 있다.
 const newsTranslationUpsertTimeout = 5 * time.Second
 
+// lookupNewsTranslation은 성공적으로 캐시된 번역만 반환한다 — 실패 기록
+// (translated_title이 빈 문자열인 행, recordNewsTranslationFailure 참고)은
+// 일부러 조건에서 제외해 found=false로 취급한다. "캐시된 성공"과
+// "쿨다운 중인 실패"를 서로 다른 함수(이 함수 vs
+// recentlyFailedNewsTranslation)로 분리해두면, 예전에 있었던 버그(빈
+// 문자열 행을 캐시 성공으로 잘못 판단해 원문 표시가 영구 고정되던 문제)가
+// 같은 형태로 재발할 여지가 없다.
 func lookupNewsTranslation(ctx context.Context, conn *sql.DB, articleID string) (string, bool) {
 	if conn == nil {
 		return "", false
 	}
 	var title string
 	err := conn.QueryRowContext(ctx,
-		`SELECT translated_title FROM news_translation_cache WHERE article_id = ?`, articleID,
+		`SELECT translated_title FROM news_translation_cache WHERE article_id = ? AND translated_title != ''`, articleID,
 	).Scan(&title)
 	if err != nil {
 		return "", false
@@ -69,48 +76,115 @@ func lookupNewsTranslation(ctx context.Context, conn *sql.DB, articleID string) 
 	return title, true
 }
 
-// newsTranslationFailureCooldown은 번역이 실패(API 오류 또는 검증 실패로
-// 빈 문자열이 된 경우)한 기사를 다시 시도하기까지 기다리는 최소 간격이다.
-// 실패는 news_translation_cache(DB)에 저장하지 않는다 — 실패 상태를
-// DB에 영구히 남기면 그 기사가 노출되는 동안 계속 "번역 실패"로
-// 고정되기 때문이다. 대신 실패 시각만 프로세스 메모리에 짧게 기록해서,
-// 같은 기사가 쿨다운 안에 다시 요청되면 Groq를 또 호출하지 않고 즉시
-// 원문 표시로 폴백하고, 쿨다운이 지나면 자동으로 재시도한다. 서버가
-// 재시작되면 이 기록도 사라지는데, 그러면 재시도가 더 빨라질 뿐이라
-// 안전하다(DB 캐시처럼 "성공했던 번역을 잃어버리는" 문제가 아니다).
-const newsTranslationFailureCooldown = 5 * time.Minute
-
-var (
-	newsTranslationFailuresMu sync.Mutex
-	newsTranslationFailures   = map[string]time.Time{}
+// 번역 실패 사유 분류. rate_limit과 그 외(validation_failed/api_error)는
+// 서로 다른 쿨다운(newsTranslationCooldownForReason)을 받는다 — rate
+// limit은 Groq TPM(분당 토큰) 예산이 그 다음 분(minute) 버킷이면 대개
+// 풀려있으니 짧게, 그 외(한자/영어 혼입 같은 콘텐츠 검증 실패나 일반
+// API 오류)는 같은 입력을 당장 재시도해도 비슷한 결과가 나올 가능성이
+// 있으니 기존처럼 길게 기다린다.
+const (
+	newsTranslationFailureReasonRateLimit        = "rate_limit"
+	newsTranslationFailureReasonValidationFailed = "validation_failed"
+	newsTranslationFailureReasonAPIError         = "api_error"
 )
 
-func recentlyFailedTranslation(articleID string) bool {
-	newsTranslationFailuresMu.Lock()
-	defer newsTranslationFailuresMu.Unlock()
-	failedAt, ok := newsTranslationFailures[articleID]
-	if !ok {
+// newsTranslationRateLimitCooldown/newsTranslationDefaultFailureCooldown은
+// newsTranslationCooldownForReason이 사유별로 고르는 쿨다운 길이다.
+// rate_limit만 30초~1분 사이의 짧은 값으로 두고, validation_failed/
+// api_error는 예전에 모든 실패에 일괄 적용하던 5분을 그대로 유지한다.
+const (
+	newsTranslationRateLimitCooldown      = 45 * time.Second
+	newsTranslationDefaultFailureCooldown = 5 * time.Minute
+)
+
+// newsTranslationCooldownForReason은 실패 사유에 맞는 쿨다운 길이를
+// 고른다 — rate_limit만 특별 취급하고 나머지(validation_failed,
+// api_error, 혹은 알 수 없는 값)는 모두 기존 기본값을 쓴다.
+func newsTranslationCooldownForReason(reason string) time.Duration {
+	if reason == newsTranslationFailureReasonRateLimit {
+		return newsTranslationRateLimitCooldown
+	}
+	return newsTranslationDefaultFailureCooldown
+}
+
+// classifyNewsTranslationFailureReason은 fetchNewsTranslation이 배치
+// 전체에 대해 반환한 에러를 분류한다 — briefing.go의
+// classifyBriefingFailureReason과 같은 방식(에러 메시지에 "rate
+// limit"/"tokens per minute"/"(tpm)"가 있으면 rate_limit)이다.
+// validation_failed는 여기서 나오지 않는다 — 그건 에러가 아니라 성공
+// 응답인데 검증(findForeignCJK/findLeakedEnglish)에 실패해 특정 항목의
+// translatedTitle만 빈 문자열이 된 경우라서, 그 판단은 이 함수가 아니라
+// translateNewsItems가 fetchNewsTranslation의 반환값을 보고 직접 한다.
+func classifyNewsTranslationFailureReason(err error) string {
+	if err == nil {
+		return newsTranslationFailureReasonAPIError
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "rate limit") || strings.Contains(msg, "tokens per minute") || strings.Contains(msg, "(tpm)") {
+		return newsTranslationFailureReasonRateLimit
+	}
+	return newsTranslationFailureReasonAPIError
+}
+
+// recentlyFailedNewsTranslation은 article_id에 대해 아직 유효한(retry_after가
+// 지나지 않은) 실패 기록이 news_translation_cache에 있는지 확인한다.
+// 실패 사유별로 다른 쿨다운이 이미 recordNewsTranslationFailure가 저장한
+// retry_after에 반영되어 있으므로, 여기서는 그 시각이 지났는지만 보면
+// 된다. translated_title != ”인 행(성공 캐시)은 애초에 이 조건에
+// 걸리지 않는다 — lookupNewsTranslation이 그 경우를 먼저 처리한다.
+func recentlyFailedNewsTranslation(ctx context.Context, conn *sql.DB, articleID string) bool {
+	if conn == nil {
 		return false
 	}
-	if time.Since(failedAt) >= newsTranslationFailureCooldown {
-		delete(newsTranslationFailures, articleID)
+	var retryAfterStr sql.NullString
+	err := conn.QueryRowContext(ctx,
+		`SELECT retry_after FROM news_translation_cache WHERE article_id = ? AND translated_title = ''`, articleID,
+	).Scan(&retryAfterStr)
+	if err != nil || !retryAfterStr.Valid || retryAfterStr.String == "" {
 		return false
 	}
-	return true
+	retryAfter, parseErr := time.Parse(time.RFC3339, retryAfterStr.String)
+	if parseErr != nil {
+		return false
+	}
+	return time.Now().Before(retryAfter)
 }
 
-func recordTranslationFailure(articleID string) {
-	newsTranslationFailuresMu.Lock()
-	defer newsTranslationFailuresMu.Unlock()
-	newsTranslationFailures[articleID] = time.Now()
+// recordNewsTranslationFailure는 번역 실패를 사유(reason)와 함께
+// news_translation_cache에 기록한다. translated_title은 일부러 빈
+// 문자열로 남긴다 — lookupNewsTranslation이 빈 문자열 행을 "캐시된
+// 성공 없음"으로 취급해 원문 표시로 폴백하게 하기 위해서다.
+// retry_after는 reason별 쿨다운만큼 뒤로 설정되어, 다음 조회 시점에
+// recentlyFailedNewsTranslation이 그 시각이 지났는지만 보고 사유별로
+// 다른 속도로 재시도를 허용한다.
+func recordNewsTranslationFailure(conn *sql.DB, articleID, reason string) {
+	if conn == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), newsTranslationUpsertTimeout)
+	defer cancel()
+	now := time.Now()
+	retryAfter := now.Add(newsTranslationCooldownForReason(reason)).Format(time.RFC3339)
+	_, err := conn.ExecContext(ctx, `
+		INSERT INTO news_translation_cache (article_id, translated_title, cached_at, failure_reason, retry_after)
+		VALUES (?, '', ?, ?, ?)
+		ON CONFLICT(article_id) DO UPDATE SET
+			translated_title = '', cached_at = excluded.cached_at,
+			failure_reason = excluded.failure_reason, retry_after = excluded.retry_after`,
+		articleID, now, reason, retryAfter,
+	)
+	if err != nil {
+		log.Printf("뉴스 번역(%s): 실패 기록 저장 실패: %v", articleID, err)
+	}
 }
 
-func clearTranslationFailure(articleID string) {
-	newsTranslationFailuresMu.Lock()
-	defer newsTranslationFailuresMu.Unlock()
-	delete(newsTranslationFailures, articleID)
-}
-
+// upsertNewsTranslation은 성공한 번역을 캐시하면서, 혹시 이전에 남아있던
+// 실패 기록(failure_reason/retry_after)도 함께 지운다 — 같은 기사가
+// 재시도 끝에 성공했는데 예전 실패 사유가 그대로 남아있으면, 이미
+// 성공했음에도 다음 조회 때 recentlyFailedNewsTranslation이 혼란을 줄
+// 여지가 있기 때문이다(실제로는 translated_title이 채워지는 순간
+// lookupNewsTranslation이 먼저 성공으로 처리하므로 안전하지만, 두 컬럼을
+// 항상 일관된 상태로 유지해두는 편이 이해하기 쉽다).
 func upsertNewsTranslation(conn *sql.DB, articleID, translatedTitle string) {
 	if conn == nil {
 		return
@@ -118,9 +192,11 @@ func upsertNewsTranslation(conn *sql.DB, articleID, translatedTitle string) {
 	ctx, cancel := context.WithTimeout(context.Background(), newsTranslationUpsertTimeout)
 	defer cancel()
 	_, err := conn.ExecContext(ctx, `
-		INSERT INTO news_translation_cache (article_id, translated_title, cached_at)
-		VALUES (?, ?, ?)
-		ON CONFLICT(article_id) DO UPDATE SET translated_title = excluded.translated_title, cached_at = excluded.cached_at`,
+		INSERT INTO news_translation_cache (article_id, translated_title, cached_at, failure_reason, retry_after)
+		VALUES (?, ?, ?, '', NULL)
+		ON CONFLICT(article_id) DO UPDATE SET
+			translated_title = excluded.translated_title, cached_at = excluded.cached_at,
+			failure_reason = '', retry_after = NULL`,
 		articleID, translatedTitle, time.Now(),
 	)
 	if err != nil {
@@ -157,7 +233,7 @@ func translateNewsItems(ctx context.Context, items []NewsItem) {
 		if cached, ok := lookupNewsTranslation(ctx, db, items[i].ID); ok {
 			items[i].TranslatedTitle = cached
 			cacheHits++
-		} else if recentlyFailedTranslation(items[i].ID) {
+		} else if recentlyFailedNewsTranslation(ctx, db, items[i].ID) {
 			cooldownSkips++
 		} else {
 			toTranslate = append(toTranslate, items[i])
@@ -171,7 +247,7 @@ func translateNewsItems(ctx context.Context, items []NewsItem) {
 		log.Printf("[캐시 재사용] 뉴스 번역: %d개 항목 캐시 재사용, %d개 신규 번역 필요", cacheHits, len(toTranslate))
 	}
 	if cooldownSkips > 0 {
-		log.Printf("뉴스 번역: 최근 실패한 %d개 항목은 재시도 쿨다운(%s) 중이라 원문 표시로 폴백", cooldownSkips, newsTranslationFailureCooldown)
+		log.Printf("뉴스 번역: 최근 실패한 %d개 항목은 사유별 재시도 쿨다운 중이라 원문 표시로 폴백", cooldownSkips)
 	}
 
 	if len(toTranslate) == 0 {
@@ -180,9 +256,10 @@ func translateNewsItems(ctx context.Context, items []NewsItem) {
 
 	translated, err := fetchNewsTranslation(ctx, toTranslate)
 	if err != nil {
-		log.Printf("뉴스: 번역 실패: %v", err)
+		reason := classifyNewsTranslationFailureReason(err)
+		log.Printf("뉴스: 번역 실패(사유=%s, 쿨다운=%s): %v", reason, newsTranslationCooldownForReason(reason), err)
 		for _, it := range toTranslate {
-			recordTranslationFailure(it.ID)
+			recordNewsTranslationFailure(db, it.ID, reason)
 		}
 		return
 	}
@@ -192,17 +269,16 @@ func translateNewsItems(ctx context.Context, items []NewsItem) {
 		byID[t.ID] = t.TranslatedTitle
 	}
 
-	// 성공(비어 있지 않은 번역)만 DB 캐시에 저장한다 — 검증 실패로 빈
-	// 문자열이 된 항목이나 모델 응답에서 통째로 빠진 항목은 실패
-	// 쿨다운만 기록하고 DB에는 남기지 않아서, 쿨다운이 지나면 다음
+	// 성공(비어 있지 않은 번역)만 진짜 번역으로 캐시하고, 검증 실패로 빈
+	// 문자열이 된 항목이나 모델 응답에서 통째로 빠진 항목은
+	// validation_failed 사유로 쿨다운을 기록한다 — 쿨다운이 지나면 다음
 	// 요청에서 다시 번역을 시도할 수 있다.
 	for _, it := range toTranslate {
 		title, ok := byID[it.ID]
 		if !ok || title == "" {
-			recordTranslationFailure(it.ID)
+			recordNewsTranslationFailure(db, it.ID, newsTranslationFailureReasonValidationFailed)
 			continue
 		}
-		clearTranslationFailure(it.ID)
 		upsertNewsTranslation(db, it.ID, title)
 	}
 

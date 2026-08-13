@@ -424,12 +424,34 @@ CREATE TABLE raw_data_cache (
 
 뉴스 헤드라인 번역(해외 모드)도 같은 방식으로 `news_translation_cache` 테이블에
 `article_id` 기준으로 캐싱되어, 서버가 재시작돼도 같은 기사를 다시 Groq로 번역하지
-않습니다. 단, 성공한(빈 문자열이 아닌) 번역만 이 테이블에 저장됩니다 — 검증 실패나
-API 오류로 번역이 비어버린 경우까지 캐싱하면, 그 기사가 노출되는 동안 "번역 실패,
-원문 표시" 상태가 영구히 고정되기 때문입니다. 실패는 대신 프로세스 메모리에 실패
-시각만 5분간 기록해(`newsTranslationFailures`, `news_translation.go`) 같은 기사를
-너무 자주 재시도하며 Groq 사용량을 낭비하지 않게 하고, 5분이 지나면 자동으로 다시
-번역을 시도합니다.
+않습니다. 성공한(빈 문자열이 아닌) 번역은 그대로 `translated_title`에 저장되고,
+`failure_reason`/`retry_after`는 비워둡니다(`''`/`NULL`).
+
+번역이 실패하면 `translated_title`은 일부러 빈 문자열로 남겨서(프론트엔드가 원문
+표시로 폴백하게 하기 위해) 실패 사유(`failure_reason`)와 재시도 가능 시각
+(`retry_after`)을 함께 저장합니다(`news_translation.go`의
+`recordNewsTranslationFailure`) — 실패 사유에 따라 재시도 속도를 다르게 가져가기
+위해서입니다.
+
+- `rate_limit`(Groq TPM 한도 초과로 배치 전체가 실패): 쿨다운 45초.
+  Groq의 분당 토큰 예산은 그 다음 분(minute) 버킷이면 대개 다시 열리므로, 짧게
+  기다렸다가 빠르게 재시도하는 편이 유리합니다.
+- `validation_failed`(한자/영어 혼입 등 검증 실패로 개별 항목만 비워진 경우)와
+  `api_error`(그 외 일반 API 오류)는 기존처럼 쿨다운 5분을 유지합니다 — 같은
+  콘텐츠를 당장 재시도해도 모델이 비슷한 결과를 낼 가능성이 있기 때문입니다.
+
+실패 사유는 `classifyNewsTranslationFailureReason`이 에러 메시지에 "rate
+limit"/"tokens per minute"/"(tpm)"가 있는지로 판별하고(`briefing.go`의
+`classifyBriefingFailureReason`과 같은 방식), 검증 실패(`validation_failed`)는
+에러가 아니라 성공 응답 안에서 개별 항목의 `translatedTitle`만 비어있는 경우라서
+`translateNewsItems`가 직접 분류합니다. 재시도 여부는 `recentlyFailedNewsTranslation`
+이 `retry_after`가 지났는지만 확인하면 되므로, DB에 실패를 영구히 남겨도 안전합니다
+— 예전에는 실패를 DB에 전혀 남기지 않고(빈 문자열 행이 "캐시 성공"으로 오인되는
+버그가 있었기 때문) 프로세스 메모리에만 5분간 기록했는데, 그러면 모든 실패 사유가
+구분 없이 똑같은 5분을 기다려야 했습니다. `retry_after`라는 만료 시각 자체를
+저장값에 포함시켜두면 "빈 문자열 행 = 캐시 성공"으로 오인하는 예전 버그와 같은
+문제 없이도 DB에 영구히 남길 수 있습니다(`lookupNewsTranslation`이 빈 문자열 행을
+캐시 히트로 취급하지 않도록 조건을 명시했습니다).
 
 ## 날씨 예보 슬롯 캐시 (지난 시각도 예보값으로 복구)
 
@@ -987,10 +1009,14 @@ AI 브리핑 카드만 스켈레톤 상태로 대기시킵니다.
   헤드라인 5개를 한 번의 JSON 모드 호출로 배치 번역하며, 성공한 번역 결과만 기사 id
   기준으로 별도 캐싱되어 같은 기사가 남아있는 동안 재번역하지 않습니다
   (`news_translation_cache`). 검증 실패(CJK/영어 혼입)나 API 오류로 번역이 비어버린
-  경우는 이 테이블에 캐싱하지 않고, 실패 시각만 메모리에 5분간 기록해뒀다가
-  (`recentlyFailedTranslation`) 그 안에 재요청되면 즉시 원문 표시로 폴백하고 5분 뒤
-  자동으로 재시도합니다 — 그렇지 않으면 한 번 실패한 기사가 노출되는 내내 "번역
-  실패"로 굳어버립니다.
+  경우는 실패 사유(`rate_limit`/`validation_failed`/`api_error`)와 재시도 가능
+  시각을 이 테이블에 함께 기록해뒀다가(`recentlyFailedNewsTranslation`) 그 안에
+  재요청되면 즉시 원문 표시로 폴백하고 쿨다운이 지나면 자동으로 재시도합니다 —
+  그렇지 않으면 한 번 실패한 기사가 노출되는 내내 "번역 실패"로 굳어버립니다.
+  `rate_limit`만 45초로 훨씬 짧은 쿨다운을 쓰고 나머지는 5분을 유지합니다(위
+  "원본 데이터 캐시" 단락 참고) — rate limit은 Groq TPM 예산이 다음 분(minute)
+  버킷이면 대개 풀려있어 빠르게 재시도하는 편이 유리한 반면, 검증 실패는 같은
+  콘텐츠를 당장 재시도해도 비슷한 결과가 나올 가능성이 있기 때문입니다.
   캐시가 막 만료된 직후 두 요청(브리핑 내부 조회 + 뉴스 카드)이 거의 동시에 도착하면
   각자 "캐시 없음"을 보고 NewsData.io를 중복 호출하는 순간(cache stampede)이 있었는데,
   `coalesceNewsFetch`가 같은 category+region 조합의 동시 호출을 하나로 합쳐서(뒤에 온
