@@ -269,6 +269,48 @@ func TestTranslateNewsItemsValidationFailureKeepsLongCooldown(t *testing.T) {
 	}
 }
 
+// TestAnnotateNewsTranslationFailureReasons는 응답 직전 주석 단계
+// (news_handler.go가 호출하는 annotateNewsTranslationFailureReasons)가
+// 번역이 비어있는 항목에만, 그리고 실제로 실패 기록이 있는 항목에만
+// TranslationFailureReason을 채우는지 확인한다 — 프론트엔드가 이 값으로
+// 사유별 콘솔 로그를 남기므로, 성공한 항목이나 애초에 시도된 적 없는
+// 항목까지 잘못 채워지면 로그가 오해를 부른다.
+func TestAnnotateNewsTranslationFailureReasons(t *testing.T) {
+	conn := openTempBriefingTestDB(t)
+	ctx := context.Background()
+
+	recordNewsTranslationFailure(conn, "rate-limited-id", newsTranslationFailureReasonRateLimit)
+	upsertNewsTranslation(conn, "succeeded-id", "번역된 제목")
+
+	items := []NewsItem{
+		{ID: "rate-limited-id", Title: "Original headline"},
+		{ID: "succeeded-id", Title: "Another headline", TranslatedTitle: "번역된 제목"},
+		{ID: "never-attempted-id", Title: "Untouched headline"},
+	}
+
+	annotateNewsTranslationFailureReasons(ctx, conn, items)
+
+	if items[0].TranslationFailureReason != newsTranslationFailureReasonRateLimit {
+		t.Errorf("items[0].TranslationFailureReason = %q, want %q", items[0].TranslationFailureReason, newsTranslationFailureReasonRateLimit)
+	}
+	if items[1].TranslationFailureReason != "" {
+		t.Errorf("items[1](성공한 항목).TranslationFailureReason = %q, want empty", items[1].TranslationFailureReason)
+	}
+	if items[2].TranslationFailureReason != "" {
+		t.Errorf("items[2](시도된 적 없는 항목).TranslationFailureReason = %q, want empty", items[2].TranslationFailureReason)
+	}
+}
+
+// TestAnnotateNewsTranslationFailureReasonsNilDB는 nil DB에서 패닉하지
+// 않는지 확인한다(다른 nil-DB 안전성 테스트들과 같은 이유).
+func TestAnnotateNewsTranslationFailureReasonsNilDB(t *testing.T) {
+	items := []NewsItem{{ID: "abc", Title: "headline"}}
+	annotateNewsTranslationFailureReasons(context.Background(), nil, items)
+	if items[0].TranslationFailureReason != "" {
+		t.Error("expected TranslationFailureReason to remain empty when db is nil")
+	}
+}
+
 // TestNewsTranslationSystemPromptCoversTechnicalTermHanjaMixing은
 // briefing.go의 TestNewsSectionSystemPromptCoversTechnicalTermHanjaMixing과
 // 같은 이유로 존재한다: 이 번역 프롬프트는 newsSectionSystemPrompt와

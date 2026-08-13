@@ -170,6 +170,15 @@ type NewsItem struct {
 	// 이미 한글이라 번역 자체를 건너뛴다). 값이 비어 있으면 번역이 실패했거나
 	// 아직 끝나지 않은 것이며, 이 경우 프론트엔드는 Title로 대체해 보여준다.
 	TranslatedTitle string `json:"translatedTitle"`
+	// TranslationFailureReason은 TranslatedTitle이 비어 있을 때만(그리고
+	// news_translation_cache에 아직 유효한 실패 기록이 남아있을 때만)
+	// 채워진다 — rate_limit/validation_failed/api_error 중 하나다
+	// (news_translation.go 참고). 화면에 직접 노출하는 용도가 아니라,
+	// 프론트엔드 콘솔 로그로 "왜 이 헤드라인이 원문으로 폴백됐는지"를
+	// 사유별로 확인할 수 있게 하기 위한 디버깅용 필드다 — 그래서
+	// omitempty로 정상 항목(성공 번역, 국내 기사)에서는 아예 응답에서
+	// 빠진다.
+	TranslationFailureReason string `json:"translationFailureReason,omitempty"`
 }
 
 type NewsData struct {

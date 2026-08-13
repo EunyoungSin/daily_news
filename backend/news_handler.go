@@ -38,6 +38,14 @@ func newsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// raw_data_cache(30분) 히트로 응답하는 경우 data.Items의 TranslatedTitle은
+	// 그 캐시가 저장된 시점의 값 그대로다 — TranslationFailureReason만큼은
+	// 응답 직전에 news_translation_cache를 다시 조회해 "지금" 쿨다운 상태를
+	// 반영한다(annotateNewsTranslationFailureReasons 문서 참고).
+	if data != nil {
+		annotateNewsTranslationFailureReasons(ctx, db, data.Items)
+	}
+
 	json.NewEncoder(w).Encode(NewsSection{
 		SectionMeta: SectionMeta{Success: true, DurationMs: durationMs, Notice: notice},
 		Data:        data,

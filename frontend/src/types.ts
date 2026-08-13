@@ -133,6 +133,12 @@ export interface NewsItem {
   // 한국어이므로). 비어 있으면 번역이 실패했거나 아직 끝나지 않은 것이므로,
   // "(번역 실패)" 표시와 함께 title로 대체한다.
   translatedTitle: string
+  // translatedTitle이 비어 있고 백엔드의 news_translation_cache에 아직
+  // 실패 기록이 남아있을 때만 채워진다 — 'rate_limit' | 'validation_failed'
+  // | 'api_error' 중 하나(backend/news_translation.go 참고). 화면에 직접
+  // 표시하는 값이 아니라, NewsCard가 콘솔에 사유별 로그를 남기기 위한
+  // 디버깅용 필드다.
+  translationFailureReason?: string
 }
 
 export interface NewsData {

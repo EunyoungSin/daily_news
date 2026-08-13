@@ -150,6 +150,51 @@ func recentlyFailedNewsTranslation(ctx context.Context, conn *sql.DB, articleID 
 	return time.Now().Before(retryAfter)
 }
 
+// annotateNewsTranslationFailureReasons는 응답으로 나가기 직전의
+// NewsItem 목록 중 TranslatedTitle이 비어있는 항목에 한해,
+// news_translation_cache에 남아있는 failure_reason을
+// TranslationFailureReason에 채워 넣는다(models.go의 NewsItem 문서 참고).
+//
+// news_handler.go가 이 함수를 호출하는 지점(요청이 raw_data_cache
+// 히트/미스 중 어느 경로를 탔는지와 무관하게 항상 마지막에 한 번) 한
+// 곳뿐이어야 한다 — translateNewsItems는 그 요청에서 실제로 Groq를
+// 호출한 경로에서만 실행되므로, 30분짜리 뉴스 원본 캐시(raw_data_cache)
+// 히트로 응답하는 대부분의 요청에서는 그 시점에 알 수 있는 정보가
+// 없다. failure_reason은 news_translation_cache에서 그 사이 계속
+// 갱신되고 있으므로, 응답 직전에 다시 조회해야 "지금" 쿨다운 상태를
+// 정확히 반영한다.
+func annotateNewsTranslationFailureReasons(ctx context.Context, conn *sql.DB, items []NewsItem) {
+	if conn == nil {
+		return
+	}
+	for i := range items {
+		if items[i].TranslatedTitle != "" {
+			continue
+		}
+		if reason, found := lookupNewsTranslationFailureReason(ctx, conn, items[i].ID); found {
+			items[i].TranslationFailureReason = reason
+		}
+	}
+}
+
+// lookupNewsTranslationFailureReason은 article_id에 대해 저장된
+// failure_reason을 반환한다 — 실제 실패 기록(translated_title이
+// 비어있고 failure_reason도 채워진 행)이 있을 때만 found=true다.
+// recentlyFailedNewsTranslation과 달리 retry_after 만료 여부는 보지
+// 않는다 — 쿨다운이 이미 지났어도(아직 재시도가 성공하지 않아
+// translated_title이 여전히 비어있는 한) "마지막으로 왜 실패했는지"는
+// 로그 확인 목적으로는 여전히 유용한 정보이기 때문이다.
+func lookupNewsTranslationFailureReason(ctx context.Context, conn *sql.DB, articleID string) (string, bool) {
+	var reason string
+	err := conn.QueryRowContext(ctx,
+		`SELECT failure_reason FROM news_translation_cache WHERE article_id = ? AND translated_title = '' AND failure_reason != ''`, articleID,
+	).Scan(&reason)
+	if err != nil {
+		return "", false
+	}
+	return reason, true
+}
+
 // recordNewsTranslationFailure는 번역 실패를 사유(reason)와 함께
 // news_translation_cache에 기록한다. translated_title은 일부러 빈
 // 문자열로 남긴다 — lookupNewsTranslation이 빈 문자열 행을 "캐시된

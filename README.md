@@ -951,6 +951,15 @@ AI 브리핑 카드만 스켈레톤 상태로 대기시킵니다.
 - `region`: `domestic`(기본값, `country=kr&language=ko`) 또는 `international`(`language=en`).
 - `data.items`: 최대 5건, 각 항목은 `id`, `title`, `link`, `sourceName`, `pubDate`, `description`을
   가지며, `region=international`인 경우에만 `translatedTitle`(번역 실패 시 빈 문자열)이 채워집니다.
+  `translatedTitle`이 비어 있고 마침 그 사유가 news_translation_cache에 아직 남아있으면
+  `translationFailureReason`(`rate_limit`/`validation_failed`/`api_error`)도 함께 채워집니다 —
+  화면에 직접 노출하는 값은 아니고, 프론트엔드(`NewsCard.tsx`)가 브라우저 콘솔에 사유별로
+  그룹 지어 로그를 남기는 데만 쓰입니다(`console.groupCollapsed`) — 서버 로그를 볼 수 없는
+  상황에서도 "왜 이 헤드라인이 원문으로 보이는지"를 개발자 도구만으로 확인할 수 있게
+  하기 위해서입니다. `annotateNewsTranslationFailureReasons`(`news_translation.go`)가
+  응답 직전에 매번 새로 조회하는 이유는, 뉴스 원본 자체는 30분 TTL 캐시(`raw_data_cache`)로
+  서빙되는 경우가 많아 그 안에 박제된 `translatedTitle`은 오래된 값일 수 있지만, 실패
+  사유/쿨다운은 그보다 훨씬 짧은 주기(45초~5분)로 계속 바뀌기 때문입니다.
 - 카테고리와 지역을 모두 캐시 키에 포함하므로, 조합이 다르면 서로 캐시를 공유하지 않습니다
   (`getCachedOrFetchNews`, 30분 TTL). AI 브리핑의 뉴스 문단도 같은 카테고리/지역 조합별로
   독립적으로 캐싱됩니다(`briefing_section_cache`의 `section` 값이 `news:{region}:{category}` 형태).

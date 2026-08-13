@@ -1,7 +1,40 @@
-import { useState } from 'react'
-import type { NewsRegion, NewsSection } from '../types'
+import { useEffect, useState } from 'react'
+import type { NewsItem, NewsRegion, NewsSection } from '../types'
 import { NEWS_CATEGORY_OPTIONS } from '../types'
 import { usePulseOnChange } from '../hooks/usePulseOnChange'
+
+// 사유별로 나눠 볼 수 있도록 백엔드(news_translation.go)의 실패 사유
+// 상수와 그대로 맞춘 한글 라벨이다 — 콘솔에서 값을 그대로 읽어도
+// 뜻을 알 수 있지만, 사유별 그룹 제목에는 이 라벨을 쓴다.
+const TRANSLATION_FAILURE_REASON_LABELS: Record<string, string> = {
+  rate_limit: 'rate_limit (Groq 요청 한도 초과, 쿨다운 45초)',
+  validation_failed: 'validation_failed (한자/영어 혼입 등 검증 실패, 쿨다운 5분)',
+  api_error: 'api_error (그 외 일반 API 오류, 쿨다운 5분)',
+}
+
+// logNewsTranslationFailuresByReason은 이번에 새로 받아온 뉴스 목록 중
+// 번역이 쿨다운으로 원문 폴백된 항목들을, 사유별로 그룹 지어 콘솔에
+// 남긴다 — 백엔드 로그("뉴스: 번역 실패(사유=..., 쿨다운=...)")를 서버
+// 콘솔에서 직접 볼 수 없는 상황에서도, 브라우저 개발자 도구만으로 "이
+// 헤드라인이 왜 원문으로 보이는지"를 사유별로 확인할 수 있게 한다.
+function logNewsTranslationFailuresByReason(items: NewsItem[]): void {
+  const byReason = new Map<string, NewsItem[]>()
+  for (const item of items) {
+    if (!item.translationFailureReason) continue
+    const group = byReason.get(item.translationFailureReason) ?? []
+    group.push(item)
+    byReason.set(item.translationFailureReason, group)
+  }
+  if (byReason.size === 0) return
+
+  for (const [reason, group] of byReason) {
+    console.groupCollapsed(`[뉴스 번역 쿨다운] ${TRANSLATION_FAILURE_REASON_LABELS[reason] ?? reason} — ${group.length}건`)
+    for (const item of group) {
+      console.log(`· ${item.id}: "${item.title}"`)
+    }
+    console.groupEnd()
+  }
+}
 
 interface Props {
   section: NewsSection | null
@@ -46,6 +79,14 @@ export default function NewsCard({
   // 명시적으로 전환했다는 의미다.
   const [itemOverrides, setItemOverrides] = useState<Record<string, 'ko' | 'original'>>({})
   const pulsing = usePulseOnChange(section?.durationMs)
+
+  // section.data.items가 실제로 바뀔 때(새 조회가 끝났을 때)만 로그를
+  // 남긴다 — item 배열 참조는 useNews.ts가 매 요청마다 새로 만들므로,
+  // ko/원문 토글 같은 이 컴포넌트 자체의 리렌더와는 섞이지 않는다.
+  useEffect(() => {
+    if (region !== 'international' || !section?.data?.items) return
+    logNewsTranslationFailuresByReason(section.data.items)
+  }, [region, section?.data?.items])
 
   const handleRetry = async () => {
     setRetrying(true)
