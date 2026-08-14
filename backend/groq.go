@@ -280,6 +280,20 @@ var maxGroqRateLimitTotalWait = 20 * time.Second
 // 약간 더 기다린다.
 var groqRateLimitRetryBuffer = 500 * time.Millisecond
 
+// groqRateLimitRetryCallOverhead는 대기 후 실제로 다시 API를 호출하는 데
+// 걸릴 것으로 예상하는 시간이다 — 대기 시간만 남은 ctx 예산 안에 든다고
+// 재시도를 허용하면, 대기 후 실제 호출을 마치기도 전에 ctx가 만료돼
+// "기다렸는데도 결국 실패"하는 낭비가 생긴다. Groq 응답은 보통 1~2초
+// 이내이므로 여유를 두어 2초로 잡는다.
+var groqRateLimitRetryCallOverhead = 2 * time.Second
+
+// groqRateLimitRetryBudgetRatio는 남은 ctx 예산 중 이 비율 이상을
+// 대기 시간이 차지하면 재시도 자체를 포기하는 기준이다 — 예산을 거의 다
+// 써버리는 재시도는 설령 성공하더라도 상위 호출부(resolveBriefingSection
+// 등)가 결과를 처리할 시간조차 남기지 않아 결국 context deadline
+// exceeded로 이어지기 쉽다.
+var groqRateLimitRetryBudgetRatio = 0.8
+
 // parseGroqRetryAfterSeconds는 Groq rate-limit 에러 메시지(예: "Rate limit
 // reached for model ... Please try again in 1.2s.")에서 대기 시간을
 // time.Duration으로 추출한다. 메시지 형식이 다르거나(다른 종류의 에러) 숫자를
@@ -465,6 +479,29 @@ func callGroqChat(ctx context.Context, apiKey, model string, messages []groqChat
 			log.Printf("[Groq 호출] rate limit 재시도 총 대기 예산(%s) 초과 예상(model=%s, 이미 %.1fs 대기 + 추가 %.1fs 필요) — 재시도 중단: %v",
 				maxGroqRateLimitTotalWait, model, totalWait.Seconds(), wait.Seconds(), callErr)
 			return "", callErr
+		}
+
+		// ctx의 남은 예산을 확인하지 않고 무조건 기다리면, 대기 시간이
+		// 섹션 전체 타임아웃에 육박하거나 넘어서는 경우(실제 사례: 대기
+		// 8.18초 vs 섹션 예산 8초) 기다리는 도중 ctx가 만료돼 재시도
+		// 자체가 시도되지도 못한 채 "context deadline exceeded"로
+		// 실패한다. 기다렸다가 실패하는 것보다, 애초에 예산이 부족하면
+		// 즉시 실패를 반환해 상위 호출부(resolveBriefingSection)가 더
+		// 빨리 stale_fallback으로 넘어가게 하는 편이 사용자 응답 속도에
+		// 낫다. 대기 시간뿐 아니라 대기 후 실제 호출에 걸릴 예상 시간
+		// (groqRateLimitRetryCallOverhead)까지 더해 예산 안에 들어오는지
+		// 확인한다 — 대기만 겨우 맞고 호출할 시간이 없으면 결국 같은
+		// 실패로 이어지기 때문이다. ctx에 데드라인이 없으면(예: 테스트가
+		// context.Background()를 그대로 쓰는 경우) 이 검사를 건너뛴다.
+		if deadline, ok := ctx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			needed := wait + groqRateLimitRetryCallOverhead
+			budgetLimit := time.Duration(float64(remaining) * groqRateLimitRetryBudgetRatio)
+			if remaining <= 0 || needed >= remaining || wait >= budgetLimit {
+				log.Printf("[Groq 호출] rate limit 재시도 포기(model=%s) — 대기 시간(%.1fs)+예상 호출 시간(%.1fs)이 남은 ctx 예산(%.1fs) 대비 너무 커서, 기다리다 실패하는 대신 즉시 폴백: %v",
+					model, wait.Seconds(), groqRateLimitRetryCallOverhead.Seconds(), remaining.Seconds(), callErr)
+				return "", callErr
+			}
 		}
 		totalWait += wait
 

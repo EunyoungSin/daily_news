@@ -267,6 +267,136 @@ func TestCallGroqChatDoesNotRetryWhenWaitTooLong(t *testing.T) {
 	}
 }
 
+// TestCallGroqChatAbandonsRetryWhenCtxDeadlineTooTight는 실제 보고된
+// 사고를 재현한다: rate limit 대기 시간(8.18초)이 호출부(예:
+// dashboardHandler의 briefingGenerationTimeout)가 준 ctx의 남은 예산(8초)과
+// 비슷하거나 더 크면, 예전에는 무조건 그 시간만큼 기다리다가 대기 도중
+// ctx가 만료돼 재시도 자체를 시도해보지도 못한 채 "context deadline
+// exceeded"로 실패했다. 이제는 대기를 시작하기 전에 남은 예산을 확인해,
+// 기다려도 성공할 가망이 없으면(대기+예상 호출 시간이 남은 예산을
+// 넘어서거나, 대기 자체가 남은 예산의 80% 이상을 차지하면) 즉시
+// 원래(rate limit) 에러를 반환해야 한다 — ctx.Err()(deadline exceeded)가
+// 아니라 원래 에러가 나와야, 상위 호출부가 "타임아웃"이 아니라 "rate
+// limit이었다"는 정확한 사유로 분류해 로그를 남길 수 있다.
+func TestCallGroqChatAbandonsRetryWhenCtxDeadlineTooTight(t *testing.T) {
+	resetGroqUsageForTest()
+	resetGroqCallGateForTest(8, 0)
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(groqRateLimitErrorBody("8.18")))
+	}))
+	defer server.Close()
+
+	original := groqEndpoint
+	groqEndpoint = server.URL
+	defer func() { groqEndpoint = original }()
+
+	// 실제 사고와 같은 비율(대기 8.18초 vs 섹션 예산 8초)을 재현한다.
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := callGroqChat(ctx, "test-key", "llama-3.1-8b-instant",
+		[]groqChatMessage{{Role: "user", Content: "hi"}}, 0.3, 100, 0, false)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("callGroqChat() error = nil, want an error (insufficient ctx budget for the retry)")
+	}
+	if err == context.DeadlineExceeded {
+		t.Errorf("err = %v, want the original rate-limit error, not ctx.Err() — the retry should be abandoned before waiting, not during the wait", err)
+	}
+	if callCount != 1 {
+		t.Errorf("server was called %d times, want 1 (no retry should be attempted once the budget check fails)", callCount)
+	}
+	if elapsed > 1*time.Second {
+		t.Errorf("elapsed = %v, expected callGroqChat to fail fast without waiting ~8.18s first", elapsed)
+	}
+}
+
+// TestCallGroqChatStillRetriesWhenCtxBudgetIsSufficient은 위 수정이
+// 정상적인 경우(대기 시간이 짧고 ctx 예산이 넉넉함)까지 재시도를 막아버리는
+// 회귀가 없는지 확인한다 — ctx에 데드라인이 있어도, 대기+예상 호출
+// 시간이 남은 예산에 충분히 여유 있게 들어오면 그대로 재시도해서
+// 성공해야 한다.
+func TestCallGroqChatStillRetriesWhenCtxBudgetIsSufficient(t *testing.T) {
+	resetGroqUsageForTest()
+	resetGroqCallGateForTest(8, 0)
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(groqRateLimitErrorBody("1")))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(groqSuccessBody("브리핑 텍스트")))
+	}))
+	defer server.Close()
+
+	original := groqEndpoint
+	groqEndpoint = server.URL
+	defer func() { groqEndpoint = original }()
+
+	// 대기(1초 + 버퍼)와 예상 호출 시간(2초)을 합쳐도 10초 예산에는 한참
+	// 못 미치는, "정상적인" 시나리오다.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	content, err := callGroqChat(ctx, "test-key", "llama-3.1-8b-instant",
+		[]groqChatMessage{{Role: "user", Content: "hi"}}, 0.3, 100, 0, false)
+
+	if err != nil {
+		t.Fatalf("callGroqChat() error = %v, want nil (sufficient ctx budget should still allow the retry to succeed)", err)
+	}
+	if content != "브리핑 텍스트" {
+		t.Errorf("content = %q, want %q", content, "브리핑 텍스트")
+	}
+	if callCount != 2 {
+		t.Errorf("server was called %d times, want 2 (initial + 1 retry)", callCount)
+	}
+}
+
+// TestCallGroqChatAbandonsRetryWhenWaitExceedsBudgetRatio는
+// groqRateLimitRetryBudgetRatio(80%) 조건 하나만으로도 재시도를 포기하는
+// 경우를 검증한다 — "대기+호출시간 > 남은예산" 조건과 겹치지 않도록,
+// 남은 예산(15초)의 80%(12초)는 넘지만 대기+호출시간(12.5+2=14.5초)은
+// 아직 예산 안에 드는 지점을 고른다.
+func TestCallGroqChatAbandonsRetryWhenWaitExceedsBudgetRatio(t *testing.T) {
+	resetGroqUsageForTest()
+	resetGroqCallGateForTest(8, 0)
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(groqRateLimitErrorBody("12.5")))
+	}))
+	defer server.Close()
+
+	original := groqEndpoint
+	groqEndpoint = server.URL
+	defer func() { groqEndpoint = original }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	_, err := callGroqChat(ctx, "test-key", "llama-3.1-8b-instant",
+		[]groqChatMessage{{Role: "user", Content: "hi"}}, 0.3, 100, 0, false)
+
+	if err == nil {
+		t.Fatal("callGroqChat() error = nil, want an error (wait exceeds 80% of the remaining ctx budget)")
+	}
+	if callCount != 1 {
+		t.Errorf("server was called %d times, want 1 (no retry should be attempted)", callCount)
+	}
+}
+
 // TestCallGroqChatDoesNotRetryOnUnparseableRateLimitMessage는 에러 메시지
 // 형식이 달라 대기 시간을 파싱할 수 없는 경우, 재시도 없이 바로 에러를
 // 반환하는지 확인한다.

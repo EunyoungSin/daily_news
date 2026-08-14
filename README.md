@@ -112,6 +112,23 @@ TPM(분당 토큰) rate limit로 Groq 호출이 실패하는 것과는 별도로
   `maxGroqRateLimitTotalWait`(20초)를 넘을 것으로 예상되는 경우 —
   개별 대기는 매번 10초 이하라도 여러 번 이어지면 총합이 사용자
   체감상 너무 길어질 수 있어 별도의 전체 예산을 둡니다.
+- **ctx에 남은 예산 자체가 부족한 경우** — 위 두 조건은 `callGroqChat`
+  자신의 재시도 예산만 볼 뿐, 호출부가 넘겨준 `ctx`(예:
+  `briefingGenerationTimeout`)에 남은 시간은 보지 않았습니다. 실제
+  보고된 사고: rate limit 대기 시간이 8.18초였는데 당시 섹션 예산이
+  8초라, 무조건 기다리는 이 로직이 대기 도중 ctx를 만료시켜 재시도
+  자체를 시도해보지도 못한 채 "context deadline exceeded"로
+  실패했습니다(이러면 상위 로그에도 진짜 원인인 rate limit이 아니라
+  타임아웃만 남아 원인 추적이 어려워집니다). 이제 대기를 시작하기
+  전에 `ctx.Deadline()`으로 남은 시간을 확인해, **"대기 시간 + 예상
+  호출 시간(`groqRateLimitRetryCallOverhead`, 2초)"이 남은 예산 이상**
+  이거나 **대기 시간 자체가 남은 예산의 `groqRateLimitRetryBudgetRatio`
+  (80%) 이상**이면 그 시점에서 즉시(기다리지 않고) 원래 rate limit
+  에러를 반환합니다 — 기다렸다 실패하는 것보다 즉시
+  `stale_fallback`으로 넘어가는 편이 응답 속도에 낫고, 에러도
+  `ctx.Err()`가 아닌 원래 사유 그대로 남아 로그에서 바로 rate limit
+  때문이었음을 알 수 있습니다. `ctx`에 데드라인이 없으면(테스트가
+  `context.Background()`를 쓰는 경우 등) 이 검사는 건너뜁니다.
 
 브리핑 3섹션(weather/exchange/news)은 `getBriefing`이 goroutine으로
 병렬 생성하고, 뉴스 헤드라인 번역도 별도의 `/api/news` 요청 경로로
@@ -1027,7 +1044,12 @@ AI 브리핑 카드만 스켈레톤 상태로 대기시킵니다.
   deadline exceeded" 실패가 실제로 보고됐기 때문입니다 — 원인이 크레딧 소진이나 8초라는 값
   자체는 아니었지만(위 "NewsData.io API 키 발급" 참고), 원인 불명의 일시적 외부 지연을 흡수할
   여지를 조금 늘려뒀습니다. 한 섹션이 실패하거나 타임아웃되어도 나머지 섹션은 정상적으로
-  응답합니다.
+  응답합니다. 이 raw 데이터 조회 단계와 별개로, 그 이후 순차적으로 실행되는 AI 브리핑
+  생성 단계(`getBriefing`, 날씨/환율/뉴스 3섹션의 Groq 호출을 공유하는 하나의 컨텍스트)는
+  `briefingGenerationTimeout`(15초, `handler.go`)을 씁니다 — 예전에는 이 단계도 그냥
+  `sectionTimeout`(8초)을 재사용했는데, Groq rate limit 재시도 대기 시간이 실제로 8초를
+  넘는 사례(8.18초)가 보고돼 별도 상수로 분리하고 늘렸습니다(위 "Groq TPM rate limit
+  재시도" 문단 참고).
 - 날씨(국내 도시): 기상청 API 자체는 그 21초 예산 중 최대 9초(`kmaSubTimeout`)만 쓰도록
   하위 컨텍스트로 감싸서 시도합니다 — 기상청 쪽이 느리거나 실패해도 Open-Meteo로 폴백할
   시간이 남도록 하기 위함입니다. 나머지 예산은 이미 지난 시각 슬롯(08:00/14:00)을 소급

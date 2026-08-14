@@ -40,6 +40,29 @@ const weatherSectionTimeout = 21 * time.Second
 // sectionTimeout(8초)을 그대로 쓴다.
 const newsSectionTimeout = 12 * time.Second
 
+// briefingGenerationTimeout은 getBriefing이 날씨/환율/뉴스 3섹션의 AI 문장을
+// 생성하는 단계(resolveBriefingSection -> generateSectionText -> Groq
+// 호출)에 공유되는 예산이다. 위 raw-data 조회용 타임아웃들(sectionTimeout/
+// weatherSectionTimeout/newsSectionTimeout)과는 완전히 별개의 단계다 —
+// dashboardHandler는 raw 조회가 모두 끝난 뒤에야 이 단계를 순차적으로
+// 시작한다(위 "AI 브리핑은 위 결과들에 의존" 주석 참고).
+//
+// 예전에는 이 단계도 그냥 sectionTimeout(8초)을 그대로 재사용했는데, Groq
+// rate limit 재시도(callGroqChat의 "Please try again in {N}s" 대기)가
+// 걸리면 8초는 너무 타이트했다 — 실제 사례: 대기 시간이 8.18초였는데
+// 섹션 예산이 8초라, 기다리는 도중 ctx가 만료돼 재시도 자체를 시도해보지도
+// 못한 채 "context deadline exceeded"로 실패했다(callGroqChat의
+// groqRateLimitRetryBudgetRatio 문서 주석도 참고 — 이제는 그런 상황에서
+// 아예 기다리지 않고 즉시 폴백하도록 고쳤지만, 그러면 짧은 대기(몇 초
+// 수준)로 충분히 성공할 수 있었던 정상적인 재시도까지 예산 부족으로 함께
+// 포기하게 된다). 날씨(21초)만큼 넉넉할 필요는 없지만(날씨는 KMA 자체
+// 호출이 원래 느릴 수 있어 별도로 그렇게 잡아둔 것이다), rate limit 재시도
+// 한 번(대기 최대 10초 + 호출 1~2초)이 실패 없이 들어갈 여유를 두어
+// 15초로 잡았다. 환율은 이 단계에 rate limit 재시도로 인한 실패 사례가
+// 보고된 적 없지만, 세 섹션이 이 예산을 공유하는 구조라 함께 늘어나는
+// 것이 자연스럽고 손해도 없다.
+const briefingGenerationTimeout = 15 * time.Second
+
 func withTiming(fn func() error) (int64, error) {
 	start := time.Now()
 	err := fn()
@@ -145,7 +168,7 @@ func dashboardHandler(w http.ResponseWriter, r *http.Request) {
 	// 않고 그 이후에 순차적으로 실행한다.
 	var briefingSection BriefingSection
 	{
-		ctx, cancel := context.WithTimeout(r.Context(), sectionTimeout)
+		ctx, cancel := context.WithTimeout(r.Context(), briefingGenerationTimeout)
 		defer cancel()
 
 		var data *BriefingData
