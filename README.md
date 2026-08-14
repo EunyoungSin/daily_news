@@ -103,8 +103,10 @@ TPM(분당 토큰) rate limit로 Groq 호출이 실패하는 것과는 별도로
 실패는 1.2초, 2차 실패는 4.5초), 최초 값을 고정해서 재사용하면
 아직 부족한 시간만큼만 기다리고 다시 실패하는 헛수고가 되기
 쉽습니다. 다만 다음 두 조건 중 하나라도 걸리면 그 시점에서 즉시
-재시도를 멈추고 `stale_fallback`으로 넘어갑니다 — 사용자를 무리하게
-기다리게 하지 않기 위해서입니다.
+재시도를 멈추고 원래 에러를 반환합니다 — 사용자를 무리하게 기다리게
+하지 않기 위해서입니다. 이 반환값을 받는 `resolveBriefingSection`은
+직전에 성공한 캐시가 남아 있으면 그걸 재사용해 `stale_fallback`으로,
+캐시조차 없으면 `failed`로 응답합니다(아래 "브리핑 3섹션" 문단 참고).
 
 - 한 번의 대기가 `maxGroqRateLimitRetryWait`(10초)를 넘거나, 에러
   메시지 형식이 달라 대기 시간을 파싱할 수 없는 경우
@@ -124,11 +126,12 @@ TPM(분당 토큰) rate limit로 Groq 호출이 실패하는 것과는 별도로
   호출 시간(`groqRateLimitRetryCallOverhead`, 2초)"이 남은 예산 이상**
   이거나 **대기 시간 자체가 남은 예산의 `groqRateLimitRetryBudgetRatio`
   (80%) 이상**이면 그 시점에서 즉시(기다리지 않고) 원래 rate limit
-  에러를 반환합니다 — 기다렸다 실패하는 것보다 즉시
-  `stale_fallback`으로 넘어가는 편이 응답 속도에 낫고, 에러도
-  `ctx.Err()`가 아닌 원래 사유 그대로 남아 로그에서 바로 rate limit
-  때문이었음을 알 수 있습니다. `ctx`에 데드라인이 없으면(테스트가
-  `context.Background()`를 쓰는 경우 등) 이 검사는 건너뜁니다.
+  에러를 반환합니다 — 기다렸다 실패하는 것보다 즉시 폴백 처리로
+  넘어가는(캐시가 있으면 `stale_fallback`, 없으면 `failed`) 편이
+  응답 속도에 낫고, 에러도 `ctx.Err()`가 아닌 원래 사유 그대로 남아
+  로그에서 바로 rate limit 때문이었음을 알 수 있습니다. `ctx`에
+  데드라인이 없으면(테스트가 `context.Background()`를 쓰는 경우 등)
+  이 검사는 건너뜁니다.
 
 브리핑 3섹션(weather/exchange/news)은 `getBriefing`이 goroutine으로
 병렬 생성하고, 뉴스 헤드라인 번역도 별도의 `/api/news` 요청 경로로
