@@ -1065,14 +1065,26 @@ var koreanMagnitudeUnits = []struct {
 	{"만", 1e4},
 }
 
-// koreanNumberPattern은 소수를 포함한 숫자 뒤에 한국어 자릿수 접미사가
-// (있다면) 바로 이어지는 형태를 매칭합니다.
-var koreanNumberPattern = regexp.MustCompile(`\d+(?:\.\d+)?(?:만|억|조)?`)
+// koreanNumberPattern은 소수(및 서양식 천 단위 쉼표 표기, 예: "3,500",
+// "1,000.5")를 포함한 숫자 뒤에 한국어 자릿수 접미사가(있다면) 바로
+// 이어지는 형태를 매칭합니다. 쉼표 그룹 쪽 대안을 먼저 두어야, "3,500"이
+// "3"과 "500"이라는 서로 무관한 두 숫자로 쪼개지지 않고 하나의 토큰으로
+// 매칭됩니다(Go regexp는 알아본 대안을 왼쪽부터 우선 시도합니다) — 쉼표
+// 그룹은 정확히 3자리씩만 인정해서("3,500", "1,234,567"), "3,50"처럼
+// 불완전한 그룹은 숫자 하나로 오인하지 않습니다. 실제 보고된 사례: 원문
+// "$3,500"이 이 쉼표 처리 없이는 [3, 500] 두 숫자로 추출되어, 응답의
+// "3500"(쉼표 없는 표기, 동일한 값)이 둘 중 어느 쪽과도 매칭되지 않아
+// 근거 없는 숫자로 오탐됐습니다.
+var koreanNumberPattern = regexp.MustCompile(`\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:만|억|조)?|\d+(?:\.\d+)?(?:만|억|조)?`)
 
-// extractNumbers는 text에 언급된 모든 숫자를 실제 수치 값으로 파싱하며,
-// 만/억/조 배수를 적용해서 "90억"과 "9000000000"이 같은 값으로 비교되게
-// 합니다. 원본 데이터(헤드라인 제목)에서 "정답" 숫자를 읽어낼 때와,
-// 생성된 문장이 실제로 어떤 숫자를 주장하는지 확인할 때 모두 사용됩니다.
+// extractNumbers는 text에 언급된 모든 숫자를, 표기 방식(쉼표 유무, 만/억/조
+// 배수)과 무관하게 실제 수치 값(float64)으로 정규화해서 반환합니다 —
+// 쉼표는 제거하고, 만/억/조 접미사는 배수를 적용해서 "90억"과
+// "9000000000"이, "3,500"과 "3500"이 모두 같은 값으로 비교되게 합니다.
+// 원본 데이터(헤드라인 제목)에서 "정답" 숫자를 읽어낼 때와, 생성된
+// 문장이 실제로 어떤 숫자를 주장하는지 확인할 때 모두 사용되며, 호출자
+// (findUngroundedNumber)는 이렇게 정규화된 값끼리 numbersMatch로
+// 비교합니다 — 원본 문자열 표기를 그대로 비교하는 곳은 없습니다.
 func extractNumbers(text string) []float64 {
 	matches := koreanNumberPattern.FindAllString(text, -1)
 	result := make([]float64, 0, len(matches))
@@ -1086,6 +1098,7 @@ func extractNumbers(text string) []float64 {
 				break
 			}
 		}
+		numPart = strings.ReplaceAll(numPart, ",", "")
 		val, err := strconv.ParseFloat(numPart, 64)
 		if err != nil {
 			continue

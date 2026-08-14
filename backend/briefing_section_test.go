@@ -1089,6 +1089,9 @@ func TestExtractNumbers(t *testing.T) {
 		{"1 USD당 1470.11 KRW입니다", []float64{1, 1470.11}},
 		{"지난 7일간 0.6% 하락", []float64{7, 0.6}},
 		{"숫자가 없는 문장", nil},
+		{"$3,500 상당의 계약", []float64{3500}},
+		{"1,000.5 처럼 소수점과 쉼표가 함께 있는 경우", []float64{1000.5}},
+		{"12,345,678원을 기록했습니다", []float64{12345678}},
 	}
 
 	for _, tc := range cases {
@@ -1252,6 +1255,63 @@ func TestFindUngroundedNumberAllowsMillionUnitTranslation(t *testing.T) {
 	// 잘못 계산된 값이나 무관한 금액은 여전히 걸러져야 한다.
 	if _, found := findUngroundedNumber("영국이 이 사업에 1억6000만 파운드를 투자했습니다.", rawGrounding, nil); !found {
 		t.Error("expected the miscalculated amount to still be flagged as ungrounded")
+	}
+}
+
+// TestFindUngroundedNumber_DoesNotFlagCommaFormattedAmount는 실제 보고된
+// 오탐 사례를 회귀 테스트로 고정한다: 원문 헤드라인의 "$3,500"(천 단위
+// 쉼표 표기)과 생성문의 "3500"(쉼표 없는 표기)은 같은 값인데,
+// extractNumbers가 쉼표를 숫자 구분자로 처리하지 않으면 "$3,500"이 3과
+// 500이라는 서로 무관한 두 숫자로 쪼개져, 생성문의 3500이 그 어느 쪽과도
+// 매칭되지 않아 근거 없는 숫자로 오탐됐다.
+func TestFindUngroundedNumber_DoesNotFlagCommaFormattedAmount(t *testing.T) {
+	allowed := allowedNewsNumbers(&briefingNewsInput{
+		Items: []briefingNewsItem{
+			{ID: "1", Title: "Startup secures $3,500 seed grant"},
+		},
+	})
+
+	if num, found := findUngroundedNumber("한 스타트업이 3500달러 규모의 시드 지원금을 확보했습니다.", "", allowed); found {
+		t.Errorf("expected 3500 to be grounded by the comma-formatted $3,500 in the source, got flagged number %v", num)
+	}
+
+	// 쉼표+소수점이 함께 있는 표기("1,000.5")도 쉼표 없는 표기("1000.5")와
+	// 같은 값으로 인식되어야 한다.
+	decimalAllowed := allowedNewsNumbers(&briefingNewsInput{
+		Items: []briefingNewsItem{
+			{ID: "1", Title: "환율이 1,000.5원을 기록했다"},
+		},
+	})
+	if num, found := findUngroundedNumber("환율이 1000.5원을 기록했습니다.", "", decimalAllowed); found {
+		t.Errorf("expected 1000.5 to be grounded by the comma-formatted 1,000.5 in the source, got flagged number %v", num)
+	}
+
+	// 목록에 없는 진짜 근거 없는 숫자는 쉼표 정규화와 무관하게 여전히
+	// 걸러져야 한다.
+	if _, found := findUngroundedNumber("한 스타트업이 35000달러 규모의 시드 지원금을 확보했습니다.", "", allowed); !found {
+		t.Error("expected a fabricated amount unrelated to $3,500 to still be flagged as ungrounded")
+	}
+}
+
+// TestFindUngroundedNumber_CommaNormalizationCoexistsWithUnitConversion은
+// 이번에 고친 쉼표 정규화가, 이전에 고친 bn/m 단위 환산 검증과 함께
+// 정상 동작하는지(서로 간섭하지 않는지) 확인한다 — 같은 헤드라인에 단위
+// 축약형이 있는 금액(£25bn)과 쉼표로만 구분된 금액(3,500달러)이 함께
+// 있어도 둘 다 각자의 방식으로 근거 있는 값으로 인식되어야 한다.
+// annotateNumericUnits는 단위 축약형(£25bn)만 한글로 치환하고 단위 없는
+// 쉼표 표기($3,500)는 원문 그대로 두므로, toBriefingNewsInput을 거친
+// 정상적인 파이프라인으로 입력을 구성해야 두 메커니즘이 함께 있는
+// 실제 상황을 재현할 수 있다.
+func TestFindUngroundedNumber_CommaNormalizationCoexistsWithUnitConversion(t *testing.T) {
+	annotatedInput := toBriefingNewsInput(&NewsData{Items: []NewsItem{
+		{ID: "1", Title: "UK unveils £25bn infrastructure plan, with an initial $3,500 pilot budget"},
+	}})
+	annotatedGrounding := newsGroundingText(annotatedInput)
+	allowed := allowedNewsNumbers(annotatedInput)
+
+	generated := "영국이 250억 파운드 규모의 인프라 계획을 발표했으며, 초기 시범 예산은 3500달러입니다."
+	if num, found := findUngroundedNumber(generated, annotatedGrounding, allowed); found {
+		t.Errorf("expected both the £25bn->250억 conversion and the comma-formatted $3,500 to be grounded, got flagged number %v", num)
 	}
 }
 
