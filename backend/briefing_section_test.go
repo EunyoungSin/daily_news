@@ -605,6 +605,50 @@ func TestFindTopicMismatch_SkipsNonKoreanGroundingText(t *testing.T) {
 	}
 }
 
+// TestFindTopicMismatch_DoesNotFlagFaithfulSummaryOfOneOfSeveralHeadlines는
+// 실제 보고된 오탐 사례를 회귀 테스트로 고정한다: 원유/엔화/CodeRabbit
+// 투자유치라는 서로 무관한 헤드라인 3개가 입력됐고, 모델이 그중
+// CodeRabbit 하나만 정확하게 요약했는데, 예전에는 "전체 헤드라인 토큰
+// 합집합" 대비 비율을 써서 항목 수(3개)만큼 비율이 옅어져(실측 6%)
+// hallucination으로 오판됐다. 헤드라인별로 개별 계산 후 최댓값을 쓰면,
+// CodeRabbit 헤드라인 하나와는 높은 중복도가 나와야 정상 통과한다.
+func TestFindTopicMismatch_DoesNotFlagFaithfulSummaryOfOneOfSeveralHeadlines(t *testing.T) {
+	grounding := newsGroundingText(&briefingNewsInput{
+		Items: []briefingNewsItem{
+			{ID: "1", Title: "국제유가 소폭 상승, 공급 우려 완화", Description: "국제유가가 산유국들의 공급 우려가 완화되며 소폭 상승했다."},
+			{ID: "2", Title: "엔화 약세 지속, 달러당 150엔대 근접", Description: "일본은행의 통화정책 완화 기조가 이어지며 엔화 약세가 지속되고 있다."},
+			{ID: "3", Title: "AI 코드리뷰 스타트업 코드래빗, 대규모 투자 유치", Description: "코드래빗이 신규 투자 유치에 성공하며 기업가치를 크게 끌어올렸다."},
+		},
+	})
+
+	faithfulSummaryOfOneHeadline := "AI 코드리뷰 스타트업 코드래빗이 대규모 투자를 유치하며 기업가치를 끌어올렸습니다."
+	if ratio, found := findTopicMismatch(faithfulSummaryOfOneHeadline, grounding); found {
+		t.Errorf("expected no topic mismatch when the summary faithfully covers one of several headlines, got ratio=%.2f", ratio)
+	} else {
+		t.Logf("correctly passed: overlap ratio %.2f against the matching headline", ratio)
+	}
+}
+
+// TestFindTopicMismatch_StillFlagsHallucinationAmongMultipleHeadlines는
+// 위 회귀 테스트의 반대 사례를 확인한다: 헤드라인이 여러 개라도, 생성문이
+// 그중 어떤 헤드라인과도 무관한 완전히 다른 소재를 지어냈다면 여전히
+// 잡혀야 한다 — 헤드라인별 최댓값 방식이 "여러 개 중 하나를 관대하게
+// 봐주는" 것으로 진짜 hallucination까지 놓치게 되지는 않는지 검증한다.
+func TestFindTopicMismatch_StillFlagsHallucinationAmongMultipleHeadlines(t *testing.T) {
+	grounding := newsGroundingText(&briefingNewsInput{
+		Items: []briefingNewsItem{
+			{ID: "1", Title: "국제유가 소폭 상승, 공급 우려 완화", Description: "국제유가가 산유국들의 공급 우려가 완화되며 소폭 상승했다."},
+			{ID: "2", Title: "엔화 약세 지속, 달러당 150엔대 근접", Description: "일본은행의 통화정책 완화 기조가 이어지며 엔화 약세가 지속되고 있다."},
+			{ID: "3", Title: "AI 코드리뷰 스타트업 코드래빗, 대규모 투자 유치", Description: "코드래빗이 신규 투자 유치에 성공하며 기업가치를 크게 끌어올렸다."},
+		},
+	})
+
+	hallucinated := "화장품을 압수당한 16살 청소년이 정학 처분을 받아 학부모들 사이에서 논란이 일고 있습니다."
+	if ratio, found := findTopicMismatch(hallucinated, grounding); !found {
+		t.Errorf("expected the unrelated hallucination to be flagged even with multiple headlines in the input, got ratio=%.2f", ratio)
+	}
+}
+
 // TestFindFabricatedPercentage_RegressesTheMercantileBankHallucination는
 // 두 번째로 실제 보고된 환각(hallucination) 사례다: 원문 헤드라인("Mercantile
 // Bank Corporation stock hits all-time high at 60.42 USD")에는 퍼센트가

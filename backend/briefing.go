@@ -446,6 +446,12 @@ func logNewsPromptBreakdown(newsInput *briefingNewsInput) {
 // 보이는 표현을 이 텍스트와 대조합니다. 모델이 결국 어떤 헤드라인을
 // 요약하게 될지 사전에 알 수 없으므로, 특정 헤드라인 하나가 아니라 모든
 // 헤드라인의 합집합을 사용합니다.
+//
+// 항목 사이는 줄바꿈으로 구분합니다("\n") — 다른 검사들(숫자/퍼센트/
+// 고유명사)에게는 공백과 동등한 경계일 뿐이라 동작에 영향이 없지만,
+// findTopicMismatch는 이 줄바꿈을 기준으로 groundingText를 다시 항목별로
+// 쪼개 "헤드라인별 개별 계산 후 최댓값"을 구하는 데 씁니다 — 그 함수의
+// 문서 주석 참고.
 func newsGroundingText(input *briefingNewsInput) string {
 	if input == nil {
 		return ""
@@ -455,7 +461,7 @@ func newsGroundingText(input *briefingNewsInput) string {
 		b.WriteString(item.Title)
 		b.WriteString(" ")
 		b.WriteString(item.Description)
-		b.WriteString(" ")
+		b.WriteString("\n")
 	}
 	return b.String()
 }
@@ -936,62 +942,95 @@ func extractTopicTokens(text string) map[string]bool {
 // 문구로 대체시켰다 — 0.1은 실측된 정상 의역의 최저치(14%)보다 낮으면서
 // 완전히 다른 주제로 바뀌는 극단적인 경우(중복도 0%)는 여전히 잡아낼 수
 // 있는 값이다.
+//
+// 이 임계값은 "헤드라인 하나"를 기준으로 실측됐고, findTopicMismatch는
+// 이제 여러 헤드라인이 입력되어도 항목별로 개별 계산한 뒤 최댓값에 이
+// 값을 적용한다(아래 findTopicMismatch 문서 주석 참고) — 즉 매칭된
+// 헤드라인 하나에 대해서는 예전과 정확히 같은 수식(overlap/그 헤드라인의
+// 토큰 수)이 그대로 적용되므로, 위에서 실측한 0.1이라는 경계값은 항목
+// 개수와 무관하게 여전히 유효하다. 임계값을 이보다 높이면(예: 0.15)
+// 위에서 실측한 정상 의역의 최저치(14%)가 다시 오탐 대상이 되므로,
+// 여러 헤드라인 대응만을 이유로 값을 더 올리지는 않는다.
 const topicOverlapMinRatio = 0.1
 
-// findTopicMismatch는 원문(groundingText)의 명사성 토큰 중 생성문에도
-// 그대로 남아있는 비율을 계산해서, 그 비율이 topicOverlapMinRatio 미만이면
-// 보고한다. 뉴스 섹션에서만 의미가 있으며, groundingText가 비어 있으면
-// (날씨/환율) 검사 자체를 건너뛴다. 원문이 한국어가 아니면(해외 모드)도
-// 건너뛴다 — 아래 두 번째 주석 참고.
-//
-// 분모를 생성문 토큰 수가 아니라 원문 토큰 수로 잡은 것은 실측으로 드러난
-// 오탐을 고친 결과다: "[美특징주]KLA, 1Q 실적 가이드라인 실망감 주가
-// 8%↓"처럼 압축된 증권 헤드라인은, 정상적으로 풀어쓴 요약("미국의 반도체
-// 장비 업체 KLA는 1분기 실적 가이드라인에서 실망한 실적을 기록하여 주가가
-// 8% 하락했다")조차 원문에 없던 연결어/서술어를 많이 새로 쓰게 만든다.
-// 생성문 토큰 수로 나누면 이런 정상적인 의역까지 낮은 비율로 나와
-// 오탐했다(실측: 8~17%). 반대로 "원문의 핵심 토큰이 생성문에 얼마나
-// 남아있는가"로 보면, 정상적인 의역은 원문 토큰 상당수를 그대로 담고
-// 있어 비율이 높게 나오는 반면, 완전히 다른 주제(청소년 화장품 압수 →
-// AI 모델 벤치마크)로 둔갑한 경우는 원문 토큰이 생성문에 하나도 남지
-// 않아 어느 분모를 쓰든 0%로 동일하게 잡힌다.
-// hangulSyllablePattern은 groundingText가 한국어인지 판별하는 데만
-// 쓰인다 — findTopicMismatch 문서 주석 참고.
+// hangulSyllablePattern은 groundingText(또는 그 일부)가 한국어인지
+// 판별하는 데만 쓰인다 — findTopicMismatch 문서 주석 참고.
 var hangulSyllablePattern = regexp.MustCompile(`[가-힣]`)
 
+// findTopicMismatch는 groundingText(newsGroundingText가 헤드라인별로
+// "\n"을 구분자로 이어붙인 텍스트)를 다시 헤드라인 단위로 쪼갠 뒤, 각
+// 헤드라인의 명사성 토큰 중 생성문에도 남아있는 비율을 개별로 계산하고,
+// 그 중 최댓값이 topicOverlapMinRatio 미만이면 보고한다. 뉴스 섹션에서만
+// 의미가 있으며, groundingText가 비어 있으면(날씨/환율) 검사 자체를
+// 건너뛴다.
+//
+// 예전에는 후보 헤드라인 전체를 하나로 합친 텍스트 전체를 분모로
+// 썼는데, 헤드라인이 여러 개이고 모델이 그중 하나만 정확하게 요약하면
+// (여러 후보 중 하나를 고르는 것은 지침상 정상적인 동작이다) 나머지
+// 헤드라인들의 토큰이 분모에만 더해져 비율이 항목 수만큼 옅어져 정상
+// 사례까지 오탐했다 — 실제 사례: 원유/엔화/CodeRabbit 투자유치라는 서로
+// 무관한 헤드라인 3개 중 CodeRabbit 하나만 정확히 요약했는데 전체 대비
+// 중복도가 6%로 나와 hallucination으로 오판됨. "생성문이 입력된
+// 헤드라인 중 적어도 하나와는 충분히 일치하는가"로 기준을 바꾸면, 하나를
+// 골라 요약하는 정상 사례는 그 하나의 헤드라인과 개별 비교했을 때 여전히
+// 높은 비율이 나와 정상 통과하고, 반면 어떤 헤드라인과도 무관한 진짜
+// hallucination은 모든 헤드라인에 대해 낮은 비율로 나오므로 여전히
+// 잡힌다.
+//
+// 헤드라인 각각에 대해서도 분모는 생성문 토큰 수가 아니라 그 헤드라인
+// 자신의 토큰 수다 — 이유는 예전과 동일하다: 압축된 증권 헤드라인의
+// 정상적인 의역은 원문에 없던 연결어/서술어를 많이 새로 쓰게 되어,
+// 생성문 토큰 수로 나누면 정상 의역까지 낮은 비율로 나와 오탐한다(실측:
+// 8~17%). "원문의 핵심 토큰이 생성문에 얼마나 남아있는가"로 보면 정상
+// 의역은 비율이 높게, 소재가 통째로 바뀐 경우는 0%로 나온다.
+//
+// 헤드라인이 한국어가 아니면(해외 모드 — 원문은 영어) 그 헤드라인은
+// 계산에서 건너뛴다. 실측 결과, 정확한 번역조차 원문과 정확히 같은
+// 문자열을 공유하지 않는다 — 예: "Trump"/"Dulles Airport"가 표기
+// 관례에 따라 "트럼프"/"덜레스 국제공항"으로 옮겨지면 원문과 생성문의
+// 토큰 문자열 자체가 다르다. 이 검사는 같은 언어 안에서 소재가 통째로
+// 바뀌는 것만 잡을 수 있는 근사치라, 번역이 개입하는 순간 항상
+// 오탐한다(실측: 정확한 번역인데도 중복도 0~4%). 해외 모드에서 번역
+// 자체의 정확성은 findLeakedEnglish/findForeignCJK 및
+// news_translation.go의 별도 검증이 담당한다. 비교 가능한(한국어)
+// 헤드라인이 하나도 없으면(전부 해외 모드거나 groundingText가 비어
+// 있으면) 검사 전체를 건너뛴다.
 func findTopicMismatch(generated, groundingText string) (float64, bool) {
 	if groundingText == "" {
 		return 0, false
 	}
-	if !hangulSyllablePattern.MatchString(groundingText) {
-		// 원문이 한국어가 아니면(해외 모드 — 원문은 영어) 이 검사를 아예
-		// 건너뛴다. 실측 결과, 정확한 번역조차 원문과 정확히 같은 문자열을
-		// 공유하지 않는다 — 예: "Trump"/"Dulles Airport"가 표기 관례에 따라
-		// "트럼프"/"덜레스 국제공항"으로 옮겨지면 원문과 생성문의 토큰
-		// 문자열 자체가 다르다. 이 검사는 같은 언어 안에서 소재가 통째로
-		// 바뀌는 것만 잡을 수 있는 근사치라, 번역이 개입하는 순간 항상
-		// 오탐한다(실측: 정확한 번역인데도 중복도 0~4%). 해외 모드에서
-		// 번역 자체의 정확성은 findLeakedEnglish/findForeignCJK 및
-		// news_translation.go의 별도 검증이 담당한다.
-		return 0, false
-	}
-	srcTokens := extractTopicTokens(groundingText)
-	if len(srcTokens) == 0 {
-		return 0, false
-	}
 	genTokens := extractTopicTokens(generated)
 
-	overlap := 0
-	for t := range srcTokens {
-		if genTokens[t] {
-			overlap++
+	best := 0.0
+	compared := false
+	for _, headline := range strings.Split(groundingText, "\n") {
+		headline = strings.TrimSpace(headline)
+		if headline == "" || !hangulSyllablePattern.MatchString(headline) {
+			continue
+		}
+		srcTokens := extractTopicTokens(headline)
+		if len(srcTokens) == 0 {
+			continue
+		}
+		compared = true
+
+		overlap := 0
+		for t := range srcTokens {
+			if genTokens[t] {
+				overlap++
+			}
+		}
+		if ratio := float64(overlap) / float64(len(srcTokens)); ratio > best {
+			best = ratio
 		}
 	}
-	ratio := float64(overlap) / float64(len(srcTokens))
-	if ratio < topicOverlapMinRatio {
-		return ratio, true
+	if !compared {
+		return 0, false
 	}
-	return ratio, false
+	if best < topicOverlapMinRatio {
+		return best, true
+	}
+	return best, false
 }
 
 // errBriefingValidationFailed는 한 번 재시도한 뒤에도 여전히 강한
