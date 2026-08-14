@@ -428,15 +428,50 @@ func TestToBriefingNewsInputCapsAtHeadlineCount(t *testing.T) {
 	}
 }
 
-func TestFindForeignCJK(t *testing.T) {
-	if _, found := findForeignCJK("대구는 오늘 대체로 맑아 우산 없이 외출하기 좋은 날씨입니다."); found {
+func TestFindForeignScript(t *testing.T) {
+	if _, found := findForeignScript("대구는 오늘 대체로 맑아 우산 없이 외출하기 좋은 날씨입니다."); found {
 		t.Error("expected no false positive on ordinary Hangul text")
 	}
-	if match, found := findForeignCJK("这是中文字符가 섞인 문장입니다."); !found || match == "" {
+	if match, found := findForeignScript("这是中文字符가 섞인 문장입니다."); !found || match == "" {
 		t.Error("expected Chinese Han characters to be detected")
 	}
-	if _, found := findForeignCJK("これは日本語です가 섞인 문장"); !found {
+	if _, found := findForeignScript("これは日本語です가 섞인 문장"); !found {
 		t.Error("expected Japanese kana to be detected")
+	}
+}
+
+// TestFindForeignScript_DetectsNonHangulScriptsBeyondCJK는 실제 보고된
+// 오탐 사례를 회귀 테스트로 고정한다: 인도 도시 "Ahmedabad"를 "아마다바드"로
+// 표기하려다 힌디어 데바나가리 문자(अहमदाबाद)가 그대로 노출됐다. 국제
+// 뉴스가 다룰 수 있는 다른 지역의 문자 체계(아랍어/히브리어/태국어/키릴
+// 문자/그리스 문자)도 함께 잡아내는지, 그리고 로마자(영어 고유명사)
+// 자체는 이 검사와 무관하게 통과하는지 확인한다 — 비한글이라고 무조건
+// 막는 게 아니라, 한글이 아닌 완전히 다른 문자 체계만 막아야 한다.
+func TestFindForeignScript_DetectsNonHangulScriptsBeyondCJK(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+	}{
+		{"데바나가리(힌디어)", "인도 아마다바드अहमदाबाद에서 발생한 사건입니다."},
+		{"아랍 문자", "카이رو에서 회담이 열렸습니다."},
+		{"히브리 문자", "예루살렘ירושלים에서 협상이 재개됐습니다."},
+		{"태국 문자", "방콕ประเทศไทย에서 열린 회의입니다."},
+		{"키릴 문자", "모스크바москва에서 발표했습니다."},
+		{"그리스 문자", "아테네Αθήνα에서 개최됩니다."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if match, found := findForeignScript(tc.text); !found || match == "" {
+				t.Errorf("expected %s to be detected in %q", tc.name, tc.text)
+			}
+		})
+	}
+
+	// 로마자 자체(영어 고유명사를 원문 그대로 쓰는 것)는 이 검사와
+	// 무관하게 통과해야 한다 — 비한글이라고 무조건 막으면 "Ahmedabad"를
+	// 그대로 쓰는 정상적인 표기까지 막히게 된다.
+	if match, found := findForeignScript("인도 Ahmedabad에서 발생한 사건입니다."); found {
+		t.Errorf("expected plain Latin script (romanized place name) not to be flagged, got %q", match)
 	}
 }
 
@@ -1604,10 +1639,15 @@ func TestExchangeBriefingPromptFitsWithinTokenBudget(t *testing.T) {
 // title 상한을 80에서 120으로 올리고(이 테스트의 인위적 최악 시나리오
 // 기준 실측 1,793토큰), 원문이 말줄임표로 끝나 불완전할 때 숫자를
 // 추측하지 말라는 규칙 6번을 newsSectionSystemPrompt에 추가하며(실측
-// 1,902토큰) 1650에서 1950으로 함께 올렸다. 늘어난 뒤에도 6,000 TPM
-// 한도까지는 여전히 4,000토큰 이상의 여유가 있다. 다음에 규칙이나 상한을
+// 1,902토큰) 1650에서 1950으로 함께 올렸다.
+//
+// 그 뒤 인도 지명("Ahmedabad")을 표기하려다 힌디어 데바나가리 문자가
+// 그대로 노출된 사례가 보고되어, 인도·중동·동남아·러시아 등 비영어권
+// 지명·인명에 그 지역 고유 문자를 섞지 말라는 규칙 7번을 추가하며(실측
+// 2,113토큰) 1950에서 2150으로 함께 올렸다. 늘어난 뒤에도 6,000 TPM
+// 한도까지는 여전히 3,800토큰 이상의 여유가 있다. 다음에 규칙이나 상한을
 // 추가할 때는 이 값을 또 올리기보다, 정말 필요한지부터 검토해야 한다.
-const briefingNewsPromptTokenBudget = 1950
+const briefingNewsPromptTokenBudget = 2150
 
 // TestNewsBriefingPromptFitsWithinTokenBudget은 뉴스 브리핑 프롬프트가
 // briefingNewsPromptTokenBudget을 넘지 않는지 검증한다. 헤드라인 3개
@@ -1686,7 +1726,7 @@ func TestNewsSectionSystemPromptBansCJKAsTopPriorityRule(t *testing.T) {
 // 섞이는 것을 막기 위한 규칙이라 이 실패를 커버하지 못했다 — 이번 실패는
 // 고유명사가 아니라 "배 둘레"의 한자어 표현인 腹圍(복위)처럼, 흔히
 // 한자로도 표기되는 일반/전문 용어를 무리하게 정확히 옮기려다 생긴
-// 것이기 때문이다. findForeignCJK가 사후에 이미 이런 출력을 걸러내고
+// 것이기 때문이다. findForeignScript가 사후에 이미 이런 출력을 걸러내고
 // 있었지만(validateSectionOutput), 생성 단계에서부터 이런 시도 자체를
 // 막고 실패 시 쉬운 말로 풀어 쓰도록 유도하는 전용 규칙이 있어야
 // 재시도 후에도 같은 헤드라인이 다시 선택될 때 같은 실패가 반복되는
@@ -1700,6 +1740,25 @@ func TestNewsSectionSystemPromptCoversTechnicalTermHanjaMixing(t *testing.T) {
 	}
 	if !strings.Contains(newsSectionSystemPrompt, "쉬운 말로 풀어") {
 		t.Error("expected guidance to paraphrase into simpler wording when a term is hard to render in pure Hangul, not just a bare CJK prohibition")
+	}
+}
+
+// TestNewsSectionSystemPromptCoversNonHangulScriptPlaceNames는 실제 보고된
+// 사례를 회귀 테스트로 고정한다: 인도 도시 "Ahmedabad"를 "아마다바드"로
+// 표기하려다 힌디어 데바나가리 문자(अहमदाबाद)가 그대로 노출됐다.
+// findForeignScript가 사후에 이런 출력을 걸러내지만(검증만으로는 재시도
+// 후에도 같은 헤드라인이 다시 선택되면 같은 실패가 반복될 수 있다),
+// 생성 단계에서부터 인도·중동·동남아·러시아 등 비영어권 지명·인명에
+// 그 지역 고유 문자를 섞지 말라는 전용 규칙이 있어야 한다.
+func TestNewsSectionSystemPromptCoversNonHangulScriptPlaceNames(t *testing.T) {
+	if !strings.Contains(newsSectionSystemPrompt, "데바나가리") {
+		t.Fatal("expected newsSectionSystemPrompt to contain guidance about Devanagari/Hindi script")
+	}
+	if !strings.Contains(newsSectionSystemPrompt, "Ahmedabad") {
+		t.Error("expected the concrete regressed example (\"Ahmedabad\") to remain in the prompt as a guiding example")
+	}
+	if !strings.Contains(newsSectionSystemPrompt, "अहमदाबाद") {
+		t.Error("expected the concrete Devanagari counter-example to remain in the prompt so the model sees what NOT to output")
 	}
 }
 

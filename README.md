@@ -227,7 +227,7 @@ CJK(한자·중국어·일본어) 금지 규칙은 domestic/international이 완
 misses"처럼 영어 문장과 이미 계산된 한글 숫자 표기를 의도적으로 섞어 넣어두는데("사전 변환"
 방식 — 위 통화 단위 단락 참고), 이 혼종 입력이 모델의 언어 경계 판단을 흐트러뜨려 한자/일본어
 유출을 유발할 수 있다고 보고, "입력이 섞여 있어도 숫자 값은 유지한 채 문장 전체를 순수 한국어로
-재구성하라"는 지침을 명시적으로 추가했습니다. `foreignCJKPattern`(`briefing.go`)은 한자 범위뿐
+재구성하라"는 지침을 명시적으로 추가했습니다. `foreignScriptPattern`(`briefing.go`)은 한자 범위뿐
 아니라 히라가나(U+3040–309F)·가타카나(U+30A0–30FF) 범위도 처음부터 포함하고 있어서,
 "Mesa Laboratories"를 "메사 랩터러リーズ"처럼 일본어 음차가 섞인 표기로 잘못 옮기는 경우도 이
 검사에 걸립니다 — 다만 검증만으로는 같은 실패가 재시도마다 반복될 수 있어서,
@@ -239,7 +239,7 @@ misses"처럼 영어 문장과 이미 계산된 한글 숫자 표기를 의도�
 BMI at predicting heart attacks" 헤드라인을 다루다가 "배圍"(한글 "배" + 한자 "圍"가 뒤섞인,
 어느 언어에도 존재하지 않는 표현)가 생성됐습니다. 이번엔 고유명사가 아니라 "배 둘레"의 한자어
 표현인 腹圍(복위)처럼, 흔히 한자로도 표기되는 일반/전문 용어(의학·과학·법률 등)를 모델이
-무리하게 정확히 옮기려다 생긴 실패였습니다. `findForeignCJK`가 사후에 이미 이 출력을
+무리하게 정확히 옮기려다 생긴 실패였습니다. `findForeignScript`가 사후에 이미 이 출력을
 걸러냈지만, 검증만으로는 재시도 후에도 같은 헤드라인이 다시 선택되면 같은 실패가 반복될 수
 있어(`pickNewsItemToExclude`가 매번 정확히 이 헤드라인을 제외 대상으로 골라준다는 보장이
 없습니다), `newsSectionSystemPrompt`에 규칙 5번("의학·과학·법률 등 전문 용어도 한자를 섞지
@@ -256,6 +256,26 @@ BMI at predicting heart attacks" 헤드라인을 다루다가 "배圍"(한글 "�
 매번 "배 둘레가 BMI보다 심장 질환 예측에 더 정확합니다"류의 순수 한글 문장이 나오는 것을
 확인했습니다.
 
+한자·가나만 잡던 이 검사는 이후 다른 문자 체계로도 재발했습니다: 인도 도시 "Ahmedabad"를
+"아마다바드"로 표기하려다 힌디어 데바나가리 문자(अहमदाबाद)가 그대로 노출됐습니다. 국제
+뉴스가 인도·중동·동남아·러시아 등 다양한 지역을 다루는 만큼, `foreignScriptPattern`(원래
+이름 `foreignCJKPattern`)이 매칭하는 범위를 한자(U+4E00–9FFF 등)·가나(U+3040–30FF)에서
+데바나가리(U+0900–097F, 힌디어)·벵골 문자(U+0980–09FF)·아랍 문자(U+0600–06FF)·히브리
+문자(U+0590–05FF)·태국 문자(U+0E00–0E7F)·키릴 문자(U+0400–04FF)·그리스 문자
+(U+0370–03FF)까지 넓혔습니다 — 함수/변수 이름도 검사 범위가 CJK를 넘어선 것을 반영해
+`findForeignScript`로 바꿨습니다. 로마자(영어 고유명사를 원문 그대로 쓰는 것)는 이 검사와
+무관합니다 — 로마자 잔존 여부는 `findLeakedEnglish`가 별도로 담당하므로 "Ahmedabad"를
+영어 그대로 쓰는 것은 걸리지 않고, 그 지역 고유 문자로 옮겨 쓰려다 실패한 경우만 잡힙니다.
+`newsSectionSystemPrompt`(규칙 7번)와 `newsTranslationSystemPrompt`(규칙 0번)에도 "인도·
+중동·동남아·러시아 등 비영어권 지명·인명에 그 지역 고유 문자를 섞지 말고 한글 또는 영어
+원문만 쓰라"는 지침을 구체적인 예시(Ahmedabad/अहमदाबाद)와 함께 추가했습니다 — 두 프롬프트가
+상수를 공유하지 않으므로 위 한자 혼입 사례와 마찬가지로 양쪽에 동일하게 반영했고,
+`TestNewsSectionSystemPromptCoversNonHangulScriptPlaceNames`/
+`TestNewsTranslationSystemPromptCoversNonHangulScriptPlaceNames`가 이를 회귀 테스트로
+고정합니다. 규칙 추가로 뉴스 프롬프트 토큰 수가 다시 늘어(실측 2,113토큰)
+`briefingNewsPromptTokenBudget`을 1950에서 2150으로 올렸습니다 — 6,000 TPM 한도까지는
+여전히 3,800토큰 이상의 여유가 있습니다.
+
 - **존댓말 강제** (hardFailure): 날씨/환율/뉴스 공통 프롬프트 규칙("항상 합니다체로 작성하세요")에
   더해, 뉴스 문단은 원문(NewsData.io)이 기사체(~했다)라도 반드시 합니다체로 재작성하라는 전용
   규칙이 추가돼 있습니다. `findInformalSentenceEnding`이 반말/기사체 종결을 정규식으로
@@ -268,7 +288,7 @@ BMI at predicting heart attacks" 헤드라인을 다루다가 "배圍"(한글 "�
   검출되면 결과를 그대로 내보냅니다.
 - **환각 방지** (hardFailure, 5종): `findUngroundedNumber`(원본에 없는 숫자),
   `findFabricatedPercentage`(% 기호 조작), `findUngroundedProperNoun`(근거 없는 고유명사),
-  `findTopicMismatch`(토큰 중복도 기반 주제 이탈), `findLeakedEnglish`/`findForeignCJK`(번역 누락·
+  `findTopicMismatch`(토큰 중복도 기반 주제 이탈), `findLeakedEnglish`/`findForeignScript`(번역 누락·
   외국어 잔존)이 각각 실제로 관측됐던 환각 사례를 회귀 테스트로 고정해두고 있습니다. 우산 필요
   여부(날씨)·상승/하락 판단(환율)처럼 숫자 해석이 필요한 판단은 애초에 LLM에 맡기지 않고 Go가
   미리 계산해(`computeUmbrellaAdvice`, `computeExchangeTrend`) 프롬프트에 답으로 제공합니다 —

@@ -606,15 +606,33 @@ func findBannedPhrase(text string) (string, bool) {
 	return "", false
 }
 
-// foreignCJKPattern은 한자(중국어/한자와 공유되는 표의문자)와 일본어
-// 가나를 매칭합니다 — 순수 한국어 응답에는 절대 있어서는 안 되는
-// 문자들입니다. 한글 자체(U+AC00-D7A3 완성형 음절, U+1100-11FF /
-// U+3130-318F 자모)는 이 범위에 의도적으로 포함되지 않으므로 정상적인
-// 한국어 텍스트는 절대 이 패턴에 걸리지 않습니다.
-var foreignCJKPattern = regexp.MustCompile(`[\x{4E00}-\x{9FFF}\x{3400}-\x{4DBF}\x{3040}-\x{309F}\x{30A0}-\x{30FF}]`)
+// foreignScriptPattern은 한글이 아닌 외국 문자 체계를 폭넓게 매칭합니다 —
+// 순수 한국어 응답에는 절대 있어서는 안 되는 문자들입니다. 처음에는
+// 한자(중국어/한자와 공유되는 표의문자)와 일본어 가나만 검사했지만
+// ("findForeignCJK"), 실제 보고된 사례: 인도 도시 "Ahmedabad"를
+// "아마다바드"로 표기하려다 힌디어 데바나가리 문자(अहमदाबाद)가 그대로
+// 노출됐다 — 국제 뉴스가 인도·중동·동남아·러시아 등 다양한 지역을 다루는
+// 만큼, 그 지역 고유 문자 체계도 함께 대비하도록 검사 범위를 넓혔다(이름도
+// "CJK"에서 이 폭을 반영해 바꿨다). 로마자(영어 고유명사)는 이 검사와
+// 무관하다 — 로마자 잔존 여부는 findLeakedEnglish가 별도로 담당하므로,
+// "Ahmedabad"를 영어 원문 그대로 쓰는 것은 이 검사에 걸리지 않는다. 한글
+// 자체(U+AC00-D7A3 완성형 음절, U+1100-11FF / U+3130-318F 자모)는 이
+// 범위에 의도적으로 포함되지 않으므로 정상적인 한국어 텍스트는 절대 이
+// 패턴에 걸리지 않는다.
+var foreignScriptPattern = regexp.MustCompile(`[` +
+	`\x{4E00}-\x{9FFF}\x{3400}-\x{4DBF}` + // 한자(중국어/한자)
+	`\x{3040}-\x{309F}\x{30A0}-\x{30FF}` + // 히라가나/가타카나(일본어)
+	`\x{0900}-\x{097F}` + // 데바나가리(힌디어/마라티어/네팔어)
+	`\x{0980}-\x{09FF}` + // 벵골 문자(벵골어)
+	`\x{0600}-\x{06FF}` + // 아랍 문자(아랍어/페르시아어/우르두어)
+	`\x{0590}-\x{05FF}` + // 히브리 문자
+	`\x{0E00}-\x{0E7F}` + // 태국 문자
+	`\x{0400}-\x{04FF}` + // 키릴 문자(러시아어 등)
+	`\x{0370}-\x{03FF}` + // 그리스 문자
+	`]`)
 
-func findForeignCJK(text string) (string, bool) {
-	match := foreignCJKPattern.FindString(text)
+func findForeignScript(text string) (string, bool) {
+	match := foreignScriptPattern.FindString(text)
 	return match, match != ""
 }
 
@@ -991,7 +1009,7 @@ var hangulSyllablePattern = regexp.MustCompile(`[가-힣]`)
 // 토큰 문자열 자체가 다르다. 이 검사는 같은 언어 안에서 소재가 통째로
 // 바뀌는 것만 잡을 수 있는 근사치라, 번역이 개입하는 순간 항상
 // 오탐한다(실측: 정확한 번역인데도 중복도 0~4%). 해외 모드에서 번역
-// 자체의 정확성은 findLeakedEnglish/findForeignCJK 및
+// 자체의 정확성은 findLeakedEnglish/findForeignScript 및
 // news_translation.go의 별도 검증이 담당한다. 비교 가능한(한국어)
 // 헤드라인이 하나도 없으면(전부 해외 모드거나 groundingText가 비어
 // 있으면) 검사 전체를 건너뛴다.
@@ -1034,7 +1052,7 @@ func findTopicMismatch(generated, groundingText string) (float64, bool) {
 }
 
 // errBriefingValidationFailed는 한 번 재시도한 뒤에도 여전히 강한
-// 콘텐츠 검증(외국 CJK 문자, 새어나온 영어, 근거 없는 숫자)을 통과하지
+// 콘텐츠 검증(비한글 외국 문자, 새어나온 영어, 근거 없는 숫자)을 통과하지
 // 못한 섹션을 표시합니다 — resolveBriefingSection은 이를 일반적인
 // 생성 오류와 다르게 처리합니다: 되돌아갈 오래된 캐시가 없다면 해당
 // 섹션을 조용히 생략하는 대신 명시적으로 "⚠️ 생성 실패"를 표시합니다.
@@ -1390,7 +1408,7 @@ const exchangeSectionSystemPrompt = briefingCommonRules + `
 // 가나/한자가 섞이는 것을 막기 위한 규칙이라 이 사례를 커버하지
 // 못한다 — 이번 실패는 고유명사가 아니라 "허리둘레"의 한자어 표현인
 // 腹圍(복위)처럼, 흔히 한자로도 표기되는 전문 용어를 무리하게 정확히
-// 옮기려다 생긴 실패이기 때문이다. findForeignCJK가 사후에 이미
+// 옮기려다 생긴 실패이기 때문이다. findForeignScript가 사후에 이미
 // 걸러내고 있었지만(validateSectionOutput 최우선 검사), 검증만으로는
 // 재시도 후에도 같은 헤드라인이 다시 선택되면 같은 실패가 반복될 수
 // 있어(pickNewsItemToExclude가 매번 정확히 이 헤드라인을 제외 대상으로
@@ -1408,12 +1426,13 @@ const newsSectionSystemPrompt = briefingCommonRules + `
 4. 영어 고유명사(회사명·제품명)는 외래어 표기법에 맞는 한글이나 영어 원문 그대로만 쓰세요 — 일본어·중국어식 음차 금지.
 5. 의학·과학·법률 등 전문 용어도 한자를 섞지 말고 한글로만 쓰세요(예: "belly size" → "배 둘레", 한자 "腹圍" 금지). 한글로 옮기기 애매하면 억지로 옮기지 말고 쉬운 말로 풀어 쓰세요.
 6. title이나 description이 말줄임표(…)로 끝나 문장이 불완전하면, 그 안의 숫자·세부 정보를 추측해서 채우지 마세요 — 명시된 부분까지만 쓰거나 그 항목은 간략히만 언급하세요.
+7. 인도·중동·동남아·러시아 등 영어권이 아닌 지명·인명을 표기할 때도 그 지역 고유 문자(힌디어 데바나가리, 아랍 문자, 태국 문자, 키릴 문자 등)를 절대 섞지 마세요 — 한글 표기(외래어 표기법에 맞게) 또는 영어 원문 그대로만 쓰세요. 예: "Ahmedabad" → "아마다바드" 또는 "Ahmedabad" 그대로, 힌디어 문자(अहमदाबाद)는 절대 쓰지 마세요.
 
 예시: 한 스타트업이 5000만 달러 투자를 유치했습니다.`
 
 // maxSectionRegenerations는 어떤 검사(또는 몇 개의 검사)가 실패했는지와
 // 무관하게, 섹션 하나의 콘텐츠 검증 전체 예산을 공유되는 재시도 한 번으로
-// 제한합니다. 이전에는 강한 실패(CJK/새어나온 영어/근거 없는 숫자/근거
+// 제한합니다. 이전에는 강한 실패(비한글 외국 문자/새어나온 영어/근거 없는 숫자/근거
 // 없는 고유명사)와 약한 금칙어 검사가 각자 독립적으로 재시도 횟수를
 // 추적했기 때문에, 시도마다 다른 검사가 번갈아 실패하면 섹션 하나에
 // Groq 호출이 최대 3번까지 들 수 있었습니다. 전체를 합쳐 재시도 1회로
@@ -1423,10 +1442,10 @@ const newsSectionSystemPrompt = briefingCommonRules + `
 const maxSectionRegenerations = 1
 
 // validateSectionOutput은 생성된 섹션에 대해 모든 콘텐츠 검사를 고정된
-// 우선순위 순서(CJK -> 영어 유출 -> 반복 구문 -> 근거 없는 숫자 -> 주제
+// 우선순위 순서(비한글 외국 문자 -> 영어 유출 -> 반복 구문 -> 근거 없는 숫자 -> 주제
 // 불일치 -> 조작된 퍼센트 -> 근거 없는 고유명사 -> 반말/기사체 어미 ->
 // 금칙 문구)로 실행하고 처음 발견된 실패를 보고합니다. hardFailure는
-// "절대 그대로 내보낼 수 없는" 실패(CJK 오염, 새어나온 영어, 근거 없는
+// "절대 그대로 내보낼 수 없는" 실패(비한글 외국 문자 오염, 새어나온 영어, 근거 없는
 // 숫자, 주제 불일치, 근거 없는 고유명사, 반말/기사체 어미)와 "약한"
 // 금칙어 검사를 구분하며, 이 값에 따라 resolveBriefingSection의 호출자가
 // 재시도 예산 소진을 오류(및 stale_fallback으로 대체)로 취급할지 아니면
@@ -1444,8 +1463,8 @@ const maxSectionRegenerations = 1
 // 추가로 확인해 완화 여부를 결정하는 데 씁니다(그 함수의 문서 주석
 // 참고). 계약 상대방 날조는 이 값이 항상 false라 완화 대상이 아닙니다.
 func validateSectionOutput(combined string, allowedNumbers []float64, groundingText string) (reason string, hardFailure, useFallback, lenientIfCoreNounSurvives bool) {
-	if match, found := findForeignCJK(combined); found {
-		return fmt.Sprintf("한자/CJK 문자 감지(%q)", match), true, false, false
+	if match, found := findForeignScript(combined); found {
+		return fmt.Sprintf("비한글 외국 문자 감지(%q)", match), true, false, false
 	}
 	if match, found := findLeakedEnglish(combined); found {
 		return fmt.Sprintf("번역되지 않은 영어(%q) 감지", match), true, false, false
@@ -1688,7 +1707,7 @@ func pickNewsItemToExclude(failedText string, items []briefingNewsItem) int {
 
 // generateNewsSectionText는 generateSectionText를 감싸서 뉴스 섹션에만
 // 해당하는 마지막 폴백 하나를 추가한다: 8B로 시작해 70B로 승격까지 했는데도
-// 강한 검증(CJK 오염, 새어나온 영어, 반말/기사체 어미 등)에 실패했다면,
+// 강한 검증(비한글 외국 문자 오염, 새어나온 영어, 반말/기사체 어미 등)에 실패했다면,
 // 같은 헤드라인 3개를 다시 굴리는 대신(입력이 그대로면 같은 실패가 반복될
 // 가능성이 높다) pickNewsItemToExclude로 추정한 문제 항목 하나를 빼고
 // 나머지 헤드라인만으로 딱 한 번 더 생성을 시도한다. 이 재시도는 다시
@@ -1722,7 +1741,7 @@ func generateNewsSectionText(ctx context.Context, name, model, systemPrompt, use
 	retryText, retryIsFallback, retryErr := generateSectionText(ctx, name, frequentGroqModel(), systemPrompt, reducedUserContent, allowedNewsNumbers(reduced), newsGroundingText(reduced), hallucinationFallback)
 	if retryErr != nil {
 		// retryErr(이번 시도의 실제 실패 사유)을 반환해야 한다 — 예전에는
-		// 여기서 최초 실패(err, 예: "한자/CJK 문자 감지")를 그대로
+		// 여기서 최초 실패(err, 예: "비한글 외국 문자 감지")를 그대로
 		// 반환했는데, 그러면 이 세 번째 시도가 실제로는 API 오류든 빈
 		// 응답이든 또 다른 검증 실패든, 로그와 최종 실패 사유(및
 		// classifyBriefingFailureReason 분류)에는 항상 두 번째 시도의
@@ -1911,7 +1930,7 @@ func resolveBriefingSection(ctx context.Context, section, model, hash, systemPro
 		}
 		if errors.Is(err, errBriefingValidationFailed) {
 			// 조용히 대체할 오래된 캐시가 없고, 재시도 후에도 이 섹션이 여전히
-			// 강한 콘텐츠 검증(CJK/새어나온 영어)에 실패한 경우입니다 — 합쳐진
+			// 강한 콘텐츠 검증(비한글 외국 문자/새어나온 영어)에 실패한 경우입니다 — 합쳐진
 			// 브리핑에서 이 섹션을 조용히 빼는 대신 명시적으로 표시합니다.
 			return briefingSectionOutput{Text: "⚠️ 생성 실패", GeneratedAt: time.Now(), Status: briefingStatusFailed, FailureReason: reason}
 		}
@@ -1999,7 +2018,7 @@ func getBriefing(ctx context.Context, weather *WeatherData, exchange *ExchangeDa
 	// 모델)을 사용합니다 — 브리핑 섹션은 캐시가 미스될 때마다(도시 전환,
 	// 통화쌍 전환, 뉴스 카테고리 변경) 재생성되므로 호출 빈도가 높은
 	// 지점이라 70B 모델의 하루 1,000회 쿼터를 금방 소진시킬 수 있습니다.
-	// 8B 모델의 출력이 강한 콘텐츠 검증(CJK 오염, 새어나온 영어, 근거 없는
+	// 8B 모델의 출력이 강한 콘텐츠 검증(비한글 외국 문자 오염, 새어나온 영어, 근거 없는
 	// 숫자, hallucination된 고유명사)에 실패하면 generateSectionText가 단
 	// 한 번 escalationGroqModel()로 승격 재시도하므로, 정확도가 중요한
 	// 출력은 기본값이 아니라 실제로 필요할 때 더 큰 모델을 받게 됩니다.

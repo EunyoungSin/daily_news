@@ -38,7 +38,7 @@ const itTermGlossary = `IT/AI 전문 용어는 자연스러운 한국어 관용 
 // briefingCommonRules 기반, 하나는 독립적인 문자열), 이런 종류의 규칙을
 // 바꿀 때는 두 곳 모두 함께 갱신해야 한다.
 const newsTranslationSystemPrompt = `당신은 다양한 분야(정치, 경제, 사회, 문화, 스포츠, 기술 등)의 뉴스 헤드라인을 한국어로 번역하는 전문 번역가입니다. 원문의 실제 주제나 분야를 임의로 다른 분야(기술, AI 등)로 바꾸거나 재해석하지 말고, 있는 그대로 번역하세요.
-0. 번역문은 순수 한국어만 사용하세요 — 한자·중국어·일본어 문자는 절대 쓰지 마세요(숫자는 예외). 원문에 등장하는 지명·인명이 한자나 가나로 표기되어 있어도, 통용되는 한국어 표기로 옮기세요(고유명사를 원문의 로마자/한글 그대로 유지하는 것은 허용되지만 한자·가나로는 절대 남기지 마세요). 의학·과학·법률 등 전문 용어도 한자를 섞지 말고 한글로만 쓰고(예: "belly size" → "배 둘레", 한자 "腹圍" 금지), 옮기기 애매하면 쉬운 말로 풀어서 번역하세요.
+0. 번역문은 순수 한국어만 사용하세요 — 한자·중국어·일본어 문자는 절대 쓰지 마세요(숫자는 예외). 원문에 등장하는 지명·인명이 한자나 가나로 표기되어 있어도, 통용되는 한국어 표기로 옮기세요(고유명사를 원문의 로마자/한글 그대로 유지하는 것은 허용되지만 한자·가나로는 절대 남기지 마세요). 인도·중동·동남아·러시아 등 영어권이 아닌 지명·인명도 마찬가지로 그 지역 고유 문자(힌디어 데바나가리, 아랍 문자, 태국 문자, 키릴 문자 등)를 절대 섞지 마세요 — 한글 표기 또는 영어 원문 그대로만 쓰세요(예: "Ahmedabad" → "아마다바드" 또는 "Ahmedabad" 그대로, 힌디어 문자 अहमदाबाद는 절대 금지). 의학·과학·법률 등 전문 용어도 한자를 섞지 말고 한글로만 쓰고(예: "belly size" → "배 둘레", 한자 "腹圍" 금지), 옮기기 애매하면 쉬운 말로 풀어서 번역하세요.
 1. 원문의 의미를 정확히 유지하면서 자연스러운 한국어 뉴스 제목체로 번역하세요 (예: "~ 발표", "~ 공개", "~ 논란" 같은 뉴스 제목 어투).
 2. 고유명사(회사명, 프로젝트명, 인명)는 번역하지 말고 원문 그대로 유지하세요.
 3. 원문에 있던 숫자+단위(K/M/B) 표현은 이미 정확한 한국어 환산값으로 전부 바뀌어서 전달됩니다 (예: 원문의 "9B"는 "90억"으로, "$6.6B"는 "66억 달러"로 이미 바뀌어 있음). 번역문에는 그 한국어 값을 그대로 사용하세요. "M"이나 "B" 같은 원래 단위 알파벳은 데이터에 남아있지 않으니, 있지도 않은 단위를 상상해서 다시 계산하거나 다른 숫자로 바꾸지 마세요. 만약 이렇게 이미 변환되어 있지 않은 숫자+단위가 있다면, K=천, M=백만, B=십억(10억) 기준으로 정확히 계산해서 변환하세요.
@@ -79,8 +79,8 @@ func lookupNewsTranslation(ctx context.Context, conn *sql.DB, articleID string) 
 // 번역 실패 사유 분류. rate_limit과 그 외(validation_failed/api_error)는
 // 서로 다른 쿨다운(newsTranslationCooldownForReason)을 받는다 — rate
 // limit은 Groq TPM(분당 토큰) 예산이 그 다음 분(minute) 버킷이면 대개
-// 풀려있으니 짧게, 그 외(한자/영어 혼입 같은 콘텐츠 검증 실패나 일반
-// API 오류)는 같은 입력을 당장 재시도해도 비슷한 결과가 나올 가능성이
+// 풀려있으니 짧게, 그 외(비한글 외국 문자/영어 혼입 같은 콘텐츠 검증
+// 실패나 일반 API 오류)는 같은 입력을 당장 재시도해도 비슷한 결과가 나올 가능성이
 // 있으니 기존처럼 길게 기다린다.
 const (
 	newsTranslationFailureReasonRateLimit        = "rate_limit"
@@ -112,7 +112,7 @@ func newsTranslationCooldownForReason(reason string) time.Duration {
 // classifyBriefingFailureReason과 같은 방식(에러 메시지에 "rate
 // limit"/"tokens per minute"/"(tpm)"가 있으면 rate_limit)이다.
 // validation_failed는 여기서 나오지 않는다 — 그건 에러가 아니라 성공
-// 응답인데 검증(findForeignCJK/findLeakedEnglish)에 실패해 특정 항목의
+// 응답인데 검증(findForeignScript/findLeakedEnglish)에 실패해 특정 항목의
 // translatedTitle만 빈 문자열이 된 경우라서, 그 판단은 이 함수가 아니라
 // translateNewsItems가 fetchNewsTranslation의 반환값을 보고 직접 한다.
 func classifyNewsTranslationFailureReason(err error) string {
@@ -338,9 +338,10 @@ type newsTranslationEnvelope struct {
 	Translations []newsTranslationResponseItem `json:"translations"`
 }
 
-// maxNewsTranslationRetries는 번역된 제목 중 하나라도 엄격한 검증(외국어
-// CJK 문자 혼입이나 영어 원문 잔존 — briefing.go의 findForeignCJK/
-// findLeakedEnglish를 그대로 재사용해서, 두 번역 경로가 무엇을 실패로
+// maxNewsTranslationRetries는 번역된 제목 중 하나라도 엄격한 검증(한자/
+// 가나/데바나가리 등 비한글 외국 문자 혼입이나 영어 원문 잔존 —
+// briefing.go의 findForeignScript/findLeakedEnglish를 그대로 재사용해서,
+// 두 번역 경로가 무엇을 실패로
 // 볼지 서로 일치시킨다)에 실패했을 때 배치 전체에 대해 1회 재시도(총 2회
 // 시도)한다는 뜻이다. 재시도할 때는 frequentGroqModel()에서
 // escalationGroqModel()로 모델을 승격한다(groq.go 참고) — 원래는 숫자 단위
@@ -414,11 +415,11 @@ func fetchNewsTranslation(ctx context.Context, items []NewsItem) ([]newsTranslat
 		}
 
 		if groqEscalationCountToday() >= maxDailyGroqEscalations {
-			log.Printf("뉴스 번역: 한자/영어 혼입 감지되었으나 오늘 70B 승격 횟수가 안전 한도(%d회)에 도달해 승격 없이 마지막 결과를 사용합니다", maxDailyGroqEscalations)
+			log.Printf("뉴스 번역: 비한글 외국 문자/영어 혼입 감지되었으나 오늘 70B 승격 횟수가 안전 한도(%d회)에 도달해 승격 없이 마지막 결과를 사용합니다", maxDailyGroqEscalations)
 			break
 		}
 		escalated := escalationGroqModel()
-		log.Printf("뉴스 번역: 한자/영어 혼입 감지, 모델 승격 후 배치 재시도 %d/%d (%s -> %s, 오늘 승격 %d/%d회째)",
+		log.Printf("뉴스 번역: 비한글 외국 문자/영어 혼입 감지, 모델 승격 후 배치 재시도 %d/%d (%s -> %s, 오늘 승격 %d/%d회째)",
 			attempt, maxNewsTranslationRetries+1, model, escalated, groqEscalationCountToday()+1, maxDailyGroqEscalations)
 		model = escalated
 	}
@@ -427,8 +428,8 @@ func fetchNewsTranslation(ctx context.Context, items []NewsItem) ([]newsTranslat
 	// 비워내면, translateNewsItems에 이미 있는 빈 TranslatedTitle 폴백
 	// ("번역 실패, 원문 표시")이 해당 항목에만 적용된다.
 	for i, t := range translations {
-		if _, found := findForeignCJK(t.TranslatedTitle); found {
-			log.Printf("뉴스 번역(%s): 한자/CJK 문자 반복 감지, 원문으로 폴백", t.ID)
+		if _, found := findForeignScript(t.TranslatedTitle); found {
+			log.Printf("뉴스 번역(%s): 비한글 외국 문자 반복 감지, 원문으로 폴백", t.ID)
 			translations[i].TranslatedTitle = ""
 			continue
 		}
@@ -443,7 +444,7 @@ func fetchNewsTranslation(ctx context.Context, items []NewsItem) ([]newsTranslat
 
 func allNewsTranslationsValid(translations []newsTranslationResponseItem) bool {
 	for _, t := range translations {
-		if _, found := findForeignCJK(t.TranslatedTitle); found {
+		if _, found := findForeignScript(t.TranslatedTitle); found {
 			return false
 		}
 		if _, found := findLeakedEnglish(t.TranslatedTitle); found {

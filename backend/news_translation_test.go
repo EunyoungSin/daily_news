@@ -328,3 +328,22 @@ func TestNewsTranslationSystemPromptCoversTechnicalTermHanjaMixing(t *testing.T)
 		t.Error("expected guidance to paraphrase into simpler wording when a term is hard to render in pure Hangul, not just a bare CJK prohibition")
 	}
 }
+
+// TestNewsTranslationSystemPromptCoversNonHangulScriptPlaceNames는
+// briefing.go의 TestNewsSectionSystemPromptCoversNonHangulScriptPlaceNames와
+// 같은 이유로 존재한다: 이 번역 프롬프트는 newsSectionSystemPrompt와
+// 상수를 공유하지 않는 완전히 독립된 문자열이라, 같은 종류의 규칙(인도
+// 지명 "Ahmedabad"가 힌디어 데바나가리 문자로 노출된 사례 방지)을
+// 한쪽에만 추가하고 다른 쪽에 반영하는 것을 잊어버리는 회귀가 있을 수
+// 있다.
+func TestNewsTranslationSystemPromptCoversNonHangulScriptPlaceNames(t *testing.T) {
+	if !strings.Contains(newsTranslationSystemPrompt, "데바나가리") {
+		t.Fatal("expected newsTranslationSystemPrompt to contain guidance about Devanagari/Hindi script")
+	}
+	if !strings.Contains(newsTranslationSystemPrompt, "Ahmedabad") {
+		t.Error("expected the concrete regressed example (\"Ahmedabad\") to remain in the prompt as a guiding example")
+	}
+	if !strings.Contains(newsTranslationSystemPrompt, "अहमदाबाद") {
+		t.Error("expected the concrete Devanagari counter-example to remain in the prompt so the model sees what NOT to output")
+	}
+}

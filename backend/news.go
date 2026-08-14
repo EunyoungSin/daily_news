@@ -169,7 +169,7 @@ func fetchNewsDataIO(ctx context.Context, category, region string) (*NewsData, e
 			// NewsData.io가 한글 텍스트를 완성형(NFC)이 아니라 조합형
 			// (NFD, 예: "계룡건설" 대신 낱자모로 분해된 형태)으로 내려주는
 			// 기사가 실제로 관측됐다 — [가-힣] 범위만 매칭하는
-			// findForeignCJK/findUngroundedProperNoun/findTopicMismatch
+			// findForeignScript/findUngroundedProperNoun/findTopicMismatch
 			// 등 한글 전용 정규식들이 그런 텍스트에서는 한글을 아예
 			// "한글이 아닌 것"처럼 인식하지 못한다(예: "1000","14","CEO",
 			// "SR" 같은 비한글 토큰만 남고 회사명/사건명이 통째로 사라짐).
