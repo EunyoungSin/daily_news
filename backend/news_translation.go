@@ -382,24 +382,29 @@ func fetchNewsTranslation(ctx context.Context, items []NewsItem) ([]newsTranslat
 	model := frequentGroqModel()
 
 	for attempt := 1; attempt <= maxNewsTranslationRetries+1; attempt++ {
-		// maxTokens=500: estimateTokenCount(groq.go)로 다소 긴 편에 속하는
-		// 실제 뉴스 제목 스타일 번역문 5개(각 35~40자) + NewsData.io 스타일
-		// article_id(32자)로 구성한 배치 출력 JSON을 측정해보면 약 330
-		// 토큰이었다 — 원래 700은 이 실제 필요량 대비 여유가 지나치게
-		// 커서, TPM(분당 토큰) 예산을 두고 다른 Groq 호출들과 경쟁하는
-		// 상황에서 불필요하게 큰 몫을 예약해두는 셈이었다. 500은 이
-		// 측정값 대비 약 50% 여유를 남기면서도(제목이 더 길어지거나
-		// 토크나이저가 이 추정치보다 다소 비효율적이어도 흡수할 수 있는
-		// 수준), 700 대비 상한을 낮춰 모델이 혹시라도 반복 생성 루프에
-		// 빠졌을 때의 최악의 토큰 소비도 함께 줄인다. 다만 max_tokens는
-		// 상한일 뿐 실제 소비량이 아니므로 — 정상적으로 성공하는
-		// 번역이라면 애초에 700이든 500이든 실제 사용 토큰은 거의
-		// 동일하다 — 이 조정의 효과는 주로 그 반복 루프/이례적으로 긴
-		// 응답 같은 예외 상황의 상한을 낮추는 데 있다.
+		// maxTokens=1200 (2026-08, llama-3.1-8b-instant -> openai/gpt-oss-20b
+		// 교체 때 500에서 올림): estimateTokenCount(groq.go)로 다소 긴 편에
+		// 속하는 실제 뉴스 제목 스타일 번역문 5개(각 35~40자) + NewsData.io
+		// 스타일 article_id(32자)로 구성한 배치 출력 JSON의 순수 콘텐츠
+		// 분량 자체는 예전 측정 그대로 약 330토큰이지만, gpt-oss-20b는
+		// 추론 모델이라 completion_tokens 예산을 최종 답변보다 먼저 숨겨진
+		// "추론"에 쓴다(groqReasoningEffort 문서 주석 참고). reasoning_effort
+		// ="low"로 낮춰도 실제 5개 배치 호출을 반복 관찰한 결과 추론
+		// 토큰만 16~410으로 요청마다 크게 들쭉날쭉했다(500에서는 246토큰
+		// 소진으로 완료 480/500=96% 사용, 800으로 올린 뒤에도 한 번은
+		// 670/800=84%까지 소진되는 것을 실측함). 추론 모델의 reasoning_effort
+		// ="low"는 상한이 아니라 "느슨한 가이드"일 뿐이라 이런 변동을
+		// 완전히 없앨 수 없다고 보고, 1200으로 한 번 더 올려 관측된
+		// 최악값(670) 대비 약 79% 여유를 남긴다. 이 조정의 효과는 정상
+		// 케이스의 실제 소비량을 늘리는 게 아니라(추론+콘텐츠 합계가
+		// 정상적으로 성공하는 번역이라면 상한과 무관하게 거의 동일하다),
+		// 예상보다 긴 추론 같은 예외 상황에서 콘텐츠가 잘려 응답이 통째로
+		// 비거나(generateSectionText의 "response was empty"와 동일한 실패
+		// 유형) JSON 파싱이 깨지는 사고를 막는 데 있다.
 		content, callErr := callGroqChat(ctx, apiKey, model, []groqChatMessage{
 			{Role: "system", Content: newsTranslationSystemPrompt},
 			{Role: "user", Content: userContent},
-		}, 0.2, 500, 0, true)
+		}, 0.2, 1200, 0, true)
 		if callErr != nil {
 			return nil, callErr
 		}

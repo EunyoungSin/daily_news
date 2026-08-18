@@ -279,13 +279,19 @@ type briefingNewsInput struct {
 // 들어가는 분량을 제한합니다. NewsData.io의 description은 길면 수백 자에
 // 달하는데, 한 요청에 헤드라인 여러 개 분량이 들어가면 금방 누적됩니다 —
 // 240자였을 때 실측 결과 뉴스 브리핑 요청 하나가 6,148토큰까지 늘어나
-// llama-3.1-8b-instant의 분당 한도(6,000 TPM)를 단일 요청만으로 초과하는
-// 것이 확인되어 100자로 줄였는데, 그 뒤 존댓말 강화·환각 방지 지침이
-// newsSectionSystemPrompt에 추가되며 프롬프트 총합이 다시 2,464토큰까지
-// 늘어난 것이 재확인되어(TestNewsBriefingPromptFitsWithinTokenBudget 참고)
-// 80자로 한 번 더 줄였습니다. 요약에는 구체적 사실 하나를 더 뽑아낼 만큼의
-// description만 있으면 충분하지 전체가 필요한 게 아니므로, 문맥을 약간
-// 포기하는 대신 요청당 토큰 비용을 실질적으로 낮춥니다.
+// (당시 기본 모델이던) llama-3.1-8b-instant의 분당 한도(6,000 TPM)를 단일
+// 요청만으로 초과하는 것이 확인되어 100자로 줄였는데, 그 뒤 존댓말 강화·
+// 환각 방지 지침이 newsSectionSystemPrompt에 추가되며 프롬프트 총합이
+// 다시 2,464토큰까지 늘어난 것이 재확인되어(TestNewsBriefingPromptFitsWithinTokenBudget
+// 참고) 80자로 한 번 더 줄였습니다. 요약에는 구체적 사실 하나를 더 뽑아낼
+// 만큼의 description만 있으면 충분하지 전체가 필요한 게 아니므로, 문맥을
+// 약간 포기하는 대신 요청당 토큰 비용을 실질적으로 낮춥니다.
+//
+// (2026-08 추가) llama-3.1-8b-instant가 Groq에서 완전히 지원 종료되어
+// 기본 모델이 openai/gpt-oss-20b로 바뀌었는데, 이 모델의 실제 분당 한도는
+// 8,000 TPM으로(콘솔 문서 기준, 6,000 TPM보다 오히려 33% 여유롭다) 위
+// 80자 제한은 여전히 안전하게 여유 있는 값이다 — 새 모델 자체는 이 값을
+// 더 줄일 이유를 주지 않으므로 그대로 유지한다.
 const briefingNewsDescriptionMaxRunes = 80
 
 // briefingNewsTitleMaxRunes는 title에 대한 상한입니다. description(80자)과
@@ -1338,9 +1344,10 @@ func allowedNewsNumbers(input *briefingNewsInput) []float64 {
 
 // 이 프롬프트들(briefingCommonRules + 섹션별 지침)은 세 섹션 모두가
 // 캐시 미스마다 매번 전송되므로 토큰 비용이 3배로 누적된다. 뉴스 프롬프트가
-// 실측 6,148토큰, 이후 2,464토큰까지 두 차례 커져 llama-3.1-8b-instant의
-// 분당 한도(6,000 TPM)를 위협한 전례가 있어서(반복될 때마다 프로덕션
-// 로그로 뒤늦게 발견해 수동으로 다시 압축해야 했다), 총 토큰 수는
+// 실측 6,148토큰, 이후 2,464토큰까지 두 차례 커져 (당시 기본 모델이던)
+// llama-3.1-8b-instant의 분당 한도(6,000 TPM)를 위협한 전례가 있어서
+// (반복될 때마다 프로덕션 로그로 뒤늦게 발견해 수동으로 다시 압축해야
+// 했다), 총 토큰 수는
 // TestWeatherBriefingPromptFitsWithinTokenBudget/
 // TestExchangeBriefingPromptFitsWithinTokenBudget/
 // TestNewsBriefingPromptFitsWithinTokenBudget(briefing_section_test.go)으로

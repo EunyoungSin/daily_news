@@ -22,11 +22,11 @@ func TestFrequentAndEscalationModelsAreDistinctByDefault(t *testing.T) {
 	if frequent == escalation {
 		t.Fatalf("expected frequentGroqModel and escalationGroqModel to differ, both returned %q", frequent)
 	}
-	if frequent != "llama-3.1-8b-instant" {
-		t.Errorf("frequentGroqModel() = %q, want the cheap/high-quota 8B model", frequent)
+	if frequent != "openai/gpt-oss-20b" {
+		t.Errorf("frequentGroqModel() = %q, want the cheap/fast 20B model", frequent)
 	}
-	if escalation != "llama-3.3-70b-versatile" {
-		t.Errorf("escalationGroqModel() = %q, want the higher-accuracy 70B model", escalation)
+	if escalation != "openai/gpt-oss-120b" {
+		t.Errorf("escalationGroqModel() = %q, want the higher-accuracy 120B model", escalation)
 	}
 }
 

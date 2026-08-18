@@ -22,28 +22,47 @@ var errGroqKeyMissing = errors.New("GROQ_API_KEY not set")
 
 // frequentGroqModel은 호출량이 많은 모든 곳에서 사용된다 — 세 개의 AI
 // 브리핑 섹션(weather/exchange/news, 캐시 미스마다 재생성됨)과 뉴스 헤드라인
-// 번역(새로 발견된 헤드라인마다 배치 1회) — Groq의 소형 모델은 70B 모델
-// (1,000 req/day, 100,000 tokens/day)보다 훨씬 여유로운 일일 쿼터(14,400
-// req/day)를 갖고 있기 때문이다. generateSectionText와 fetchNewsTranslation
-// 은 모두 이 모델의 출력이 하드 콘텐츠 검증에 실패하면 단 한 번의 재시도를
-// escalationGroqModel로 에스컬레이션한다. 그래서 정확도가 중요한 출력은
-// 실제로 필요할 때만 더 큰 모델을 사용하게 된다. GROQ_MODEL 환경변수로
-// 재정의할 수 있다.
+// 번역(새로 발견된 헤드라인마다 배치 1회). generateSectionText와
+// fetchNewsTranslation은 모두 이 모델의 출력이 하드 콘텐츠 검증에 실패하면
+// 단 한 번의 재시도를 escalationGroqModel로 에스컬레이션한다. 그래서
+// 정확도가 중요한 출력은 실제로 필요할 때만 더 큰 모델을 사용하게 된다.
+// GROQ_MODEL 환경변수로 재정의할 수 있다.
+//
+// 원래 기본값은 llama-3.1-8b-instant였으나, Groq가 이 모델을 완전히
+// 지원 종료해(요청 시 "does not exist or you do not have access to it"
+// 에러) openai/gpt-oss-20b로 교체했다(2026-08). 예전에는 이 모델을 "70B
+// 모델(1,000 req/day)보다 훨씬 여유로운 일일 쿼터(14,400 req/day)"라는
+// 이유로 골랐지만, gpt-oss-20b/gpt-oss-120b는 무료 티어 한도가 완전히
+// 동일하다(콘솔 문서 https://console.groq.com/docs/rate-limits 기준,
+// 2026-08 확인: 30 RPM · 1,000 RPD · 8,000 TPM · 200,000 TPD, 두 모델
+// 모두). 즉 "소형 모델 = 여유로운 일일 쿼터"라는 예전 전제는 더 이상
+// 성립하지 않는다 — 지금은 오직 속도/비용(20b가 더 빠르고 저렴함) 때문에
+// 기본값으로 쓴다. RPD가 14,400에서 1,000으로 대폭 줄었으므로,
+// maxDailyGroqEscalations 문서 주석과 GET /api/debug/groq-usage로 실제
+// 호출량이 이 새 한도 안에 있는지 특히 배포 초반에는 주기적으로 확인할
+// 가치가 있다(이 앱은 캐시 미스 시에만 호출하므로 정상적으로는 여유가
+// 있을 것으로 예상되지만, 캐싱이 깨지는 버그가 생기면 예전보다 훨씬
+// 빨리 하루 한도에 도달할 수 있다).
 func frequentGroqModel() string {
-	return envOrDefault("GROQ_MODEL", "llama-3.1-8b-instant")
+	return envOrDefault("GROQ_MODEL", "openai/gpt-oss-20b")
 }
 
 // escalationGroqModel은 정확도가 더 높은 모델로, (a) 최대 주 1회만
 // 생성되어 1,000 req/day 쿼터 대비 비용이 미미한 로또 AI 인사이트와,
 // (b) generateSectionText/fetchNewsTranslation에서 검증 실패 시의 단 한
-// 번뿐인 재시도 용도로 남겨둔 것이다. 반복적인 테스트 결과, 8B 모델은
+// 번뿐인 재시도 용도로 남겨둔 것이다. 반복적인 테스트 결과, 소형 모델은
 // 더 큰 모델에서는 나타나지 않는, 사용자 눈에 보이는 결함들을 만들어냈다:
 // 한국어 텍스트 사이에 뜬금없이 섞여 드는 중국어/일본어 문자, 번역되지
 // 않고 그대로 남은 영어 구문, 잘못 계산된 숫자 단위 변환 등이다 — 이 모델은
 // 호출량이 많은 곳의 기본값이 아니라, 바로 이런 경우들을 위한 폴백이다.
 // GROQ_ESCALATION_MODEL 환경변수로 재정의할 수 있다.
+//
+// 원래 기본값은 llama-3.3-70b-versatile였으나, Groq가 지원을 완전히
+// 종료해 openai/gpt-oss-120b로 교체했다(frequentGroqModel 문서 주석
+// 참고) — 무료 티어 한도(30 RPM · 1,000 RPD · 8,000 TPM · 200,000 TPD)는
+// frequentGroqModel과 완전히 동일하다.
 func escalationGroqModel() string {
-	return envOrDefault("GROQ_ESCALATION_MODEL", "llama-3.3-70b-versatile")
+	return envOrDefault("GROQ_ESCALATION_MODEL", "openai/gpt-oss-120b")
 }
 
 // groqUsage는 현재 KST 기준 날짜에 대해 실제 Groq API 호출 수(및 호출을
@@ -123,13 +142,17 @@ func orDash(s string) string {
 	return s
 }
 
-// maxDailyGroqEscalations는 escalationGroqModel()(70B, 하루 1,000req 한도)로의
-// 승격 횟수에 대한 안전장치다. 8B 모델의 반복 생성 버그 등으로 승격이
-// 예상보다 자주 발생하면 하루 한도를 금방 소진할 수 있으므로, 이 값을
-// 넘으면 그날은 더 이상 승격하지 않고 (호출부가) 마지막 8B 결과를 그대로
-// 쓰거나 이전 캐시로 대체한다. 근본 원인(반복 생성)은 max_tokens/temperature
-// 조정으로 먼저 줄이는 게 우선이며, 이 안전장치는 그래도 예상 밖으로 승격이
-// 몰릴 때 하루 쿼터 전체가 바닥나는 것을 막는 마지막 방어선일 뿐이다.
+// maxDailyGroqEscalations는 escalationGroqModel()(openai/gpt-oss-120b, 하루
+// 1,000req 한도)로의 승격 횟수에 대한 안전장치다. frequentGroqModel의 반복
+// 생성 버그 등으로 승격이 예상보다 자주 발생하면 하루 한도를 금방 소진할
+// 수 있으므로, 이 값을 넘으면 그날은 더 이상 승격하지 않고 (호출부가)
+// 마지막 결과를 그대로 쓰거나 이전 캐시로 대체한다. 근본 원인(반복 생성)은
+// max_tokens/temperature 조정으로 먼저 줄이는 게 우선이며, 이 안전장치는
+// 그래도 예상 밖으로 승격이 몰릴 때 하루 쿼터 전체가 바닥나는 것을 막는
+// 마지막 방어선일 뿐이다. 50은 1,000req 한도의 5%에 불과해 여유가 크므로,
+// frequentGroqModel이 openai/gpt-oss-20b로 바뀌어 RPD가 14,400에서
+// 1,000으로 줄어든 뒤에도(frequentGroqModel 문서 주석 참고) 이 값 자체를
+// 조정할 필요는 없었다.
 const maxDailyGroqEscalations = 50
 
 // groqEscalationCountToday는 오늘 이미 escalationGroqModel()로 실제 호출된
@@ -210,6 +233,11 @@ type groqChatRequest struct {
 	MaxTokens        int                 `json:"max_tokens,omitempty"`
 	FrequencyPenalty float64             `json:"frequency_penalty,omitempty"`
 	ResponseFormat   *groqResponseFormat `json:"response_format,omitempty"`
+	// ReasoningEffort는 callGroqChat이 항상 "low"로 고정해서 보낸다 —
+	// groqReasoningEffort 문서 주석 참고. 호출부가 값을 고를 필요가 없도록
+	// 이 구조체 필드는 그대로 두되 groqChatRequest를 만드는 곳(callGroqChat)
+	// 한 곳에서만 채운다.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 type groqResponseFormat struct {
@@ -223,16 +251,24 @@ type groqChatMessage struct {
 
 // groqUsageInfo는 Groq(OpenAI 호환) 응답에 실려 오는 실제 토큰 사용량이다 —
 // estimateTokenCount와 달리 이 값은 근사치가 아니라 Groq 자신이 계산한
-// 진짜 수치다.
+// 진짜 수치다. CompletionTokensDetails.ReasoningTokens는 openai/gpt-oss-*
+// 계열(추론 모델)이 completion_tokens 중 실제로 눈에 보이는 답변이 아니라
+// 숨겨진 추론에 쓴 토큰 수다 — groqReasoningEffort 문서 주석 참고. 이
+// 필드가 없는 응답(추론 모델이 아니거나 Groq가 breakdown을 안 주는
+// 경우)에서는 nil로 남는다.
 type groqUsageInfo struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens            int `json:"prompt_tokens"`
+	CompletionTokens        int `json:"completion_tokens"`
+	TotalTokens             int `json:"total_tokens"`
+	CompletionTokensDetails *struct {
+		ReasoningTokens int `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details"`
 }
 
 type groqChatResponse struct {
 	Choices []struct {
-		Message groqChatMessage `json:"message"`
+		Message      groqChatMessage `json:"message"`
+		FinishReason string          `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *groqUsageInfo `json:"usage"`
 	Error *struct {
@@ -411,6 +447,21 @@ func acquireGroqCallSlot(ctx context.Context) (release func(), err error) {
 // 완전히 없앨 수는 없으므로 briefing.go의 findRepeatedPhrase가 여전히
 // 최종 방어선으로 남아 있다. 반복이 보고된 적 없는 호출부(로또 인사이트,
 // 뉴스 헤드라인 번역)는 0을 넘겨 기존 동작을 그대로 유지한다.
+//
+// groqReasoningEffort("low")는 모든 요청에 무조건 실어 보낸다.
+// openai/gpt-oss-20b/120b(현재 frequentGroqModel/escalationGroqModel
+// 둘 다)는 추론 모델이라 completion_tokens 예산을 최종 답변보다 먼저
+// 숨겨진 "추론" 과정에 쓰는데, reasoning_effort 기본값("medium")에서는
+// 이 앱의 짧은 시스템 프롬프트(브리핑 3섹션 등)에서도 maxTokens(300)를
+// 추론만으로 전부 소진해버려 최종 답변(content)이 통째로 빈 문자열로
+// 돌아오는 것이 실제 API 호출로 100% 재현 확인됐다(finish_reason=length,
+// reasoning_tokens=298/300). "low"로 낮추면 같은 프롬프트에서 추론이
+// 20토큰 안팎으로 줄어 답변이 정상적으로 돌아온다(직접 검증: reasoning_tokens
+// 10~24, completion_tokens 46~67, 모두 maxTokens 300 이내). 두 모델 모두
+// reasoning_effort=low/medium/high를 지원하므로(Groq 문서) 호출부를
+// 가리지 않고 항상 이 값을 쓴다.
+const groqReasoningEffort = "low"
+
 func callGroqChat(ctx context.Context, apiKey, model string, messages []groqChatMessage, temperature float64, maxTokens int, frequencyPenalty float64, jsonMode bool) (string, error) {
 	reqBody := groqChatRequest{
 		Model:            model,
@@ -418,6 +469,7 @@ func callGroqChat(ctx context.Context, apiKey, model string, messages []groqChat
 		Temperature:      temperature,
 		MaxTokens:        maxTokens,
 		FrequencyPenalty: frequencyPenalty,
+		ReasoningEffort:  groqReasoningEffort,
 	}
 	if jsonMode {
 		reqBody.ResponseFormat = &groqResponseFormat{Type: "json_object"}
@@ -555,10 +607,19 @@ func doGroqChatRequest(ctx context.Context, apiKey, model string, bodyBytes []by
 	// 이 로그가 이번 요청의 실제(추정치가 아닌) 토큰 사용량에 대한 근거다 —
 	// TPM 한도 초과 여부는 이 값으로 판단해야 하며, briefing.go의
 	// estimateTokenCount 기반 로그는 어느 구성 요소가 큰지 사전에 가늠하는
-	// 용도일 뿐이다.
+	// 용도일 뿐이다. reasoningTokens는 completionTokens 중 추론 모델
+	// (openai/gpt-oss-*)이 숨겨진 추론에 쓴 양이다 — groqReasoningEffort
+	// 문서 주석 참고. finishReason이 "length"인데 응답 content가 비어
+	// 있다면, maxTokens 전부가 추론에 쓰이고 최종 답변이 생성되기도 전에
+	// 잘렸다는 뜻이므로(실제로 reasoning_effort 기본값에서 재현됨) 그
+	// 신호를 로그로 바로 확인할 수 있게 한다.
 	if parsed.Usage != nil {
-		log.Printf("[Groq 응답] model=%s promptTokens=%d completionTokens=%d totalTokens=%d",
-			model, parsed.Usage.PromptTokens, parsed.Usage.CompletionTokens, parsed.Usage.TotalTokens)
+		reasoningTokens := 0
+		if parsed.Usage.CompletionTokensDetails != nil {
+			reasoningTokens = parsed.Usage.CompletionTokensDetails.ReasoningTokens
+		}
+		log.Printf("[Groq 응답] model=%s promptTokens=%d completionTokens=%d(reasoning=%d) totalTokens=%d finishReason=%s",
+			model, parsed.Usage.PromptTokens, parsed.Usage.CompletionTokens, reasoningTokens, parsed.Usage.TotalTokens, parsed.Choices[0].FinishReason)
 	}
 
 	return parsed.Choices[0].Message.Content, nil
