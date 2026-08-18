@@ -95,11 +95,22 @@ func main() {
 	} else {
 		db = conn
 		log.Println("데이터베이스 연결 및 마이그레이션 완료")
-		// 로또 수집은 더 이상 서버 시작 시 자동으로 걸리지 않는다 — 화면의
-		// ON/OFF 토글이 POST /api/lotto/collection/start를 통해 명시적으로
-		// 시작해야 한다(기본값은 꺼짐).
 		if err := seedLottoDrawsIfEmpty(context.Background(), db); err != nil {
 			log.Printf("경고: 로또 시드 데이터 삽입 실패: %v", err)
+		}
+
+		// 로또 자동 수집은 기본적으로 서버 시작 시 곧바로 켜진다
+		// (lottoAutoCollectionDefaultOn) — GitHub 데이터셋(정적 파일
+		// 서빙)만 쓰므로 dhlottery 차단 같은 위험이 없어 자동으로 켜둬도
+		// 안전하다. LOTTO_AUTO_COLLECTION_DEFAULT=off로 설정하면 예전처럼
+		// 화면의 "매주 자동 업데이트" 토글을 직접 눌러야만 시작된다. 밀린
+		// 회차가 있으면 켜지는 즉시 catchUpMissingLottoRounds가 전부
+		// 순차적으로 채운다(runLottoWeeklyCheckLoop 참고).
+		if lottoAutoCollectionDefaultOn() {
+			lottoStartCollection(db)
+			log.Println("로또: 자동 수집을 기본으로 시작합니다 (LOTTO_AUTO_COLLECTION_DEFAULT=off로 끌 수 있습니다)")
+		} else {
+			log.Println("로또: LOTTO_AUTO_COLLECTION_DEFAULT=off — 자동 수집을 켜지 않고 대기합니다(화면의 토글로 직접 켜야 합니다)")
 		}
 	}
 

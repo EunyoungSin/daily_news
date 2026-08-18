@@ -1718,6 +1718,12 @@
   color: var(--text-faint);
 }
 
+.lotto__catchup-progress {
+  font-size: 12px;
+  font-family: var(--font-data);
+  color: color-mix(in srgb, var(--accent-lotto) 85%, var(--text));
+}
+
 .lotto__recommendation {
   padding: var(--space-4);
   background: var(--panel-alt);

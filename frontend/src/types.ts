@@ -318,12 +318,18 @@ export interface LottoSection extends SectionMeta {
 }
 
 // GET /api/lotto/collection/status의 응답 — 로또 카드의 "매주 자동
-// 업데이트" 토글이 상태를 보여주는 데 쓴다. 예전에는 초기 50회를 한꺼번에
-// 채우는 배치 진행률("42/50 회차 수집됨")이었지만, 이제 자동 수집은 매주
-// 최대 1개 회차만 확인하므로 목표치라는 개념이 없다 — 대신 다음 정기
-// 점검이 언제고 마지막으로 언제 성공했는지를 보여준다.
+// 업데이트" 토글이 상태를 보여주는 데 쓴다. 평상시(밀린 회차가 없을 때)는
+// 목표치라는 개념 없이 다음 정기 점검이 언제고 마지막으로 언제 성공했는지만
+// 보여준다. 서버 시작 시(또는 토글을 켤 때) 밀린 회차가 있으면
+// catchingUp이 true가 되고, totalPendingCount/processedCount로 "N개 중
+// 몇 번째까지 처리했는지"를 보여준다(backend/lotto.go의
+// catchUpMissingLottoRounds 참고) — 끝나면 catchingUp이 다시 false로
+// 돌아오고 totalPendingCount/processedCount도 0으로 리셋된다.
 export interface LottoCollectionStatus {
   running: boolean
+  catchingUp: boolean
+  totalPendingCount?: number
+  processedCount?: number
   lastCollectedAt?: string
   lastCheckedAt?: string
   nextCheckAt?: string

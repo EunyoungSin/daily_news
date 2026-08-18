@@ -8,6 +8,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -26,43 +28,57 @@ const (
 
 	// dhlottery가 기본 Go 클라이언트의 User-Agent("Go-http-client/...")를
 	// 보고 봇으로 판단해 차단할 가능성을 줄이기 위해, 일반 브라우저처럼
-	// 보이는 값을 명시적으로 지정한다.
+	// 보이는 값을 명시적으로 지정한다. fetchLottoDraw(현재 호출되지 않는
+	// 백업 코드, 아래 참고)에서만 쓰인다.
 	lottoUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-// lottoCheckInterval은 자동 수집이 "새 회차가 나왔는지" 확인하는 주기다.
-// 실제로 새 회차는 일주일에 한 번(토요일 추첨)만 생기므로, 이보다 훨씬
-// 자주 확인해봐야 dhlottery에 불필요한 요청만 늘어난다. 하루 1번으로
-// 잡아서 서버가 하루 정도 다운되었다 다시 뜨는 경우도 금방 따라잡게
-// 하면서도, "여러 회차를 동시에 병렬로 긁어오는" 예전 방식과 달리 확인
-// 자체는 항상 가볍다(DB 조회 한 번 + 필요하면 dhlottery 요청 최대
-// 1개뿐).
+// lottoCheckInterval은 밀린 회차를 전부 채운 뒤, 평상시 "새 회차가
+// 나왔는지"를 확인하는 정기 점검 주기다. 실제로 새 회차는 일주일에 한 번
+// (토요일 추첨)만 생기므로, 이보다 훨씬 자주 확인해봐야 불필요한 요청만
+// 늘어난다. 하루 1번으로 잡아서 서버가 하루 정도 다운되었다 다시 뜨는
+// 경우도 금방 따라잡게 하면서도, 평상시 점검 자체는 항상 가볍다(DB 조회
+// 한 번 + 필요하면 GitHub 데이터셋 요청 최대 1개뿐) — catchUpMissingLottoRounds
+// 문서 주석 참고.
 const lottoCheckInterval = 24 * time.Hour
 
-// lottoAutoCheckRetryDelays는 자동 점검이 "이미 발표됐어야 할" 회차를
-// 못 가져왔을 때 짧게만 재시도하는 간격이다. 예전에는 실패한 회차마다
-// 5초→15초→40초로 촘촘하게 재시도하고, 그마저 실패하면 30초 뒤 다음
-// pass에서 남은 회차 전부를 다시 시도했다 — 이런 반복적인 두드림 자체가
-// dhlottery의 차단을 유발하는 것으로 보였다. 이제는 회차 하나만 다루므로
-// 넉넉한 간격으로 딱 2번만 더 시도하고(총 3회), 그래도 안 되면 억지로
-// 더 두드리지 않고 다음 정기 점검(lottoCheckInterval 뒤, 보통 내일)까지
-// 조용히 기다린다.
-var lottoAutoCheckRetryDelays = []time.Duration{
+// lottoAutoCollectionDefaultEnvVar는 서버가 시작할 때 자동 수집을 곧바로
+// 켤지 결정하는 환경변수다. 기본값은 "on"이다 — 자동 수집이 GitHub
+// 데이터셋(정적 파일 서빙)만 사용하도록 바뀐 뒤로는 dhlottery 차단 같은
+// 위험이 없어 서버가 뜨자마자 켜둬도 안전하기 때문이다. "off"로 설정하면
+// 예전처럼 화면의 "매주 자동 업데이트" 토글을 직접 눌러야만 시작된다.
+const lottoAutoCollectionDefaultEnvVar = "LOTTO_AUTO_COLLECTION_DEFAULT"
+
+// lottoAutoCollectionDefaultOn은 lottoAutoCollectionDefaultEnvVar 값을
+// 읽는다 — 명시적으로 "off"가 아니면(값이 없는 기본 상태 포함) true다.
+func lottoAutoCollectionDefaultOn() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(lottoAutoCollectionDefaultEnvVar)))
+	return v != "off"
+}
+
+// lottoHTTPClient는 GitHub 데이터셋 호출과, 현재는 호출되지 않는 백업
+// 경로인 dhlottery 직접 호출(fetchLottoDraw)이 함께 쓰는 클라이언트다.
+// Timeout을 명시적으로 두어, 혹시라도 컨텍스트 취소가 누락되는 경우에도
+// 개별 호출이 무한정 걸리지 않도록 이중으로 방어한다.
+var lottoHTTPClient = &http.Client{Timeout: lottoFetchTimeout}
+
+// lottoDhlotteryRetryDelays는 (현재는 호출되지 않는 백업 경로인)
+// fetchLottoDrawWithShortRetry가 dhlottery 조회 실패 시 재시도하는
+// 간격이다(총 3회 시도). dhlottery는 짧은 시간에 요청이 몰리면 이후
+// 요청을 차단하는 것으로 보였으므로, GitHub 데이터셋용
+// lottoCatchUpRetryDelays보다 훨씬 넉넉하게(1분/5분) 잡아뒀다 — 아래
+// fetchLottoDraw 문서 주석 참고.
+var lottoDhlotteryRetryDelays = []time.Duration{
 	1 * time.Minute,
 	5 * time.Minute,
 }
 
-// lottoHTTPClient는 dhlottery 호출 전용 클라이언트다. Timeout을 명시적으로
-// 두어, 혹시라도 컨텍스트 취소가 누락되는 경우에도 개별 호출이 무한정
-// 걸리지 않도록 이중으로 방어한다.
-var lottoHTTPClient = &http.Client{Timeout: lottoFetchTimeout}
-
-// lottoCollectionState는 로또 주간 자동 점검 goroutine의 실행 상태를
-// 서버 메모리에 둔다 — 화면의 토글 버튼이 POST
+// lottoCollectionState는 로또 자동 점검 goroutine의 실행 상태를 서버
+// 메모리에 둔다 — 화면의 토글 버튼이 POST
 // /api/lotto/collection/{start,stop}으로 이 상태를 직접 제어한다. cancel은
 // 실행 중일 때만 설정되며, STOP은 이 cancel을 호출해 다음 정기 점검부터는
-// 시작하지 않게 한다. 서버 시작 시 기본값은 꺼짐(running=false)이다 —
-// main.go는 시작 시점에 자동으로 켜지 않는다.
+// 시작하지 않게 한다. 서버 시작 시 기본값은 lottoAutoCollectionDefaultOn에
+// 따른다 — main.go가 이 값을 보고 시작 시점에 자동으로 켤지 결정한다.
 var lottoCollectionState struct {
 	mu              sync.Mutex
 	running         bool
@@ -70,6 +86,15 @@ var lottoCollectionState struct {
 	lastCollectedAt time.Time // 마지막으로 신규 회차를 성공적으로 저장한 시각
 	lastCheckedAt   time.Time // 마지막으로 점검을 실행한 시각(성공/실패/아직 발표 전 모두 포함)
 	nextCheckAt     time.Time // 다음 정기 점검 예정 시각
+
+	// catchingUp/totalPendingCount/processedCount는 catchUpMissingLottoRounds가
+	// 밀린 회차 전부를 순차 처리하는 동안만 의미가 있다 — 평상시 정기 점검
+	// (checkForNewLottoRound)은 이 필드들을 건드리지 않는다. catchingUp이
+	// true인 동안 화면은 "N회차 밀려있어 순차적으로 채우는 중입니다
+	// (processedCount/totalPendingCount)"를 보여준다(CollectionToggle.tsx).
+	catchingUp        bool
+	totalPendingCount int
+	processedCount    int
 }
 
 func lottoIsCollecting() bool {
@@ -125,16 +150,21 @@ func lottoStopCollection() bool {
 }
 
 // LottoCollectionStatus는 GET /api/lotto/collection/status의 응답이다.
-// 예전에는 "42/50 회차 수집됨" 같은 배치 진행률을 보여줬지만, 이제는
-// 목표치라는 개념 자체가 없다(시드로 채워진 뒤로는 매주 최대 1개씩만
-// 늘어난다) — 대신 "다음 자동 확인은 언제고, 마지막으로 언제 성공했는지"를
-// 보여준다.
+// 평상시(밀린 회차가 없을 때)는 "다음 자동 확인은 언제고, 마지막으로 언제
+// 성공했는지"만 보여준다 — 시드로 채워진 뒤로는 매주 최대 1개씩만
+// 늘어나므로 진행률이라는 개념이 없기 때문이다. 서버 시작 시(또는 토글을
+// 켤 때) 밀린 회차가 있으면 catchingUp이 true가 되고, totalPendingCount/
+// processedCount로 "N개 중 몇 번째까지 처리했는지"를 보여준다
+// (catchUpMissingLottoRounds 참고).
 type LottoCollectionStatus struct {
-	Running         bool   `json:"running"`
-	LastCollectedAt string `json:"lastCollectedAt,omitempty"`
-	LastCheckedAt   string `json:"lastCheckedAt,omitempty"`
-	NextCheckAt     string `json:"nextCheckAt,omitempty"`
-	SavedCount      int    `json:"savedCount"`
+	Running           bool   `json:"running"`
+	CatchingUp        bool   `json:"catchingUp"`
+	TotalPendingCount int    `json:"totalPendingCount,omitempty"`
+	ProcessedCount    int    `json:"processedCount,omitempty"`
+	LastCollectedAt   string `json:"lastCollectedAt,omitempty"`
+	LastCheckedAt     string `json:"lastCheckedAt,omitempty"`
+	NextCheckAt       string `json:"nextCheckAt,omitempty"`
+	SavedCount        int    `json:"savedCount"`
 }
 
 // lottoCollectionStatusSnapshot은 현재 실행 상태와, DB에 실제로 저장된
@@ -142,12 +172,20 @@ type LottoCollectionStatus struct {
 func lottoCollectionStatusSnapshot(ctx context.Context, conn *sql.DB) (LottoCollectionStatus, error) {
 	lottoCollectionState.mu.Lock()
 	running := lottoCollectionState.running
+	catchingUp := lottoCollectionState.catchingUp
+	totalPendingCount := lottoCollectionState.totalPendingCount
+	processedCount := lottoCollectionState.processedCount
 	lastCollectedAt := lottoCollectionState.lastCollectedAt
 	lastCheckedAt := lottoCollectionState.lastCheckedAt
 	nextCheckAt := lottoCollectionState.nextCheckAt
 	lottoCollectionState.mu.Unlock()
 
-	status := LottoCollectionStatus{Running: running}
+	status := LottoCollectionStatus{
+		Running:           running,
+		CatchingUp:        catchingUp,
+		TotalPendingCount: totalPendingCount,
+		ProcessedCount:    processedCount,
+	}
 	if !lastCollectedAt.IsZero() {
 		status.LastCollectedAt = lastCollectedAt.Format(time.RFC3339)
 	}
@@ -209,15 +247,15 @@ type dhlotteryResponse struct {
 
 // lottoGitHubDatasetBaseURL은 자동 수집이 회차를 조회하는 유일한 대상이다.
 // dhlottery가 이 서버의 IP를 차단해(자동 요청을 봇으로 판단한 것으로
-// 보인다 — lottoUserAgent 주석 참고) 직접 호출이 계속 실패했었다. 이를
-// 우회하기 위해 커뮤니티가 유지 관리하는 공개 GitHub 저장소
-// smok95/lotto로 갈아탔다 — 매주 토요일 추첨 직후(실측:
-// 2026-07-25/08-01/08-08 모두 KST 20:41~21:00 사이 커밋)에 회차별 JSON
-// 파일을 자동 커밋해 raw.githubusercontent.com으로 그대로 서빙하므로,
-// dhlottery를 전혀 두드리지 않고도 최신 회차를 얻을 수 있다. 이 소스가
-// 실패하면 checkForNewLottoRound는 dhlottery로 다시 폴백하지 않고 다음
-// 정기 점검까지 기다린다 — fetchLottoDraw 문서 주석 참고.
-const lottoGitHubDatasetBaseURL = "https://raw.githubusercontent.com/smok95/lotto/main/results"
+// 보인다) 직접 호출이 계속 실패했었다. 이를 우회하기 위해 커뮤니티가
+// 유지 관리하는 공개 GitHub 저장소 smok95/lotto로 갈아탔다 — 매주 토요일
+// 추첨 직후(실측: 2026-07-25/08-01/08-08 모두 KST 20:41~21:00 사이 커밋)에
+// 회차별 JSON 파일을 자동 커밋해 raw.githubusercontent.com으로 그대로
+// 서빙하므로, dhlottery를 전혀 두드리지 않고도 최신 회차를 얻을 수 있다.
+// 이 소스가 실패하면 dhlottery로 폴백하지 않고 그대로 실패로 취급한다
+// (checkForNewLottoRound/catchUpMissingLottoRounds 참고). var로 둔 이유는
+// 테스트가 httptest 서버를 가리키도록 바꿔치기할 수 있어야 하기 때문이다.
+var lottoGitHubDatasetBaseURL = "https://raw.githubusercontent.com/smok95/lotto/main/results"
 
 // githubLottoDraw는 lottoGitHubDatasetBaseURL이 회차별로 제공하는 JSON의
 // 부분집합이다 — divisions/total_sales_amount/winners_combination 등
@@ -268,10 +306,9 @@ func parseGitHubLottoDraw(body []byte, wantDrwNo int) (*dhlotteryResponse, error
 
 // fetchLottoDrawFromGitHub는 lottoGitHubDatasetBaseURL/{drwNo}.json을 조회해
 // parseGitHubLottoDraw로 변환한다. 아직 그 회차 파일이 없으면(다음 추첨
-// 전) 404가 오는데, 이는 dhlottery의 ReturnValue!="success"와 같은 뜻이지만
-// 별도로 구분하지 않는다 — 어느 쪽이든 이 함수가 에러를 반환하면
-// checkForNewLottoRound는 그대로 dhlottery 폴백으로 넘어가고, dhlottery
-// 쪽에서 "아직 발표 전"과 "진짜 실패"를 다시 한번 정확히 구분한다.
+// 전) 404가 오는데, 호출하는 쪽(checkForNewLottoRound/
+// catchUpMissingLottoRounds)이 "아직 발표 전"과 "진짜 실패"를 각자의
+// 맥락에 맞게 구분해서 처리한다.
 func fetchLottoDrawFromGitHub(ctx context.Context, drwNo int) (*dhlotteryResponse, error) {
 	url := fmt.Sprintf("%s/%d.json", lottoGitHubDatasetBaseURL, drwNo)
 
@@ -301,14 +338,69 @@ func fetchLottoDrawFromGitHub(ctx context.Context, drwNo int) (*dhlotteryRespons
 	return parseGitHubLottoDraw(body, drwNo)
 }
 
-// fetchLottoDraw/fetchLottoDrawWithShortRetry는 dhlottery를 직접 호출해
-// 회차를 조회하던 원래 방식이다. 지금은 checkForNewLottoRound가 이 둘을
-// 전혀 호출하지 않는다 — dhlottery가 이 서버의 IP를 차단해 자동 수집이
-// 계속 실패했고, 그걸 우회하려고 GitHub 데이터셋(lottoGitHubDatasetBaseURL
-// 주석 참고)으로 갈아탔기 때문이다. 나중에 dhlottery 접근이 다시 가능해지거나
-// GitHub 소스가 더 이상 유지되지 않는 경우를 대비해 백업으로 코드에 남겨
-// 둔다 — 실제로 되살리려면 checkForNewLottoRound에서 다시 호출하도록
-// 연결해야 한다.
+// lottoCatchUpRoundDelay는 catchUpMissingLottoRounds가 밀린 회차를 순차
+// 조회하는 사이에 두는 간격이다. GitHub 데이터셋은 dhlottery와 달리 봇
+// 차단 위험이 낮은 일반 정적 파일 서빙(raw.githubusercontent.com)이라
+// 하루 처리 개수 상한을 두지 않고 밀린 회차 전부를 한 번의 점검에서
+// 채워도 되지만, 그래도 무료 서비스이니 예의상 짧은 간격만 둔다. var로
+// 둔 이유는 테스트가 이 값을 아주 짧게 바꿔 실행 시간을 줄일 수 있어야
+// 하기 때문이다.
+var lottoCatchUpRoundDelay = 300 * time.Millisecond
+
+// lottoCatchUpRetryDelays는 catchUpMissingLottoRounds가 회차 하나 조회에
+// 실패했을 때 짧게 재시도하는 간격이다(총 3회 시도). dhlottery 차단을
+// 피하려고 1분/5분씩 기다리던 예전 방식과 달리 훨씬 짧게 잡아도 된다 —
+// GitHub 정적 파일은 차단 위험이 낮고, 실패의 대부분은 "그 회차 파일이
+// 데이터셋에 아예 없음"이라 오래 기다려도 소용없기 때문이다.
+var lottoCatchUpRetryDelays = []time.Duration{
+	2 * time.Second,
+	5 * time.Second,
+}
+
+// fetchLottoDrawFromGitHubWithRetry는 fetchLottoDrawFromGitHub를 delays에
+// 따라 짧게 재시도한다(총 len(delays)+1회 시도). 부모 ctx가 이미 취소된
+// 상태라면(예: STOP 요청) 대기 없이 즉시 중단한다.
+func fetchLottoDrawFromGitHubWithRetry(ctx context.Context, drwNo int, delays []time.Duration) (*dhlotteryResponse, error) {
+	maxAttempts := len(delays) + 1
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			delay := delays[attempt-1]
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+
+		data, err := fetchLottoDrawFromGitHub(ctx, drwNo)
+		if err == nil {
+			return data, nil
+		}
+		lastErr = err
+		log.Printf("로또: GitHub 데이터셋에서 %d회차 조회 실패 (%d/%d회 시도): %v", drwNo, attempt+1, maxAttempts, err)
+	}
+	return nil, lastErr
+}
+
+// fetchLottoDraw/fetchLottoDrawWithShortRetry는 dhlottery
+// (https://www.dhlottery.co.kr/common.do?method=getLottoNumber)를 직접
+// 호출해 회차를 조회하던 원래 방식이다. **현재 자동 수집 경로
+// (checkForNewLottoRound/catchUpMissingLottoRounds)는 이 둘을 전혀
+// 호출하지 않는다** — 예전에 초기 50회 데이터를 채우려고 여러 회차를
+// 동시에(세마포어로 병렬) 긁어왔더니, 짧은 시간에 요청이 몰린 것을
+// dhlottery가 봇으로 판단해 이 서버의 IP 자체를 차단해버렸다. 그 뒤로는
+// 재시도해봐야 계속 차단된 상태라 실패만 반복되므로, 커뮤니티가 유지
+// 관리하는 공개 GitHub 데이터셋(lottoGitHubDatasetBaseURL 참고)으로 수집
+// 경로를 완전히 갈아탔다.
+//
+// 이 두 함수는 삭제하지 않고 백업으로 코드에 남겨뒀다 — 나중에 dhlottery
+// 접근이 다시 가능해지거나(IP 차단이 풀리거나) GitHub 데이터셋 저장소가
+// 더 이상 유지되지 않게 되면, checkForNewLottoRound/
+// catchUpMissingLottoRounds에서 다시 호출하도록 연결해 되살릴 수 있다.
+// 되살릴 때는 예전처럼 회차를 동시에 병렬로 긁어오지 말고, 지금 GitHub
+// 경로가 하듯 회차 사이에 충분한 간격을 두고 순차적으로만 호출해야
+// 같은 차단을 반복하지 않는다.
 func fetchLottoDraw(ctx context.Context, drwNo int) (*dhlotteryResponse, error) {
 	url := fmt.Sprintf("https://www.dhlottery.co.kr/common.do?method=getLottoNumber&drwNo=%d", drwNo)
 
@@ -338,17 +430,16 @@ func fetchLottoDraw(ctx context.Context, drwNo int) (*dhlotteryResponse, error) 
 	return &parsed, nil
 }
 
-// fetchLottoDrawWithShortRetry는 lottoAutoCheckRetryDelays에 따라 넉넉한
+// fetchLottoDrawWithShortRetry는 lottoDhlotteryRetryDelays에 따라 넉넉한
 // 간격으로 최대 2번만 더 재시도한다(총 3회 시도). 부모 ctx가 이미 취소된
-// 상태라면(예: STOP 요청) 대기 없이 즉시 중단한다. 여기서도 실패하면 이번
-// 정기 점검은 포기하고 다음 lottoCheckInterval 주기에 다시 시도한다 —
-// runLottoWeeklyCheckLoop 참고.
+// 상태라면(예: STOP 요청) 대기 없이 즉시 중단한다. fetchLottoDraw와
+// 마찬가지로 현재는 어디서도 호출되지 않는 백업 코드다.
 func fetchLottoDrawWithShortRetry(ctx context.Context, drwNo int) (*dhlotteryResponse, error) {
-	maxAttempts := len(lottoAutoCheckRetryDelays) + 1
+	maxAttempts := len(lottoDhlotteryRetryDelays) + 1
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
-			delay := lottoAutoCheckRetryDelays[attempt-1]
+			delay := lottoDhlotteryRetryDelays[attempt-1]
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
@@ -361,7 +452,7 @@ func fetchLottoDrawWithShortRetry(ctx context.Context, drwNo int) (*dhlotteryRes
 			return data, nil
 		}
 		lastErr = err
-		log.Printf("로또: %d회차 조회 실패 (%d/%d회 시도): %v", drwNo, attempt+1, maxAttempts, err)
+		log.Printf("로또: dhlottery에서 %d회차 조회 실패 (%d/%d회 시도): %v", drwNo, attempt+1, maxAttempts, err)
 	}
 	return nil, lastErr
 }
@@ -380,12 +471,16 @@ const lottoInsertTimeout = 5 * time.Second
 // 종료한다.
 //
 // 예전의 runLottoCollectionLoop/collectLottoRounds(여러 회차를 세마포어로
-// 동시에 병렬 스크래핑)는 완전히 제거됐다 — dhlottery가 짧은 시간에
-// 몰리는 요청을 차단하는 것으로 보여, "한 번에 최대한 많이 채운다"는
-// 접근 자체가 근본적으로 문제였다. 이제는 한 번에 최대 회차 하나만
-// 조회한다.
+// 동시에 병렬 스크래핑)는 dhlottery를 직접 호출하던 시절 완전히
+// 제거됐었다 — dhlottery가 짧은 시간에 몰리는 요청을 차단하는 것으로
+// 보였기 때문이다. GitHub 데이터셋(정적 파일 서빙)으로 갈아탄 뒤로는 그
+// 위험이 없으므로, 시작 시(또는 토글을 켤 때) catchUpMissingLottoRounds가
+// 밀린 회차 전부를 순차적으로 한 번에 채운다 — 이후 ticker가 도는
+// 평상시 정기 점검(checkForNewLottoRound)은 여전히 한 번에 최대 회차
+// 하나만 확인한다(실제로 새 회차는 일주일에 한 번만 생기므로 그걸로
+// 충분하다).
 func runLottoWeeklyCheckLoop(ctx context.Context, conn *sql.DB) {
-	checkForNewLottoRound(ctx, conn)
+	catchUpMissingLottoRounds(ctx, conn)
 
 	ticker := time.NewTicker(lottoCheckInterval)
 	defer ticker.Stop()
@@ -401,11 +496,15 @@ func runLottoWeeklyCheckLoop(ctx context.Context, conn *sql.DB) {
 	}
 }
 
-// checkForNewLottoRound는 DB의 최신 회차 다음 번호가 이미 발표되었을
-// 시점인지 확인하고, 그렇다면 그 회차 하나만 조회를 시도한다. 아직
-// 발표 전이거나(정상 상황), 재시도를 모두 소진하고도 실패했다면
-// (dhlottery 차단 등 예외 상황) 아무 것도 하지 않고 다음 정기 점검까지
-// 조용히 기다린다 — 이 함수 자체가 실패해도 절대 즉시 재시도하지 않는다.
+// checkForNewLottoRound는 runLottoWeeklyCheckLoop의 ticker가 매
+// lottoCheckInterval(24시간)마다 호출하는 평상시 정기 점검이다. DB의 최신
+// 회차 다음 번호가 이미 발표되었을 시점인지만 확인하고, 그렇다면 그 회차
+// 하나만 조회를 시도한다(재시도 없이 단 한 번) — 실제로 새 회차는
+// 일주일에 한 번만 생기므로 이걸로 충분하다. 서버 시작 시(또는 토글을 켤
+// 때) 밀린 회차가 여러 개 있을 수 있는 경우는 이 함수가 아니라
+// catchUpMissingLottoRounds가 처리한다. 아직 발표 전이거나(정상 상황),
+// 조회에 실패했다면 아무 것도 하지 않고 다음 정기 점검까지 조용히
+// 기다린다 — 이 함수 자체가 실패해도 절대 즉시 재시도하지 않는다.
 func checkForNewLottoRound(ctx context.Context, conn *sql.DB) {
 	now := time.Now()
 	lottoCollectionState.mu.Lock()
@@ -433,15 +532,8 @@ func checkForNewLottoRound(ctx context.Context, conn *sql.DB) {
 
 	log.Printf("로또: %d회차가 이미 발표되었을 시점 — 조회 시도", nextDrwNo)
 
-	// GitHub 데이터셋만 사용한다 — dhlottery 직접 호출(fetchLottoDraw/
-	// fetchLottoDrawWithShortRetry)로의 폴백은 의도적으로 두지 않았다.
-	// dhlottery가 이 서버의 IP를 차단해 자동 수집이 계속 실패했던 것이
-	// 애초에 이 GitHub 소스로 갈아탄 이유였으므로, 여기서 실패했다고 다시
-	// dhlottery로 넘어가 봐야 마찬가지로 차단당해 시간만 낭비하고 오히려
-	// 추가 차단 사유를 만들 뿐이다. 실패하면 다음 정기 점검까지 조용히
-	// 기다린다 — 아래 fetchLottoDraw류 함수는 dhlottery 접근이 다시
-	// 가능해지는 경우를 대비한 백업으로 코드에 남겨뒀을 뿐, 이 경로에서는
-	// 호출하지 않는다.
+	// GitHub 데이터셋만 사용한다 — dhlottery로의 폴백은 없다. 실패하면
+	// 재시도하지 않고 다음 정기 점검까지 조용히 기다린다.
 	data, err := fetchLottoDrawFromGitHub(ctx, nextDrwNo)
 	if err != nil {
 		log.Printf("로또: GitHub 데이터셋에서 %d회차 조회 실패 — 다음 정기 점검까지 대기: %v", nextDrwNo, err)
@@ -469,6 +561,116 @@ func checkForNewLottoRound(ctx context.Context, conn *sql.DB) {
 	matchCtx, matchCancel := context.WithTimeout(context.Background(), lottoInsertTimeout)
 	defer matchCancel()
 	processRetroactivePreviousCycleRecommendations(matchCtx, conn, nextDrwNo, data.DrwNoDate)
+}
+
+// catchUpMissingLottoRounds는 runLottoWeeklyCheckLoop가 시작될 때(서버
+// 시작 시 자동 수집이 켜져 있거나, 사용자가 토글을 켤 때) 딱 한 번만
+// 실행된다. DB 최신 회차와 이론적 최신 회차(theoreticalLatestDrwNo) 사이에
+// 밀린 회차가 몇 개인지부터 파악하고, 있다면 오래된 순서대로 전부 순차
+// 조회해 채운다. checkForNewLottoRound(평상시 정기 점검, 다음 회차 1개만
+// 확인)와 달리 이 함수는 하루 처리 개수 상한을 두지 않는다 — GitHub
+// 데이터셋은 dhlottery와 달리 봇 차단 위험이 낮은 일반 정적 파일 서빙이라,
+// 여러 회차를 한 번에 몰아서 조회해도 안전하다는 전제가 성립하기
+// 때문이다. 그래도 무료 서비스이니 회차 사이에 lottoCatchUpRoundDelay만큼만
+// 예의상 간격을 둔다.
+//
+// 회차 하나가 실패해도(그 회차 파일이 데이터셋에 아직/영영 없는 경우 등)
+// 나머지 회차는 계속 진행한다 — 한 회차의 실패가 이후 회차 전부를 막아서는
+// 안 되기 때문이다. 진행 상황은 lottoCollectionState의 catchingUp/
+// totalPendingCount/processedCount에 기록해 GET
+// /api/lotto/collection/status로 노출하고, 화면은 이를 보고 "N회차
+// 밀려있어 순차적으로 채우는 중입니다"를 보여준다(CollectionToggle.tsx) —
+// 끝나면(catchingUp=false) 안내 문구도 사라진다.
+func catchUpMissingLottoRounds(ctx context.Context, conn *sql.DB) {
+	now := time.Now()
+	lottoCollectionState.mu.Lock()
+	lottoCollectionState.lastCheckedAt = now
+	lottoCollectionState.nextCheckAt = now.Add(lottoCheckInterval)
+	lottoCollectionState.mu.Unlock()
+
+	if conn == nil {
+		log.Println("로또: DB에 연결되어 있지 않아 밀린 회차 확인을 건너뜁니다")
+		return
+	}
+
+	var latestInDB int
+	if err := conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(drw_no), 0) FROM lotto_draws`).Scan(&latestInDB); err != nil {
+		log.Printf("로또: 최신 저장 회차 조회 실패, 밀린 회차 확인을 건너뜁니다: %v", err)
+		return
+	}
+
+	theoretical := theoreticalLatestDrwNo(now)
+	pending := theoretical - latestInDB
+	if pending <= 0 {
+		log.Println("로또: 밀린 회차가 없습니다 — 평상시 정기 점검으로 전환")
+		return
+	}
+
+	log.Printf("로또: %d회차 밀려있음(%d~%d) — 순차적으로 채우기 시작", pending, latestInDB+1, theoretical)
+
+	lottoCollectionState.mu.Lock()
+	lottoCollectionState.catchingUp = true
+	lottoCollectionState.totalPendingCount = pending
+	lottoCollectionState.processedCount = 0
+	lottoCollectionState.mu.Unlock()
+
+	defer func() {
+		lottoCollectionState.mu.Lock()
+		lottoCollectionState.catchingUp = false
+		lottoCollectionState.totalPendingCount = 0
+		lottoCollectionState.processedCount = 0
+		lottoCollectionState.mu.Unlock()
+	}()
+
+	for drwNo := latestInDB + 1; drwNo <= theoretical; drwNo++ {
+		if ctx.Err() != nil {
+			log.Println("로또: 밀린 회차 채우기가 중단 요청으로 종료됨")
+			return
+		}
+
+		data, err := fetchLottoDrawFromGitHubWithRetry(ctx, drwNo, lottoCatchUpRetryDelays)
+		if err != nil {
+			log.Printf("로또: 밀린 회차 채우기 중 %d회차 조회 실패 — 건너뛰고 다음 회차로 계속: %v", drwNo, err)
+		} else if insertErr := func() error {
+			insertCtx, cancel := context.WithTimeout(context.Background(), lottoInsertTimeout)
+			defer cancel()
+			return insertLottoDraw(insertCtx, conn, data)
+		}(); insertErr != nil {
+			log.Printf("로또: 밀린 회차 채우기 중 %d회차 저장 실패 — 건너뛰고 다음 회차로 계속: %v", drwNo, insertErr)
+		} else {
+			lottoCollectionState.mu.Lock()
+			lottoCollectionState.lastCollectedAt = time.Now()
+			lottoCollectionState.mu.Unlock()
+			log.Printf("로또: 밀린 회차 채우기 — %d회차 저장 완료", drwNo)
+
+			matchCtx, matchCancel := context.WithTimeout(context.Background(), lottoInsertTimeout)
+			processRetroactivePreviousCycleRecommendations(matchCtx, conn, drwNo, data.DrwNoDate)
+			matchCancel()
+		}
+
+		lottoCollectionState.mu.Lock()
+		lottoCollectionState.processedCount++
+		lottoCollectionState.mu.Unlock()
+
+		if drwNo < theoretical {
+			select {
+			case <-ctx.Done():
+				log.Println("로또: 밀린 회차 채우기가 중단 요청으로 종료됨")
+				return
+			case <-time.After(lottoCatchUpRoundDelay):
+			}
+		}
+	}
+
+	log.Printf("로또: 밀린 회차 채우기 완료(%d개 처리)", pending)
+
+	// 캐치업 자체가 시간이 걸렸으니, 화면에 보여줄 다음 정기 점검 시각을
+	// 지금 시점 기준으로 다시 계산해둔다 — runLottoWeeklyCheckLoop가 바로
+	// 이어서 time.NewTicker(lottoCheckInterval)를 새로 만들므로 실제 다음
+	// tick 시각과 (오차 없이) 일치한다.
+	lottoCollectionState.mu.Lock()
+	lottoCollectionState.nextCheckAt = time.Now().Add(lottoCheckInterval)
+	lottoCollectionState.mu.Unlock()
 }
 
 // insertLottoDraw는 자동 점검 전용 저장 경로다. drwNoDate를 time.Parse로
