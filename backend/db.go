@@ -228,6 +228,12 @@ func connectRemoteDB(dbURL, authToken string) (*sql.DB, error) {
 	return conn, nil
 }
 
+// collected_at은 이 서버(자동 수집)가 실제로 이 회차를 저장한 시각이다
+// (RFC3339, insertLottoDraw 참고) — drw_date(그 회차의 추첨일, 사람이
+// 읽는 달력 날짜)와는 다른 값이다. 시드 파일 로딩이나 관리자 수동 입력을
+// 통해 들어온 행은 이 컬럼이 NULL로 남는다 — GET
+// /api/lotto/collection/status의 "마지막 성공"은 오직 자동 수집이 실제로
+// 성공한 시각만 의미해야 하기 때문이다.
 const createLottoDrawsTable = `
 CREATE TABLE IF NOT EXISTS lotto_draws (
 	drw_no INTEGER PRIMARY KEY,
@@ -239,7 +245,8 @@ CREATE TABLE IF NOT EXISTS lotto_draws (
 	num5 INTEGER NOT NULL,
 	num6 INTEGER NOT NULL,
 	bonus_no INTEGER NOT NULL,
-	created_at TEXT DEFAULT CURRENT_TIMESTAMP
+	created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+	collected_at TEXT
 )`
 
 // data_hash는 이 인사이트를 생성할 때 실제로 모델에 넘긴 통계 입력
@@ -590,6 +597,12 @@ DELETE FROM news_translation_cache WHERE translated_title = '' AND failure_reaso
 func migrate(conn *sql.DB) error {
 	if _, err := conn.Exec(createLottoDrawsTable); err != nil {
 		return fmt.Errorf("create lotto_draws: %w", err)
+	}
+	if err := ensureColumnExists(conn, "lotto_draws", "collected_at", "collected_at TEXT"); err != nil {
+		return fmt.Errorf("migrate lotto_draws: %w", err)
+	}
+	if err := backfillLottoDrawsCollectedAt(conn); err != nil {
+		return fmt.Errorf("backfill lotto_draws.collected_at: %w", err)
 	}
 	if _, err := conn.Exec(createAIInsightCacheTable); err != nil {
 		return fmt.Errorf("create ai_insight_cache: %w", err)

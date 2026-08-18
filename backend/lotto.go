@@ -80,12 +80,20 @@ var lottoDhlotteryRetryDelays = []time.Duration{
 // 시작하지 않게 한다. 서버 시작 시 기본값은 lottoAutoCollectionDefaultOn에
 // 따른다 — main.go가 이 값을 보고 시작 시점에 자동으로 켤지 결정한다.
 var lottoCollectionState struct {
-	mu              sync.Mutex
-	running         bool
-	cancel          context.CancelFunc
-	lastCollectedAt time.Time // 마지막으로 신규 회차를 성공적으로 저장한 시각
-	lastCheckedAt   time.Time // 마지막으로 점검을 실행한 시각(성공/실패/아직 발표 전 모두 포함)
-	nextCheckAt     time.Time // 다음 정기 점검 예정 시각
+	mu            sync.Mutex
+	running       bool
+	cancel        context.CancelFunc
+	lastCheckedAt time.Time // 마지막으로 점검을 실행한 시각(성공/실패/아직 발표 전 모두 포함)
+	nextCheckAt   time.Time // 다음 정기 점검 예정 시각
+
+	// lastCollectedAt(마지막으로 신규 회차를 성공적으로 저장한 시각)은
+	// 의도적으로 이 구조체에 없다 — 예전에는 여기 메모리 변수로만 있었는데,
+	// 서버가 재시작되면(배포, 크래시, Render 무료 티어의 슬립 후 재기동 등)
+	// 이 값이 항상 제로 값으로 초기화돼 실제로는 최신 회차가 DB에 멀쩡히
+	// 저장되어 있는데도 화면에 "마지막 성공: 아직 없음"이 영구히 표시되는
+	// 사고로 이어졌다. 지금은 lotto_draws.collected_at 컬럼에 영속적으로
+	// 저장하고, queryLottoLastCollectedAt으로 그때그때 DB에서 읽는다 —
+	// insertLottoDraw 문서 주석 참고.
 
 	// catchingUp/totalPendingCount/processedCount는 catchUpMissingLottoRounds가
 	// 밀린 회차 전부를 순차 처리하는 동안만 의미가 있다 — 평상시 정기 점검
@@ -168,14 +176,16 @@ type LottoCollectionStatus struct {
 }
 
 // lottoCollectionStatusSnapshot은 현재 실행 상태와, DB에 실제로 저장된
-// 회차 수를 함께 반환한다.
+// 회차 수를 함께 반환한다. LastCollectedAt은 메모리가 아니라
+// lotto_draws.collected_at에서 매번 새로 읽는다 — 서버 재시작 여부와
+// 무관하게 항상 정확한 값을 보여주기 위해서다(lottoCollectionState 문서
+// 주석 참고).
 func lottoCollectionStatusSnapshot(ctx context.Context, conn *sql.DB) (LottoCollectionStatus, error) {
 	lottoCollectionState.mu.Lock()
 	running := lottoCollectionState.running
 	catchingUp := lottoCollectionState.catchingUp
 	totalPendingCount := lottoCollectionState.totalPendingCount
 	processedCount := lottoCollectionState.processedCount
-	lastCollectedAt := lottoCollectionState.lastCollectedAt
 	lastCheckedAt := lottoCollectionState.lastCheckedAt
 	nextCheckAt := lottoCollectionState.nextCheckAt
 	lottoCollectionState.mu.Unlock()
@@ -185,9 +195,6 @@ func lottoCollectionStatusSnapshot(ctx context.Context, conn *sql.DB) (LottoColl
 		CatchingUp:        catchingUp,
 		TotalPendingCount: totalPendingCount,
 		ProcessedCount:    processedCount,
-	}
-	if !lastCollectedAt.IsZero() {
-		status.LastCollectedAt = lastCollectedAt.Format(time.RFC3339)
 	}
 	if !lastCheckedAt.IsZero() {
 		status.LastCheckedAt = lastCheckedAt.Format(time.RFC3339)
@@ -202,7 +209,45 @@ func lottoCollectionStatusSnapshot(ctx context.Context, conn *sql.DB) (LottoColl
 	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM lotto_draws`).Scan(&status.SavedCount); err != nil {
 		return status, fmt.Errorf("count lotto_draws: %w", err)
 	}
+
+	lastCollectedAt, err := queryLottoLastCollectedAt(ctx, conn)
+	if err != nil {
+		return status, fmt.Errorf("query lotto_draws.collected_at: %w", err)
+	}
+	if !lastCollectedAt.IsZero() {
+		status.LastCollectedAt = lastCollectedAt.Format(time.RFC3339)
+	}
 	return status, nil
+}
+
+// queryLottoLastCollectedAt은 자동 수집이 실제로 마지막으로 신규 회차를
+// 저장한 시각을 반환한다. drw_no로 정렬해 가장 최신 회차의 collected_at을
+// 고른다 — 여러 행의 collected_at 문자열을 그대로 비교(MAX/ORDER BY
+// collected_at)하면, 실제 수집 시각(time.Now(), 보통 UTC라 "Z" 접미사)과
+// 백필된 값(KST 오프셋, backfillLottoDrawsCollectedAt 참고)의 표기 형식이
+// 서로 달라 문자열 비교만으로는 시간 순서가 뒤집힐 수 있다 — 반면
+// drw_no는 항상 회차 발표 순서와 정확히 일치하는 정수라 이런 문제가 없다.
+// collected_at이 아직 하나도 없으면(예: DB는 비어 있지 않은데 이 컬럼
+// 자체가 방금 추가돼 아직 백필 전인 극히 짧은 순간) 제로 값을 반환한다.
+func queryLottoLastCollectedAt(ctx context.Context, conn *sql.DB) (time.Time, error) {
+	var raw sql.NullString
+	err := conn.QueryRowContext(ctx,
+		`SELECT collected_at FROM lotto_draws WHERE collected_at IS NOT NULL AND collected_at != '' ORDER BY drw_no DESC LIMIT 1`,
+	).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !raw.Valid || raw.String == "" {
+		return time.Time{}, nil
+	}
+	t, err := time.Parse(time.RFC3339, raw.String)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse collected_at %q: %w", raw.String, err)
+	}
+	return t, nil
 }
 
 func mustLoadLocation(name string) *time.Location {
@@ -547,10 +592,6 @@ func checkForNewLottoRound(ctx context.Context, conn *sql.DB) {
 		log.Printf("로또: %d회차 저장 실패: %v", nextDrwNo, err)
 		return
 	}
-
-	lottoCollectionState.mu.Lock()
-	lottoCollectionState.lastCollectedAt = time.Now()
-	lottoCollectionState.mu.Unlock()
 	log.Printf("로또: %d회차 저장 완료", nextDrwNo)
 
 	// 새 회차가 저장됐으니, 이 회차가 "실제 결과"로 확정하는 직전 주기의
@@ -638,9 +679,6 @@ func catchUpMissingLottoRounds(ctx context.Context, conn *sql.DB) {
 		}(); insertErr != nil {
 			log.Printf("로또: 밀린 회차 채우기 중 %d회차 저장 실패 — 건너뛰고 다음 회차로 계속: %v", drwNo, insertErr)
 		} else {
-			lottoCollectionState.mu.Lock()
-			lottoCollectionState.lastCollectedAt = time.Now()
-			lottoCollectionState.mu.Unlock()
 			log.Printf("로또: 밀린 회차 채우기 — %d회차 저장 완료", drwNo)
 
 			matchCtx, matchCancel := context.WithTimeout(context.Background(), lottoInsertTimeout)
@@ -687,18 +725,82 @@ func catchUpMissingLottoRounds(ctx context.Context, conn *sql.DB) {
 // upsertLottoDrawManual(ON CONFLICT DO UPDATE)을 대신 쓴다 — 이 함수를
 // 공유하지 않는 이유는, 자동 수집 경로에서는 dhlottery의 실제 응답을
 // 실수로 다른 값으로 덮어쓸 여지 자체를 원천 차단하고 싶기 때문이다.
+//
+// collected_at은 이 INSERT가 실제로 실행되는 지금 이 순간(자동 수집이
+// 회차 조회에 성공해 저장하는 시각)을 그대로 기록한다 — checkForNewLottoRound
+// 와 catchUpMissingLottoRounds 둘 다 신규 회차 저장에 이 함수 하나만
+// 쓰므로, 두 경로 모두 자동으로 동일하게 기록된다. GET
+// /api/lotto/collection/status의 "마지막 성공"은 queryLottoLastCollectedAt이
+// 이 컬럼에서 직접 읽는다 — 예전에는 메모리 변수(lottoCollectionState)에만
+// 있어서 서버가 재시작되면(배포/크래시/슬립 후 재기동) 실제로는 최신
+// 회차가 DB에 멀쩡히 있는데도 "아직 없음"으로 되돌아가는 사고가 있었다.
+// ON CONFLICT DO NOTHING이라 이미 있는 회차라면 collected_at도(다른
+// 컬럼들과 마찬가지로) 건드리지 않는다 — 최초로 실제 수집에 성공한
+// 시각을 그대로 보존한다.
 func insertLottoDraw(ctx context.Context, conn *sql.DB, d *dhlotteryResponse) error {
 	if _, err := time.Parse("2006-01-02", d.DrwNoDate); err != nil {
 		return fmt.Errorf("parse drwNoDate %q: %w", d.DrwNoDate, err)
 	}
 
 	_, err := conn.ExecContext(ctx, `
-		INSERT INTO lotto_draws (drw_no, drw_date, num1, num2, num3, num4, num5, num6, bonus_no)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO lotto_draws (drw_no, drw_date, num1, num2, num3, num4, num5, num6, bonus_no, collected_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(drw_no) DO NOTHING`,
 		d.DrwNo, d.DrwNoDate, d.DrwtNo1, d.DrwtNo2, d.DrwtNo3, d.DrwtNo4, d.DrwtNo5, d.DrwtNo6, d.BnusNo,
+		time.Now().Format(time.RFC3339),
 	)
 	return err
+}
+
+// backfillLottoDrawsCollectedAt은 이 collected_at 컬럼이 추가되기 전에
+// 이미 저장되어 있던 회차들(collected_at이 NULL)에, 각 회차 고유의
+// 추첨일(drw_date)에 lottoDrawHourKST(추첨 결과가 확정되는 기준 시각,
+// theoreticalLatestDrwNo와 동일한 관례)를 적용한 값을 채워 넣는다. 실제
+// 그 회차가 이 서버에 수집된 정확한 시각은 이제 와서 알 수 없지만
+// (기록 자체가 없었다), 완전히 비워두는 것보다는 이 추정치가 "마지막
+// 성공"에 훨씬 더 유용한 값을 보여준다 — migrate()가 매번 호출해도
+// 안전하도록 이미 채워진 행은 건드리지 않는다(WHERE collected_at IS
+// NULL).
+func backfillLottoDrawsCollectedAt(conn *sql.DB) error {
+	rows, err := conn.Query(`SELECT drw_no, drw_date FROM lotto_draws WHERE collected_at IS NULL`)
+	if err != nil {
+		return fmt.Errorf("query lotto_draws rows needing collected_at backfill: %w", err)
+	}
+	type pendingRow struct {
+		drwNo   int
+		drwDate time.Time
+	}
+	var pending []pendingRow
+	for rows.Next() {
+		var p pendingRow
+		// drw_date를 string이 아니라 time.Time으로 스캔한다 — go-libsql은
+		// TEXT 컬럼에 담긴 날짜 형태 값을 string으로 스캔하면 원본 그대로가
+		// 아니라 자체적으로 다시 포맷한 전체 RFC3339("2002-12-07T00:00:00Z")
+		// 로 돌려주는 것이 실제로 확인됐다(queryLottoHistoryAsOf가 이미 같은
+		// 이유로 drw_date를 time.Time으로 스캔한다) — time.Time으로 스캔하면
+		// 이 표기 문제 자체를 겪지 않는다.
+		if err := rows.Scan(&p.drwNo, &p.drwDate); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan lotto_draws row needing collected_at backfill: %w", err)
+		}
+		pending = append(pending, p)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read lotto_draws rows needing collected_at backfill: %w", err)
+	}
+	rows.Close()
+
+	for _, p := range pending {
+		drawDate := p.drwDate.In(kst)
+		estimate := time.Date(drawDate.Year(), drawDate.Month(), drawDate.Day(), lottoDrawHourKST, 0, 0, 0, kst)
+		if _, err := conn.Exec(`UPDATE lotto_draws SET collected_at = ? WHERE drw_no = ?`, estimate.Format(time.RFC3339), p.drwNo); err != nil {
+			return fmt.Errorf("backfill collected_at for drwNo=%d: %w", p.drwNo, err)
+		}
+	}
+	if len(pending) > 0 {
+		log.Printf("로또: %d개 회차의 collected_at을 각자의 추첨일 기준으로 백필했습니다", len(pending))
+	}
+	return nil
 }
 
 // queryLottoHistory는 항상 DB에 저장된 현재 최신 회차부터 거슬러 올라간

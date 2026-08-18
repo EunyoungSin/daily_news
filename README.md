@@ -731,6 +731,33 @@ GitHub 소스가 계속 실패하면 아래 "관리자 API"로 수동 입력할 
 응답은 `lastCollectedAt`(마지막으로 신규 회차를 저장한 시각),
 `lastCheckedAt`/`nextCheckAt`(마지막/다음 점검 시각), `savedCount`를 담습니다.
 
+**`lastCollectedAt`은 `lotto_draws.collected_at` 컬럼에서 읽습니다(실제로
+겪은 버그, 2026-08) — 서버 메모리가 아닙니다.** 원래는
+`lottoCollectionState`(서버 프로세스 메모리)에만 있었는데, 서버가
+재시작되면(배포, 크래시, Render 무료 티어의 슬립 후 재기동 등) 이 값이
+항상 제로 값으로 초기화돼, 실제로는 최신 회차가 DB에 멀쩡히 저장되어
+있는데도 화면에 "마지막 성공: 아직 없음"이 영구히 표시되는 사고로
+이어졌습니다. 지금은 `insertLottoDraw`(자동 수집이 신규 회차를 저장하는
+유일한 경로 — `checkForNewLottoRound`/`catchUpMissingLottoRounds` 둘 다
+이 함수 하나만 쓰므로 두 경로 모두 자동으로 동일하게 기록됩니다)가 저장
+시각을 `collected_at`에 함께 기록하고, `queryLottoLastCollectedAt`이 이
+컬럼에서 매번 새로 읽습니다 — 여러 행의 `collected_at`을 문자열로 그대로
+비교(`MAX`/`ORDER BY collected_at`)하지 않고 `drw_no`(항상 회차 발표
+순서와 정확히 일치하는 정수) 기준으로 최신 회차를 고르는데, 이는 실제
+수집 시각(`time.Now()`, 보통 UTC라 "Z" 접미사)과 아래 백필된 값(KST
+오프셋)의 표기 형식이 서로 달라 문자열 비교만으로는 시간 순서가 뒤집힐
+수 있기 때문입니다.
+
+이 컬럼이 추가되기 전에 이미 저장되어 있던 회차들(`collected_at`이
+`NULL`)은 서버가 시작할 때 `backfillLottoDrawsCollectedAt`이 각 회차
+고유의 추첨일(`drw_date`)에 `lottoDrawHourKST`(추첨 결과가 확정되는
+기준 시각, `theoreticalLatestDrwNo`와 동일한 관례)를 적용한 값으로 한
+번만 채웁니다 — 실제 그 회차가 이 서버에 수집된 정확한 시각은 이제 와서
+알 수 없지만, 완전히 비워두는 것보다는 이 추정치가 "마지막 성공"에 훨씬
+더 유용합니다. 시드 파일 로딩이나 관리자 수동 입력(`upsertLottoDrawManual`)
+을 통해 들어온 행은 `collected_at`이 계속 `NULL`로 남습니다 — "마지막
+성공"은 자동 수집이 실제로 성공한 시각만을 의미해야 하기 때문입니다.
+
 ### 3. 관리자 API — GitHub 소스가 막혔을 때의 수동 대체 수단
 
 자동 수집이 계속 실패한다면(예: GitHub 저장소가 더 이상 유지되지 않거나
@@ -907,7 +934,8 @@ CREATE TABLE lotto_draws (
   num1 INTEGER, num2 INTEGER, num3 INTEGER,
   num4 INTEGER, num5 INTEGER, num6 INTEGER,
   bonus_no INTEGER,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  collected_at TEXT  -- 자동 수집이 실제로 이 회차를 저장한 시각(위 "2. 자동 수집" 참고). 시드/관리자 수동 입력 행은 NULL.
 );
 
 CREATE TABLE ai_insight_cache (
