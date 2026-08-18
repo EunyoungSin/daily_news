@@ -181,14 +181,23 @@ func TestGetLottoPreviousRecommendationResultReturnsFixedOrder(t *testing.T) {
 	conn := openTempLottoTestDB(t)
 	ctx := context.Background()
 
-	for i := 1; i <= 5; i++ {
-		seedLottoDrawForTest(t, conn, i, "2026-01-0"+string(rune('0'+i)), []int{i, i + 6, i + 12, i + 18, i + 24, i + 30}, 45)
+	// findLottoDrawClosingCycle이 날짜로 정확히 회차를 찾으므로(latestDrwNo를
+	// 그대로 믿지 않는다 — 이 파일 상단의 버그 수정 참고), 회차 날짜를 실제
+	// 로또처럼 토요일 7일 간격으로 정확히 맞춰서 심어야 한다. 2026-01-03은
+	// 실제 토요일이다.
+	drawDates := []string{"2026-01-03", "2026-01-10", "2026-01-17", "2026-01-24", "2026-01-31", "2026-02-07"}
+	for i, date := range drawDates[:5] {
+		n := i + 1
+		seedLottoDrawForTest(t, conn, n, date, []int{n, n + 6, n + 12, n + 18, n + 24, n + 30}, 45)
 	}
 	actualNumbers := []int{2, 8, 14, 20, 26, 32}
-	seedLottoDrawForTest(t, conn, 6, "2026-01-10", actualNumbers, 45)
+	seedLottoDrawForTest(t, conn, 6, drawDates[5], actualNumbers, 45)
 
-	now := time.Date(2026, 1, 11, 12, 0, 0, 0, kst) // 회차 6이 나온 뒤의 "지금"
-	results := getLottoPreviousRecommendationResult(ctx, conn, now, 6, actualNumbers)
+	// 회차 6(2026-02-07 토요일)이 마감하는 사이클은 2026-02-01(일요일)에
+	// 시작한다 — now를 그 다음 주(2026-02-08~2026-02-15) 안으로 잡아야
+	// now.AddDate(0,0,-7)이 2026-02-01 사이클로 계산된다.
+	now := time.Date(2026, 2, 9, 12, 0, 0, 0, kst)
+	results := getLottoPreviousRecommendationResult(ctx, conn, now, 6)
 
 	if len(results) != 3 {
 		t.Fatalf("expected 3 results (trend, regression, uniform), got %d", len(results))
@@ -203,6 +212,213 @@ func TestGetLottoPreviousRecommendationResultReturnsFixedOrder(t *testing.T) {
 		}
 		if !equalIntSlices(results[i].ActualNumbers, actualNumbers) {
 			t.Errorf("results[%d].ActualNumbers = %v, want %v", i, results[i].ActualNumbers, actualNumbers)
+		}
+	}
+}
+
+// TestGetLottoPreviousRecommendationResultUsesCorrectClosingRoundNotLatest는
+// 실제 운영 DB에서 발견된 근본 버그를 재현한다: 예전 코드는
+// "DB에 저장된 최신 회차 = previousCycleStart가 기다리던 바로 그 회차"라고
+// 가정하고 latestNumbers를 그대로 대조에 썼는데, 자동 수집이 새 회차를
+// 아직 못 가져온 지연 구간에는 이 가정이 깨진다. 이 테스트는 회차 7이
+// 이미 DB에 있어도(즉 "최신 회차"가 7이어도), previousCycleStart가
+// 실제로 기다리는 회차가 6이면 반드시 회차 6의 당첨번호와 대조해야
+// 함을 확인한다 — 7과 잘못 대조되면 안 된다.
+func TestGetLottoPreviousRecommendationResultUsesCorrectClosingRoundNotLatest(t *testing.T) {
+	conn := openTempLottoTestDB(t)
+	ctx := context.Background()
+
+	// 1~7회차를 실제 로또처럼 토요일 7일 간격으로 심는다.
+	drawDates := []string{"2026-01-03", "2026-01-10", "2026-01-17", "2026-01-24", "2026-01-31", "2026-02-07", "2026-02-14"}
+	round6Numbers := []int{2, 8, 14, 20, 26, 32}
+	round7Numbers := []int{5, 11, 17, 23, 29, 35}
+	for i, date := range drawDates {
+		n := i + 1
+		numbers := []int{n, n + 6, n + 12, n + 18, n + 24, n + 30}
+		if n == 6 {
+			numbers = round6Numbers
+		}
+		if n == 7 {
+			numbers = round7Numbers
+		}
+		seedLottoDrawForTest(t, conn, n, date, numbers, 45)
+	}
+
+	// 회차 6(2026-02-07)이 마감하는 사이클은 2026-02-01 시작. now를 그
+	// 사이클의 "지난주"로 잡으려면(now-7일이 2026-02-01 사이클에 속하려면)
+	// now는 2026-02-08~2026-02-15 사이여야 한다 — 이때 DB에는 이미 회차
+	// 7까지 저장되어 있다(최신 회차 = 7).
+	now := time.Date(2026, 2, 9, 12, 0, 0, 0, kst)
+	results := getLottoPreviousRecommendationResult(ctx, conn, now, 7)
+
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+	for _, r := range results {
+		if r.ActualDrwNo != 6 {
+			t.Errorf("mode %s: ActualDrwNo = %d, want 6 (must match the specific round closing this cycle, not the latest round 7 in DB)", r.Mode, r.ActualDrwNo)
+		}
+		if !equalIntSlices(r.ActualNumbers, round6Numbers) {
+			t.Errorf("mode %s: ActualNumbers = %v, want %v (round 6's own numbers, not round 7's %v)", r.Mode, r.ActualNumbers, round6Numbers, round7Numbers)
+		}
+	}
+}
+
+// TestGetLottoPreviousRecommendationResultReturnsNilWhenClosingRoundNotYetCollected
+// 는 findLottoDrawClosingCycle이 찾는 회차가 아직 수집되지 않은 경우(자동
+// 수집 지연 등) nil을 반환하고 절대 다른(더 오래된) 회차로 대체해 잘못된
+// 결과를 캐싱하지 않는지 확인한다.
+func TestGetLottoPreviousRecommendationResultReturnsNilWhenClosingRoundNotYetCollected(t *testing.T) {
+	conn := openTempLottoTestDB(t)
+	ctx := context.Background()
+
+	// 회차 1~5만 심는다(2026-01-03 ~ 2026-01-31) — 회차 6(2026-02-07)은
+	// 아직 수집되지 않은 상태를 흉내낸다.
+	drawDates := []string{"2026-01-03", "2026-01-10", "2026-01-17", "2026-01-24", "2026-01-31"}
+	for i, date := range drawDates {
+		n := i + 1
+		seedLottoDrawForTest(t, conn, n, date, []int{n, n + 6, n + 12, n + 18, n + 24, n + 30}, 45)
+	}
+
+	// 회차 6이 마감할 사이클(2026-02-01 시작)의 "지난주"에 해당하는 now.
+	now := time.Date(2026, 2, 9, 12, 0, 0, 0, kst)
+	results := getLottoPreviousRecommendationResult(ctx, conn, now, 5)
+
+	if results != nil {
+		t.Errorf("expected nil (closing round not yet collected), got %d results", len(results))
+	}
+}
+
+// TestComputeLottoRecommendationMatchForCycleMatchesReportedRealWorldCases는
+// 실제로 잘못 계산되어 사용자가 보고한 두 사례를 정확한 값으로 재검증한다:
+//  1. 추천 [1,3,9,20,38,39] vs 실제 [10,20,23,34,37,40] → 정답은 20 하나만
+//     일치(1개)인데, 예전에는 matched_numbers가 "38"로 잘못 저장되어 있었다
+//     (38은 실제로는 직전 회차 1236의 당첨번호였다 — 잘못된 회차와 대조된
+//     결과가 캐싱된 것).
+//  2. 추천 [10,11,16,31,32,40] vs 실제 [10,20,23,34,37,40] → 정답은 10과
+//     40, 2개가 일치하는데, 예전에는 matched_count가 0으로 저장되어 있었다.
+func TestComputeLottoRecommendationMatchForCycleMatchesReportedRealWorldCases(t *testing.T) {
+	conn := openTempLottoTestDB(t)
+	ctx := context.Background()
+
+	for i := 1; i <= 5; i++ {
+		seedLottoDrawForTest(t, conn, i, "2026-01-0"+string(rune('0'+i)), []int{i, i + 10, i + 20, i + 24, i + 28, i + 32}, 45)
+	}
+	actualDrwNo := 6
+	actualNumbers := []int{10, 20, 23, 34, 37, 40}
+	seedLottoDrawForTest(t, conn, actualDrwNo, "2026-01-10", actualNumbers, 45)
+
+	cases := []struct {
+		name           string
+		cycleStart     string
+		mode           string
+		recommended    []int
+		wantCount      int
+		wantMatchedSet []int
+	}{
+		{"case1_trend", "2026-01-01", lottoModeTrend, []int{1, 3, 9, 20, 38, 39}, 1, []int{20}},
+		{"case2_uniform", "2026-01-02", lottoModeUniform, []int{10, 11, 16, 31, 32, 40}, 2, []int{10, 40}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cycleStart := tc.cycleStart
+			set := LottoRecommendationSet{Numbers: tc.recommended, Stats: LottoRecommendationStats{BandDistribution: map[string]int{}}}
+			if err := insertLottoRecommendationIfAbsent(ctx, conn, cycleStart, tc.mode, 5, "hash-"+tc.name, set, time.Now()); err != nil {
+				t.Fatalf("seed recommendation: %v", err)
+			}
+
+			match, err := computeLottoRecommendationMatchForCycle(ctx, conn, cycleStart, tc.mode, 5, actualDrwNo, actualNumbers)
+			if err != nil {
+				t.Fatalf("compute match: %v", err)
+			}
+			if match.MatchedCount != tc.wantCount {
+				t.Errorf("MatchedCount = %d, want %d", match.MatchedCount, tc.wantCount)
+			}
+			if !equalIntSlices(match.MatchedNumbers, tc.wantMatchedSet) {
+				t.Errorf("MatchedNumbers = %v, want %v", match.MatchedNumbers, tc.wantMatchedSet)
+			}
+		})
+	}
+}
+
+// TestOverlapNumbersRandomCases는 overlapNumbers가 완전히 새로운 임의의
+// 추천/실제 번호 조합에서도 일반적으로 정확한지(순서·중복과 무관하게
+// 값 기반 Set 교집합으로만 판단하는지) 폭넓게 검증한다.
+func TestOverlapNumbersRandomCases(t *testing.T) {
+	cases := []struct {
+		name string
+		rec  []int
+		act  []int
+		want []int
+	}{
+		{"no overlap", []int{1, 2, 3, 4, 5, 6}, []int{7, 8, 9, 10, 11, 12}, nil},
+		{"all six match, different order", []int{5, 3, 45, 1, 20, 12}, []int{45, 1, 3, 12, 5, 20}, []int{1, 3, 5, 12, 20, 45}},
+		{"single overlap at the boundary values", []int{1, 10, 20, 30, 40, 45}, []int{1, 11, 21, 31, 41, 44}, []int{1}},
+		{"three overlaps scattered", []int{2, 9, 17, 23, 31, 44}, []int{2, 8, 17, 24, 31, 45}, []int{2, 17, 31}},
+		{"overlap only via the smallest and largest numbers", []int{1, 45, 22, 23, 24, 25}, []int{1, 45, 2, 3, 4, 5}, []int{1, 45}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := overlapNumbers(tc.rec, tc.act)
+			if !equalIntSlices(got, tc.want) {
+				t.Errorf("overlapNumbers(%v, %v) = %v, want %v", tc.rec, tc.act, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestComputeLottoRecommendationMatchForCycleModesAreIndependent는 세
+// 모드(trend/regression/uniform)가 같은 사이클 안에서도 서로 다른 추천
+// 번호를 가질 때 각자 독립적으로 정확히 계산되는지 확인한다 — 한 모드의
+// 계산이 다른 모드의 matched_count/matched_numbers에 영향을 주는 변수
+// 재사용 버그가 없는지가 핵심이다.
+func TestComputeLottoRecommendationMatchForCycleModesAreIndependent(t *testing.T) {
+	conn := openTempLottoTestDB(t)
+	ctx := context.Background()
+
+	for i := 1; i <= 5; i++ {
+		seedLottoDrawForTest(t, conn, i, "2026-03-0"+string(rune('0'+i)), []int{i, i + 10, i + 20, i + 24, i + 28, i + 32}, 45)
+	}
+	actualNumbers := []int{3, 14, 25, 33, 40, 45}
+	seedLottoDrawForTest(t, conn, 6, "2026-03-10", actualNumbers, 45)
+
+	cycleStart := "2026-03-04"
+	sets := map[string][]int{
+		lottoModeTrend:      {3, 7, 11, 15, 19, 23}, // 겹침: {3} -> 1개
+		lottoModeRegression: {14, 25, 33, 1, 2, 4},  // 겹침: {14,25,33} -> 3개
+		lottoModeUniform:    {5, 6, 8, 9, 10, 12},   // 겹침: 없음 -> 0개
+	}
+	wantCounts := map[string]int{lottoModeTrend: 1, lottoModeRegression: 3, lottoModeUniform: 0}
+	wantMatched := map[string][]int{
+		lottoModeTrend:      {3},
+		lottoModeRegression: {14, 25, 33},
+		lottoModeUniform:    nil,
+	}
+
+	for mode, numbers := range sets {
+		set := LottoRecommendationSet{Numbers: numbers, Stats: LottoRecommendationStats{BandDistribution: map[string]int{}}}
+		if err := insertLottoRecommendationIfAbsent(ctx, conn, cycleStart, mode, 5, "hash-"+mode, set, time.Now()); err != nil {
+			t.Fatalf("seed recommendation for mode %s: %v", mode, err)
+		}
+	}
+
+	// 세 모드를 일부러 뒤섞인 순서로 계산해, 앞선 모드의 계산 결과가 뒤
+	// 모드에 잘못 넘어가지 않는지도 함께 확인한다.
+	callOrder := []string{lottoModeRegression, lottoModeUniform, lottoModeTrend}
+	for _, mode := range callOrder {
+		match, err := computeLottoRecommendationMatchForCycle(ctx, conn, cycleStart, mode, 5, 6, actualNumbers)
+		if err != nil {
+			t.Fatalf("compute match for mode %s: %v", mode, err)
+		}
+		if match.MatchedCount != wantCounts[mode] {
+			t.Errorf("mode %s: MatchedCount = %d, want %d", mode, match.MatchedCount, wantCounts[mode])
+		}
+		if !equalIntSlices(match.MatchedNumbers, wantMatched[mode]) {
+			t.Errorf("mode %s: MatchedNumbers = %v, want %v", mode, match.MatchedNumbers, wantMatched[mode])
+		}
+		if !equalIntSlices(match.Numbers, sets[mode]) {
+			t.Errorf("mode %s: Numbers = %v, want %v (leaked another mode's recommended set)", mode, match.Numbers, sets[mode])
 		}
 	}
 }

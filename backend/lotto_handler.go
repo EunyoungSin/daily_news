@@ -127,7 +127,7 @@ func buildLottoData(ctx context.Context, conn *sql.DB, recommendationMode string
 
 	now := time.Now()
 	recommendation := getLottoRecommendation(ctx, conn, history, frequency, latest.DrwNo, recommendationMode, now)
-	previousResult := getLottoPreviousRecommendationResult(ctx, conn, now, latest.DrwNo, latest.Numbers)
+	previousResult := getLottoPreviousRecommendationResult(ctx, conn, now, latest.DrwNo)
 
 	return &LottoData{
 		Latest:                       latest,

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"sort"
 	"strconv"
@@ -322,6 +323,47 @@ func processRetroactivePreviousCycleRecommendations(ctx context.Context, conn *s
 	}
 }
 
+// findLottoDrawClosingCycle은 cycleStart("YYYY-MM-DD", 일요일 06:00 KST가
+// 시작하는 사이클)의 추천을 "마감하는" 실제 회차 — 그 사이클의 6일 뒤인
+// 토요일에 추첨된 회차 — 를 찾는다. lotto_draws의 drw_date가 항상
+// "YYYY-MM-DD" 형태로(insertLottoDraw 문서 주석 참고) 정확히 그 토요일
+// 날짜로 저장되므로, "가장 최신 회차가 곧 이 사이클의 결과"라고 가정하지
+// 않고 날짜로 정확히 짚어서 찾는다. found=false면 그 회차가 아직
+// 수집되지 않았다는 뜻이다(자동 수집이 지연되는 등) — 이 경우 호출자는
+// "아직 결과 없음"으로 조용히 처리해야 하며, 그 대신 다른(더 오래된)
+// 회차를 결과로 써서는 절대 안 된다.
+//
+// 이 함수가 반드시 필요했던 이유(실제 버그): 예전
+// getLottoPreviousRecommendationResult는 "지금 DB에 저장된 최신 회차가
+// previousCycleStart가 기다리던 바로 그 회차"라고 그냥 가정하고
+// latestDrwNo/latestNumbers를 그대로 넘겼다. 하지만 자동 수집이 새 회차를
+// 아직 못 가져온 짧은 지연 구간에는 "최신 회차"가 실제로는 그 이전
+// 사이클의 결과였는데도, 계산된 matched_count/matched_numbers가
+// (틀린 값인 채로) DB에 영구 캐싱되어(lookupLottoRecommendationMatch가
+// "이미 계산됨"으로 판단해 다시는 재계산하지 않음) 나중에 진짜 회차가
+// 수집된 뒤에도 절대 스스로 고쳐지지 않는 사고로 이어졌다(실측: 회차
+// 1236 수집 지연 중 GET /api/lotto가 회차 1237 사이클의 결과를 1236의
+// 당첨번호와 잘못 대조해 캐싱함).
+func findLottoDrawClosingCycle(ctx context.Context, conn *sql.DB, cycleStart string) (drwNo int, numbers []int, found bool, err error) {
+	cycleStartDate, err := time.ParseInLocation("2006-01-02", cycleStart, kst)
+	if err != nil {
+		return 0, nil, false, fmt.Errorf("parse cycleStart %q: %w", cycleStart, err)
+	}
+	closeDate := cycleStartDate.AddDate(0, 0, 6).Format("2006-01-02")
+
+	var n1, n2, n3, n4, n5, n6 int
+	err = conn.QueryRowContext(ctx,
+		`SELECT drw_no, num1, num2, num3, num4, num5, num6 FROM lotto_draws WHERE drw_date = ?`, closeDate,
+	).Scan(&drwNo, &n1, &n2, &n3, &n4, &n5, &n6)
+	if err == sql.ErrNoRows {
+		return 0, nil, false, nil
+	}
+	if err != nil {
+		return 0, nil, false, err
+	}
+	return drwNo, []int{n1, n2, n3, n4, n5, n6}, true, nil
+}
+
 // getLottoPreviousRecommendationResult는 GET /api/lotto가 매 요청 호출하는
 // 읽기 경로다. "지금" 사이클보다 정확히 한 주기 전(now.AddDate(0,0,-7)
 // 기준으로 계산한 사이클)의 3개 모드 결과를 항상 trend -> regression ->
@@ -330,17 +372,35 @@ func processRetroactivePreviousCycleRecommendations(ctx context.Context, conn *s
 // (이미 계산되어 있으면 DB 조회만으로 즉시 끝난다), 그 훅이 어떤 이유로든
 // 아직 못 탄 사이클(예: 이 기능이 배포되기 전의 과거 데이터)에 대해서도
 // 이 요청 시점에 스스로 복구(사후 계산)한다.
-func getLottoPreviousRecommendationResult(ctx context.Context, conn *sql.DB, now time.Time, latestDrwNo int, latestNumbers []int) []LottoRecommendationMatch {
+//
+// latestDrwNo는 오직 "아직 회차가 하나도 없다"는 초기 상태를 걸러내는
+// 저렴한 가드로만 쓴다 — 실제 대조 대상 회차는 findLottoDrawClosingCycle로
+// previousCycleStart에서 독립적으로 다시 찾는다(latestNumbers는 더 이상
+// 쓰지 않는다). findLottoDrawClosingCycle 문서 주석 참고 — "최신 회차 =
+// 이 사이클의 결과"라는 가정이 실제 버그의 원인이었다.
+func getLottoPreviousRecommendationResult(ctx context.Context, conn *sql.DB, now time.Time, latestDrwNo int) []LottoRecommendationMatch {
 	if latestDrwNo <= 1 {
 		return nil
 	}
 
 	previousCycleStart := lottoCycleStartDate(now.AddDate(0, 0, -7)).Format("2006-01-02")
-	asOfDrwNo := latestDrwNo - 1
+
+	actualDrwNo, actualNumbers, found, err := findLottoDrawClosingCycle(ctx, conn, previousCycleStart)
+	if err != nil {
+		log.Printf("로또: 지난주 추천 결과 조회 실패(cycle=%s) — 실제 결과 회차 조회 오류: %v", previousCycleStart, err)
+		return nil
+	}
+	if !found {
+		// 이 사이클을 마감하는 회차가 아직 수집되지 않았다 — 조용히
+		// 생략한다(다음 요청 때 그 회차가 수집된 뒤 다시 시도하면 스스로
+		// 채워진다).
+		return nil
+	}
+	asOfDrwNo := actualDrwNo - 1
 
 	results := make([]LottoRecommendationMatch, 0, len(lottoRecommendationModes))
 	for _, mode := range lottoRecommendationModes {
-		match, err := computeLottoRecommendationMatchForCycle(ctx, conn, previousCycleStart, mode, asOfDrwNo, latestDrwNo, latestNumbers)
+		match, err := computeLottoRecommendationMatchForCycle(ctx, conn, previousCycleStart, mode, asOfDrwNo, actualDrwNo, actualNumbers)
 		if err != nil {
 			log.Printf("로또: 지난주 추천 결과 조회 실패(cycle=%s, mode=%s): %v", previousCycleStart, mode, err)
 			continue
